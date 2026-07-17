@@ -1,0 +1,33 @@
+{
+  "$comment": "Porte 1:1 do CUSTO_PRODUTO do dashboard legado (index.html, linhas 3116-3176). NÃO reconciliado com Custos_para_mercado_livre.xlsx — divergências documentadas em tests/products.service.test.ts e no relatório da Fase 2. O campo 'ordem' torna a precedência explícita (no legado era a ordem de inserção do objeto JS): a PRIMEIRA regra, em ordem crescente, cujo match casa, cujo tipo casa (quando presente) e cuja exclusão NÃO casa, vence. Valores em reais (BRL), exatamente como no legado.",
+  "versao": 1,
+  "moeda": "BRL",
+  "fonte": "dashboard_legado",
+  "regras": [
+    { "ordem": 1,  "id": "alem_rio_branco",      "custoUnitario": 14.15, "match": ["além do rio", "alem do rio"], "tipo": ["branco", "white"], "exclui": ["rose", "rosé", "frisante"] },
+    { "ordem": 2,  "id": "alem_rio_rose",        "custoUnitario": 14.15, "match": ["além do rio", "alem do rio"], "tipo": ["rose", "rosé", "frisante"] },
+    { "ordem": 3,  "id": "arcos_750",            "custoUnitario": 13.02, "match": ["arcos do convento"], "tipo": ["750"], "exclui": ["bag", "5 lit", "5l", "5lt"] },
+    { "ordem": 4,  "id": "arcos_bib",            "custoUnitario": 47.15, "match": ["arcos do convento"], "tipo": ["bag", "5 lit", "5l", "5lt", "5 lts"] },
+    { "ordem": 5,  "id": "vitoria_regia",        "custoUnitario": 16.79, "match": ["vitória régia", "vitoria regia"] },
+    { "ordem": 6,  "id": "carrascal",            "custoUnitario": 17.81, "match": ["carrascal"] },
+    { "ordem": 7,  "id": "capricho_marselan",    "custoUnitario": 24.14, "match": ["capricho do rei", "capricho rei"] },
+    { "ordem": 8,  "id": "morabitino",           "custoUnitario": 31.56, "match": ["morabitino"] },
+    { "ordem": 9,  "id": "djoao_gran_reserva",   "custoUnitario": 76.33, "match": ["magnânimo", "magnanimo", "d. joão v", "d.joão v", "joão v"], "tipo": ["gran reserva", "grande reserva"] },
+    { "ordem": 10, "id": "djoao_reserva",        "custoUnitario": 40.60, "match": ["magnânimo", "magnanimo", "d. joão v", "d.joão v", "joão v"], "exclui": ["gran reserva", "grande reserva", "branco"] },
+    { "ordem": 11, "id": "djoao_branco",         "custoUnitario": 40.60, "match": ["magnânimo", "magnanimo", "d. joão v", "d.joão v", "joão v"], "tipo": ["branco"] },
+    { "ordem": 12, "id": "quinta_sao_cristovao", "custoUnitario": 21.82, "match": ["são cristóvão", "sao cristovao", "cristóvão"] },
+    { "ordem": 13, "id": "allgodao",             "custoUnitario": 29.13, "match": ["allgodão", "allgodao"] },
+    { "ordem": 14, "id": "ouro_meu_exclusive",   "custoUnitario": 14.62, "match": ["ouro meu"], "tipo": ["exclusive", "exclusiv"] },
+    { "ordem": 15, "id": "ouro_meu_base",        "custoUnitario": 13.62, "match": ["ouro meu"], "exclui": ["exclusive", "exclusiv", "bolota", "obidos", "cajado"] },
+    { "ordem": 16, "id": "bolota_dourada",       "custoUnitario": 37.37, "match": ["bolota dourada"] },
+    { "ordem": 17, "id": "ouro_obidos",          "custoUnitario": 38.19, "match": ["ouro de óbidos", "ouro de obidos", "óbidos"] },
+    { "ordem": 18, "id": "cajado_real",          "custoUnitario": 33.82, "match": ["cajado real"] },
+    { "ordem": 19, "id": "hfc",                  "custoUnitario": 36.84, "match": ["hfc"] },
+    { "ordem": 20, "id": "coro_maestro",         "custoUnitario": 17.41, "match": ["côro", "coro"], "tipo": ["maestro"] },
+    { "ordem": 21, "id": "coro_private",         "custoUnitario": 43.08, "match": ["côro", "coro"], "tipo": ["private"] },
+    { "ordem": 22, "id": "coro_reserva",         "custoUnitario": 40.48, "match": ["côro", "coro"], "exclui": ["maestro", "private"] },
+    { "ordem": 23, "id": "estremoz_aragones",    "custoUnitario": 60.10, "match": ["estremoz"], "tipo": ["aragonês", "aragones", "premium"] },
+    { "ordem": 24, "id": "estremoz_reserva",     "custoUnitario": 31.98, "match": ["estremoz"], "exclui": ["aragonês", "aragones", "premium"] },
+    { "ordem": 25, "id": "beiral",               "custoUnitario": 42.99, "match": ["beiral"] }
+  ]
+}
