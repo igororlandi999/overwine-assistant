@@ -1,0 +1,8 @@
+{
+  "$comment": "Taxas médias aplicadas ao faturamento bruto para estimar o líquido. Porte 1:1 do dashboard legado (index.html li. 4774-4775): TAXA_ML=0.1480, TAXA_ENV=0.1440. NÃO são fees reais da API do Mercado Livre — são médias da planilha de custos. Por isso faturamentoPeriodo marca o resultado com estimado:true. Ajustar aqui, nunca no código.",
+  "versao": 1,
+  "fonte": "dashboard_legado",
+  "taxaML": 0.148,
+  "taxaEnv": 0.144,
+  "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
+}
