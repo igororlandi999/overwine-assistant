@@ -12,6 +12,18 @@ const schema = z.object({
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   /** Desativa o /api/admin/seed após a semeadura ("false" = bloqueado). */
   SEED_ENABLED: z.enum(['true', 'false']).default('true'),
+
+  // ── Sincronização de pedidos (Fase 4b) — todas com default ──────────────
+  /** Pedidos por chunk no Redis (evita chave única gigante). */
+  ORDERS_CHUNK_SIZE: z.coerce.number().int().positive().default(500),
+  /** Páginas processadas por invocação (serverless 15s) — o resto é retomável. */
+  ORDERS_SYNC_MAX_PAGES: z.coerce.number().int().positive().default(5),
+  /** Teto de segurança contra loop patológico — NÃO é o limite legado de 8000. */
+  ORDERS_SYNC_MAX_TOTAL: z.coerce.number().int().positive().default(50000),
+  /** TTL do lock de sync (> duração de uma invocação). */
+  ORDERS_SYNC_LOCK_TTL_S: z.coerce.number().int().positive().default(120),
+  /** Tentativas por página antes de desistir do passo (retomável). */
+  ORDERS_PAGE_RETRIES: z.coerce.number().int().min(0).default(2),
 });
 
 export type Env = z.infer<typeof schema>;
