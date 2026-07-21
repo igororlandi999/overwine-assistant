@@ -29,7 +29,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!String(req.headers['content-type'] || '').includes('application/json')) {
       return json(res, 415, { error: 'Content-Type deve ser application/json.' });
     }
-    if (!(await rateLimitOk(cache, `orders-sync:${ip}`, 100, 600))) {
+    if (!(await rateLimitOk(cache, `orders-sync:${ip}`, 10, 600))) {
       console.warn(`[orders-sync] rate limit ip=${maskIp(ip)}`);
       return json(res, 429, { error: 'Muitas requisições.' });
     }
