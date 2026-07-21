@@ -20,7 +20,7 @@
  * uma inconsistência do dashboard, mantida por paridade. NÃO reconciliada.
  */
 import { dentroDoPeriodo, ymdBRT } from '../lib/datas-brt.js';
-import taxasConfig from '../config/taxas.json';
+import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 // ── Contratos de entrada (só os campos realmente lidos — slim map li. 3631) ─
 
