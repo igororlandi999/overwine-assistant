@@ -27,6 +27,12 @@ const ped = (id: number): OrderInput => ({
   order_items: [{ quantity: 1, unit_price: 100, item: { id: 'MLB1', title: 'V', seller_sku: 'S', variation_id: 1 }, extra: 'x' } as never],
 });
 
+/** ped(id) com campos sobrescritos — para simular mudanças de status/valor. */
+const pedCom = (id: number, overrides: Partial<OrderInput>): OrderInput => ({
+  ...ped(id),
+  ...overrides,
+});
+
 /** Fetcher fake sobre uma lista fixa (date_desc já assumido pela ordem dada). */
 function fakeFetcher(todos: OrderInput[], opts: { falharEm?: number; contador?: { n: number } } = {}): FetchOrdersPage {
   return async ({ offset, limit }) => {
@@ -147,12 +153,25 @@ describe('runSyncStep — incremental', () => {
     expect((await readStatus(cache, 'ativos'))?.lastResult).toBe('sem_novos');
   });
 
-  it('incremental para ao achar id conhecido (não varre tudo)', async () => {
-    await runSyncStep(cache, fakeFetcher([ped(10)]), { alvo: 'ativos', modo: 'full' });
+  it('9. janela limitada: revisa ~250 conhecidos sem varrer todo o histórico', async () => {
+    // base grande: 600 conhecidos (ids 1..600), do mais recente ao mais antigo
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    const base = Array.from({ length: 600 }, (_, i) => ped(600 - i)); // 600,599,...,1
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+
+    // ML retorna 2 novos no topo seguidos de TODOS os conhecidos (mesma ordem)
     const contador = { n: 0 };
-    const comNovos = [ped(11), ped(10)]; // acha 10 na primeira página
-    await runSyncStep(cache, fakeFetcher(comNovos, { contador }), { alvo: 'ativos', modo: 'incremental' });
-    expect(contador.n).toBe(1); // uma página só
+    const comNovos = [ped(1001), ped(1002), ...base];
+    const r = await runSyncStep(cache, fakeFetcher(comNovos, { contador }), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(2);
+    // Não varreu o histórico inteiro: 2 novos + 250 conhecidos = 252 registros
+    // → páginas de 50 → ~6 páginas, muito menos que as 13 necessárias p/ 602.
+    expect(contador.n).toBeLessThan(8);
+    expect(contador.n).toBeGreaterThanOrEqual(6); // revisou pelo menos 250 conhecidos
+    // snapshot final mantém todos os 600 conhecidos + 2 novos
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(new Set(snap.map(o => o.id)).size).toBe(602);
   });
 });
 
@@ -416,5 +435,308 @@ describe('resposta inválida da API vira erro_parcial retomável', () => {
     expect(await readManifest(cache, 'ativos')).toBeNull();
     // lock liberado
     expect(await cache.get('orders:sync:lock')).toBeNull();
+  });
+});
+// ══════════════════════════════════════════════════════════════════════════
+// FASE 5 — incremental ATUALIZA registros conhecidos (janela de revisão)
+// ══════════════════════════════════════════════════════════════════════════
+/** Retorna o pedido do snapshot com um dado id (ou undefined). */
+async function pedNoSnap(cache: FakeCache, id: number) {
+  return (await readSnapshot(cache, 'ativos')).find(o => o.id === id);
+}
+
+describe('incremental — atualização de conhecidos', () => {
+  it('1. adiciona novos e preserva antigos (janela revisa sem apagar)', async () => {
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const comNovos = [ped(13), ped(12), ped(11), ped(10)];
+    const r = await runSyncStep(cache, fakeFetcher(comNovos), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(2);
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(new Set(snap.map(o => o.id))).toEqual(new Set([10, 11, 12, 13]));
+  });
+
+  it('2. paid → cancelled: snapshot final reflete cancelled', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { status: 'paid' }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    expect((await pedNoSnap(cache, 10))?.status).toBe('paid');
+    // ML devolve o MESMO id 10 agora cancelled (mais um novo no topo p/ garantir publicação)
+    const ml = [ped(99), pedCom(10, { status: 'cancelled' }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect((await pedNoSnap(cache, 10))?.status).toBe('cancelled');
+  });
+
+  it('3. cancelled → paid: snapshot final reflete paid', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { status: 'cancelled' }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    expect((await pedNoSnap(cache, 10))?.status).toBe('cancelled');
+    const ml = [pedCom(10, { status: 'paid' }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    // sem novos, mas 1 atualizado → publica
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(0);
+    expect((await pedNoSnap(cache, 10))?.status).toBe('paid');
+  });
+
+  it('4. paid_amount alterado: snapshot final contém o novo valor', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { paid_amount: 100 }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    expect((await pedNoSnap(cache, 10))?.paid_amount).toBe(100);
+    const ml = [pedCom(10, { paid_amount: 250 }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect((await pedNoSnap(cache, 10))?.paid_amount).toBe(250);
+  });
+
+  it('5. total_amount alterado: snapshot final contém o novo valor', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { total_amount: 100 }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    expect((await pedNoSnap(cache, 10))?.total_amount).toBe(100);
+    const ml = [pedCom(10, { total_amount: 777 }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect((await pedNoSnap(cache, 10))?.total_amount).toBe(777);
+  });
+
+  it('6. nada novo e nada alterado → sem_novos, sem nova versão', async () => {
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))?.versao;
+    const r = await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(false);
+    expect(r.motivo).toBe('sem_novos');
+    expect(r.novosPedidos).toBe(0);
+    expect((await readManifest(cache, 'ativos'))?.versao).toBe(versaoAntes);
+    expect((await readStatus(cache, 'ativos'))?.lastResult).toBe('sem_novos');
+  });
+
+  it('7. conhecido atualizado publica nova versão mesmo com novosPedidos === 0', async () => {
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))!.versao;
+    const ml = [pedCom(10, { status: 'cancelled' }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(0);
+    expect((await readManifest(cache, 'ativos'))!.versao).toBe(versaoAntes + 1);
+  });
+
+  it('8. novosPedidos conta só IDs ausentes (revisar 100 conhecidos + 2 novos = 2)', async () => {
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    const base = Array.from({ length: 100 }, (_, i) => ped(100 - i)); // 100..1
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+    const comNovos = [ped(1001), ped(1002), ...base];
+    const r = await runSyncStep(cache, fakeFetcher(comNovos), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(2); // não 102
+    expect(new Set((await readSnapshot(cache, 'ativos')).map(o => o.id)).size).toBe(102);
+  });
+
+  it('10. backlog > 250 novos: 1ª parcial (base intacta), retoma, revisa janela, publica só no fim', async () => {
+    // base: 300 conhecidos (ids 1..300) — publica com folga de páginas
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    const base = Array.from({ length: 300 }, (_, i) => ped(300 - i));
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+    const manifestoAntes = await readManifest(cache, 'ativos');
+    expect(manifestoAntes?.versao).toBe(1);
+
+    // agora aperta o limite de páginas para forçar incremental parcial/retomável
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '5' });
+    // 320 novos no topo + todos os conhecidos
+    const novos = Array.from({ length: 320 }, (_, i) => ped(1000 + i));
+    const ml = [...novos, ...base];
+    const fetcher = fakeFetcher(ml);
+
+    // 1ª: 250 novos, ainda não cruzou fronteira → parcial, manifesto intacto
+    const r1 = await runSyncStep(cache, fetcher, { alvo: 'ativos', modo: 'incremental' });
+    expect(r1.concluido).toBe(false);
+    expect(r1.retomavel).toBe(true);
+    expect(r1.motivo).toBe('parcial');
+    expect(await readManifest(cache, 'ativos')).toEqual(manifestoAntes);
+
+    // retomadas até concluir
+    let r = await runSyncStep(cache, fetcher, { alvo: 'ativos' });
+    let guarda = 0;
+    while (!r.concluido && r.retomavel && guarda++ < 20) {
+      r = await runSyncStep(cache, fetcher, { alvo: 'ativos' });
+    }
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(320);
+    const snap = await readSnapshot(cache, 'ativos');
+    // 320 novos + 300 conhecidos, todos únicos
+    expect(new Set(snap.map(o => o.id)).size).toBe(620);
+    expect(await chavesBuild(cache)).toEqual([]);
+  });
+
+  it('11. deduplicação: nenhum ID duplicado após merge', async () => {
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11), ped(12)]), { alvo: 'ativos', modo: 'full' });
+    const ml = [ped(20), pedCom(10, { paid_amount: 999 }), ped(11), ped(12)];
+    await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.length).toBe(new Set(snap.map(o => o.id)).size);
+    // e a versão nova do 10 venceu
+    expect((await pedNoSnap(cache, 10))?.paid_amount).toBe(999);
+  });
+
+  it('12. falha durante a revisão: permanece retomável, sem publicar parcial, committedOffset preservado', async () => {
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '10' });
+    // base: 300 conhecidos
+    const base = Array.from({ length: 300 }, (_, i) => ped(300 - i));
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+    const manifestoAntes = await readManifest(cache, 'ativos');
+
+    // ML: 10 novos + conhecidos; falha no offset 100 (durante a coleta)
+    const novos = Array.from({ length: 10 }, (_, i) => ped(2000 + i));
+    const ml = [...novos, ...base];
+    const r1 = await runSyncStep(cache, fakeFetcher(ml, { falharEm: 100 }), { alvo: 'ativos', modo: 'incremental' });
+    expect(r1.ok).toBe(false);
+    expect(r1.retomavel).toBe(true);
+    expect(r1.motivo).toMatch(/erro_parcial/);
+    // manifesto atual intacto (nada publicado)
+    expect(await readManifest(cache, 'ativos')).toEqual(manifestoAntes);
+    // committedOffset persistido no ponto confirmado (offsets 0 e 50 → 100)
+    const job = JSON.parse((await cache.get('orders:sync:job:ativos'))!);
+    expect(job.committedOffset).toBe(100);
+
+    // retomada com fetcher são → conclui
+    let r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos' });
+    let guarda = 0;
+    while (!r.concluido && r.retomavel && guarda++ < 20) {
+      r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos' });
+    }
+    expect(r.concluido).toBe(true);
+    expect(new Set((await readSnapshot(cache, 'ativos')).map(o => o.id)).size).toBe(310);
+  });
+
+  it('14. job incremental ANTIGO (sem campos novos) é legível e conclui', async () => {
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    // publica base com 2 conhecidos
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const base = await readManifest(cache, 'ativos');
+
+    // injeta um job incremental "legado" SEM incrementalBoundaryReached/Reviewed
+    const jobAntigo = {
+      jobId: 'legado01',
+      modo: 'incremental',
+      alvo: 'ativos',
+      committedOffset: 0,
+      chunkKeys: [],
+      total: null,
+      baseManifestVersion: base!.versao,
+      iniciadoEm: new Date().toISOString(),
+      // NOTE: sem os dois campos opcionais novos
+    };
+    await cache.set('orders:sync:job:ativos', JSON.stringify(jobAntigo));
+
+    // retoma o job antigo; ML traz 1 novo + os conhecidos
+    const ml = [ped(50), ped(11), ped(10)];
+    let r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos' });
+    let guarda = 0;
+    while (!r.concluido && r.retomavel && guarda++ < 10) {
+      r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos' });
+    }
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(1);
+    expect(new Set((await readSnapshot(cache, 'ativos')).map(o => o.id))).toEqual(new Set([10, 11, 50]));
+  });
+
+  it('15. cancelados continuam independentes de ativos no incremental', async () => {
+    await runSyncStep(cache, fakeFetcher([ped(1), ped(2)]), { alvo: 'ativos', modo: 'full' });
+    await runSyncStep(cache, fakeFetcher([ped(90), ped(91)]), { alvo: 'cancelados', modo: 'full' });
+    // incremental em ativos com um novo não deve tocar cancelados
+    await runSyncStep(cache, fakeFetcher([ped(3), ped(2), ped(1)]), { alvo: 'ativos', modo: 'incremental' });
+    expect((await readSnapshot(cache, 'ativos')).map(o => o.id).sort((a, b) => Number(a) - Number(b))).toEqual([1, 2, 3]);
+    expect((await readSnapshot(cache, 'cancelados')).map(o => o.id).sort((a, b) => Number(a) - Number(b))).toEqual([90, 91]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// novosPedidos em PARCIAIS e ERROS conta só ids ausentes da base
+// ══════════════════════════════════════════════════════════════════════════
+describe('incremental — novosPedidos em parcial/erro', () => {
+  it('16. parcial só com conhecidos revisados → novosPedidos = 0', async () => {
+    // base: 400 conhecidos (mais que a janela de 250)
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    const base = Array.from({ length: 400 }, (_, i) => ped(400 - i));
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+
+    // ML devolve SÓ conhecidos (nenhum novo); aperta páginas p/ forçar parcial
+    // antes de a janela de 250 fechar (5 páginas × 50 = 250, mas o 1º id já é
+    // conhecido → boundary imediato; 250 revisados fecham a janela em 5 páginas,
+    // então uso MAX_PAGES:3 p/ garantir parcial: 150 conhecidos revisados < 250).
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '3' });
+    const r = await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(false);
+    expect(r.motivo).toBe('parcial');
+    expect(r.novosPedidos).toBe(0); // nenhum id novo, apesar de 150 revisados
+  });
+
+  it('17. erro em página só de conhecidos → novosPedidos = 0', async () => {
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '10' });
+    const base = Array.from({ length: 200 }, (_, i) => ped(200 - i));
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+
+    // ML devolve só conhecidos e falha no offset 100 (3ª página)
+    const r = await runSyncStep(cache, fakeFetcher(base, { falharEm: 100 }), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.ok).toBe(false);
+    expect(r.motivo).toMatch(/erro_parcial/);
+    expect(r.novosPedidos).toBe(0); // só conhecidos foram vistos antes da falha
+  });
+
+  it('18. parcial com novos e conhecidos → novosPedidos conta só os novos', async () => {
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '100' });
+    const base = Array.from({ length: 300 }, (_, i) => ped(1000 + (300 - i)));
+    await runSyncStep(cache, fakeFetcher(base), { alvo: 'ativos', modo: 'full' });
+
+    // 120 novos no topo + conhecidos; aperta p/ 2 páginas (100 registros) →
+    // parcial ANTES de terminar. As 2 páginas contêm só novos (120 > 100).
+    setEnv({ ORDERS_CHUNK_SIZE: '500', ORDERS_SYNC_MAX_PAGES: '2' });
+    const novos = Array.from({ length: 120 }, (_, i) => ped(1 + i)); // ids 1..120 (ausentes da base 1001..1300)
+    const ml = [...novos, ...base];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(false);
+    expect(r.motivo).toBe('parcial');
+    expect(r.novosPedidos).toBe(100); // 2 páginas × 50 novos; nenhum conhecido ainda
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// comparação profunda: buyer / shipping / order_items disparam publicação
+// ══════════════════════════════════════════════════════════════════════════
+describe('incremental — comparação profunda publica em mudança de campo', () => {
+  it('19. buyer.nickname alterado publica nova versão (novosPedidos 0)', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { buyer: { nickname: 'ANTIGO' } }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))!.versao;
+    const ml = [pedCom(10, { buyer: { nickname: 'NOVO' } }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(0);
+    expect((await readManifest(cache, 'ativos'))!.versao).toBe(versaoAntes + 1);
+    expect((await pedNoSnap(cache, 10))?.buyer?.nickname).toBe('NOVO');
+  });
+
+  it('20. shipping alterado (id/logistic_type) publica nova versão (novosPedidos 0)', async () => {
+    await runSyncStep(cache, fakeFetcher([pedCom(10, { shipping: { id: 1, logistic_type: 'drop_off' } }), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))!.versao;
+    const ml = [pedCom(10, { shipping: { id: 2, logistic_type: 'fulfillment' } }), ped(11)];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(0);
+    expect((await readManifest(cache, 'ativos'))!.versao).toBe(versaoAntes + 1);
+    const p = await pedNoSnap(cache, 10);
+    expect(p?.shipping?.id).toBe(2);
+    expect(p?.shipping?.logistic_type).toBe('fulfillment');
+  });
+
+  it('21. order_items alterado publica nova versão (novosPedidos 0)', async () => {
+    await runSyncStep(cache, fakeFetcher([
+      pedCom(10, { order_items: [{ quantity: 1, unit_price: 100, item: { id: 'MLB1', title: 'V', seller_sku: 'S', variation_id: 1 } }] }),
+      ped(11),
+    ]), { alvo: 'ativos', modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))!.versao;
+    const ml = [
+      pedCom(10, { order_items: [{ quantity: 5, unit_price: 100, item: { id: 'MLB1', title: 'V', seller_sku: 'S', variation_id: 1 } }] }),
+      ped(11),
+    ];
+    const r = await runSyncStep(cache, fakeFetcher(ml), { alvo: 'ativos', modo: 'incremental' });
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(0);
+    expect((await readManifest(cache, 'ativos'))!.versao).toBe(versaoAntes + 1);
+    expect((await pedNoSnap(cache, 10))?.order_items[0].quantity).toBe(5);
   });
 });

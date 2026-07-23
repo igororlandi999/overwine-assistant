@@ -14,8 +14,11 @@
  *   registrada no job → committedOffset = próximo offset real da API → job
  *   persistido.
  * - Full E incremental são jobs RETOMÁVEIS com committedOffset. Nenhum dos
- *   dois publica antes de a varredura terminar (achou conhecido / atingiu
- *   total / página vazia). Um passo parcial retorna { concluido:false,
+ *   dois publica antes de a varredura terminar. FULL termina ao atingir o total
+ *   ou página vazia. INCREMENTAL termina ao (a) revisar a janela de conhecidos
+ *   (INCREMENTAL_REFRESH_KNOWN_LIMIT), (b) atingir o total, ou (c) página vazia
+ *   — não para no primeiro id conhecido, para poder atualizar registros que
+ *   mudaram de status/valor. Um passo parcial retorna { concluido:false,
  *   retomavel:true, motivo:'parcial' } e NÃO troca o manifesto publicado.
  * - Rebuild parcial escreve SÓ em build chunks; writeChunk (chaves publicadas)
  *   só na publicação final canônica, com ORDERS_CHUNK_SIZE.
@@ -45,6 +48,16 @@ const jobKey = (alvo: Alvo) => `orders:sync:job:${alvo}`;
 const statusKey = (alvo: Alvo) => `orders:sync:status:${alvo}`;
 const LIMIT = 50;
 
+/**
+ * Janela de revisão do incremental: após cruzar a fronteira (primeiro id já
+ * conhecido), continuamos revisando os pedidos conhecidos MAIS RECENTES até
+ * acumular este número deles (ou atingir o fim real da API). Isso permite
+ * capturar mudanças de status/valor em pedidos já no snapshot (ex.:
+ * paid→cancelled) sem varrer todo o histórico a cada sincronização.
+ * Constante local ao serviço — NÃO é variável de ambiente.
+ */
+const INCREMENTAL_REFRESH_KNOWN_LIMIT = 250;
+
 export interface FetchOrdersPageParams {
   offset: number;
   limit: number;
@@ -67,6 +80,17 @@ export interface SyncJob {
   /** (incremental) versão do manifesto base sobre o qual o job foi iniciado. */
   baseManifestVersion: number | null;
   iniciadoEm: string;
+  /**
+   * (incremental, opcional) já cruzou a fronteira do primeiro id conhecido?
+   * Ausente em jobs antigos → equivale a false. O full ignora este campo.
+   */
+  incrementalBoundaryReached?: boolean;
+  /**
+   * (incremental, opcional) quantos pedidos JÁ CONHECIDOS foram revisados
+   * (recoletados) desde a fronteira, acumulado entre invocações. Ausente em
+   * jobs antigos → equivale a 0. O full ignora este campo.
+   */
+  incrementalKnownReviewed?: number;
 }
 
 export interface SyncStatus {
@@ -178,6 +202,42 @@ async function lerBuildChunks(cache: Cache, keys: string[]): Promise<OrderSlim[]
 }
 
 /**
+ * Comparação profunda e determinística entre dois OrderSlim já normalizados
+ * por toSlim. Ambos os lados passam por toSlim antes de comparar (o persistido
+ * no snapshot também foi gerado por toSlim), então a forma é estável: campos
+ * na mesma ordem, buyer/shipping presentes/ausentes de modo consistente e
+ * order_items com o mesmo shape. Uma serialização canônica basta e detecta
+ * mudança em status, paid_amount, total_amount, date_created, buyer, shipping
+ * e order_items (e seus campos preservados). Não compara OrderInput cru.
+ */
+function slimCanonico(o: OrderSlim): string {
+  return JSON.stringify({
+    id: String(o.id),
+    status: o.status ?? null,
+    date_created: o.date_created ?? null,
+    paid_amount: o.paid_amount ?? null,
+    total_amount: o.total_amount ?? null,
+    buyer: o.buyer ? { nickname: o.buyer.nickname ?? null } : null,
+    shipping: o.shipping
+      ? { id: o.shipping.id ?? null, logistic_type: o.shipping.logistic_type ?? null }
+      : null,
+    order_items: (o.order_items ?? []).map(oi => ({
+      quantity: oi.quantity ?? null,
+      unit_price: oi.unit_price ?? null,
+      item: {
+        id: oi.item?.id ?? null,
+        title: oi.item?.title ?? null,
+        seller_sku: oi.item?.seller_sku ?? null,
+        variation_id: oi.item?.variation_id ?? null,
+      },
+    })),
+  });
+}
+function slimIgual(a: OrderSlim, b: OrderSlim): boolean {
+  return slimCanonico(a) === slimCanonico(b);
+}
+
+/**
  * Publica um conjunto completo de pedidos slim como nova versão canônica.
  * RECHUNK com ORDERS_CHUNK_SIZE, gravando em chaves PUBLICADAS (writeChunk).
  * Grava todos os chunks ANTES de trocar o manifesto (retenção na publishManifest).
@@ -266,12 +326,27 @@ function retomavel(motivo: string, offset: number, paginas: number, novos: numbe
 interface Cfg { chunkSize: number; maxPages: number; maxTotal: number; retries: number }
 
 /**
+ * `conhecido`: dado um pedido bruto, informa se o id já está no snapshot base.
+ * No full é sempre () => false — o full nunca reage a "conhecido" e coleta tudo.
+ *
+ * No incremental (conhecido não-trivial), a varredura NÃO para no primeiro id
+ * conhecido: cruza a fronteira e segue revisando (recoletando) os conhecidos
+ * mais recentes até acumular INCREMENTAL_REFRESH_KNOWN_LIMIT deles — estado
+ * mantido no job (incrementalBoundaryReached / incrementalKnownReviewed) para
+ * sobreviver a retomadas. Todos os pedidos coletados (novos E conhecidos
+ * revisados) passam por toSlim e vão para build chunks. O full nunca ativa
+ * esse caminho.
+ */
+interface VarrerControl {
+  conhecido: (o: OrderInput) => boolean;
+  /** true no incremental; ativa a lógica de janela. No full, false. */
+  incremental: boolean;
+}
+
+/**
  * Varre páginas a partir do committedOffset do job, gravando CADA página
  * confirmada num build chunk e avançando o cursor. Retorna o desfecho da
  * varredura para o chamador decidir publicação.
- *
- * `pararEmConhecido`: predicate que, no incremental, sinaliza id já conhecido
- * (encerra a varredura). No full, nunca para por isso.
  * Retorna { encerrou, paginasLidas, coletados, erro? }.
  */
 async function varrer(
@@ -280,11 +355,12 @@ async function varrer(
   job: SyncJob,
   status: 'cancelled' | undefined,
   cfg: Cfg,
-  pararEmConhecido: (o: OrderInput) => boolean
+  ctrl: VarrerControl
 ): Promise<{
   encerrou: boolean;
   paginasLidas: number;
   coletados: number;
+  novosColetados: number;
   erro?: string;
   limiteExcedido?: { total: number; limite: number };
 }> {
@@ -292,24 +368,28 @@ async function varrer(
   let chunkIndex = job.chunkKeys.length;
   let paginasLidas = 0;
   let coletados = 0;
+  let novosColetados = 0;
   let total = job.total ?? Infinity;
+  // Estado da janela incremental, retomável (defaults p/ jobs antigos).
+  let boundaryReached = job.incrementalBoundaryReached ?? false;
+  let knownReviewed = job.incrementalKnownReviewed ?? 0;
 
   // Se o job já sabe o total de uma execução anterior e ele excede o limite,
   // aborta imediatamente (nada a publicar).
   if (Number.isFinite(total) && total > cfg.maxTotal) {
-    return { encerrou: false, paginasLidas, coletados, limiteExcedido: { total, limite: cfg.maxTotal } };
+    return { encerrou: false, paginasLidas, coletados, novosColetados, limiteExcedido: { total, limite: cfg.maxTotal } };
   }
 
   while (paginasLidas < cfg.maxPages) {
     // Conclusão normal: cursor alcançou o total reportado pela API.
     if (offset >= total) {
-      return { encerrou: true, paginasLidas, coletados };
+      return { encerrou: true, paginasLidas, coletados, novosColetados };
     }
     let page: { results: OrderInput[]; total: number };
     try {
       page = await fetchPageComRetry(fetchPage, { offset, limit: LIMIT, status }, cfg.retries);
     } catch (e) {
-      return { encerrou: false, paginasLidas, coletados, erro: e instanceof Error ? e.message : 'erro' };
+      return { encerrou: false, paginasLidas, coletados, novosColetados, erro: e instanceof Error ? e.message : 'erro' };
     }
     total = page.total;
     job.total = total;
@@ -318,46 +398,70 @@ async function varrer(
     // Limite de SEGURANÇA (não é conclusão): total real acima do teto → aborta
     // sem publicar, com erro explícito. Nada persistido nesta página é usado.
     if (total > cfg.maxTotal) {
-      return { encerrou: false, paginasLidas, coletados, limiteExcedido: { total, limite: cfg.maxTotal } };
+      return { encerrou: false, paginasLidas, coletados, novosColetados, limiteExcedido: { total, limite: cfg.maxTotal } };
     }
 
-    // Coleta respeitando o corte por id conhecido (incremental).
-    const novosDaPagina: OrderSlim[] = [];
-    let achouConhecido = false;
+    // Coleta da página.
+    // - FULL: coleta tudo, nunca reage a "conhecido".
+    // - INCREMENTAL: coleta tudo (novos e conhecidos), mas conta os conhecidos
+    //   revisados após a fronteira e ENCERRA ao atingir a janela de revisão.
+    //   novosColetados conta SÓ ids ausentes da base (conhecidos não contam).
+    const coletadosDaPagina: OrderSlim[] = [];
+    let atingiuJanela = false;
     for (const o of page.results) {
-      if (pararEmConhecido(o)) { achouConhecido = true; break; }
-      novosDaPagina.push(toSlim(o));
+      const jaConhecido = ctrl.conhecido(o);
+      if (ctrl.incremental) {
+        if (jaConhecido) {
+          boundaryReached = true;
+          knownReviewed++;
+        } else {
+          novosColetados++;
+        }
+        coletadosDaPagina.push(toSlim(o));
+        // Corte pode ocorrer ao final da página em que o limite for atingido —
+        // não cortamos no meio da página. Marcamos e encerramos após persistir.
+        if (boundaryReached && knownReviewed >= INCREMENTAL_REFRESH_KNOWN_LIMIT) {
+          atingiuJanela = true;
+        }
+      } else {
+        coletadosDaPagina.push(toSlim(o));
+      }
     }
 
     // Persistir o confirmado desta página num BUILD chunk ANTES de avançar.
-    if (novosDaPagina.length > 0) {
-      const key = await writeBuildChunk(cache, job.jobId, chunkIndex, novosDaPagina);
+    if (coletadosDaPagina.length > 0) {
+      const key = await writeBuildChunk(cache, job.jobId, chunkIndex, coletadosDaPagina);
       chunkIndex++;
       job.chunkKeys.push(key);
-      coletados += novosDaPagina.length;
+      coletados += coletadosDaPagina.length;
     }
-
-    if (achouConhecido) {
-      // cursor avança até o offset desta página (parte dela consumida)
-      job.committedOffset = offset + page.results.length;
-      await writeJob(cache, job);
-      return { encerrou: true, paginasLidas, coletados };
+    // Estado da janela persistido junto do job (retomável) — SÓ no incremental.
+    // O full nunca grava esses campos.
+    if (ctrl.incremental) {
+      job.incrementalBoundaryReached = boundaryReached;
+      job.incrementalKnownReviewed = knownReviewed;
     }
 
     if (page.results.length === 0) {
       job.committedOffset = total;
       await writeJob(cache, job);
-      return { encerrou: true, paginasLidas, coletados };
+      return { encerrou: true, paginasLidas, coletados, novosColetados };
     }
 
     // Avança committedOffset para o PRÓXIMO offset real da API e persiste o job.
     offset += LIMIT;
     job.committedOffset = offset;
     await writeJob(cache, job);
+
+    // Janela de revisão atingida (incremental): encerra a varredura com o
+    // committedOffset já no próximo offset da API.
+    if (atingiuJanela) {
+      return { encerrou: true, paginasLidas, coletados, novosColetados };
+    }
   }
 
   // maxPages atingido sem encerrar: parcial, retomável.
-  return { encerrou: false, paginasLidas, coletados };
+  return { encerrou: false, paginasLidas, coletados, novosColetados };
 }
 
 // ── passo FULL ──────────────────────────────────────────────────────────────
@@ -381,7 +485,7 @@ async function passoFull(
   };
   if (!jobExistente) await writeJob(cache, job);
 
-  const r = await varrer(cache, fetchPage, job, status, cfg, () => false);
+  const r = await varrer(cache, fetchPage, job, status, cfg, { conhecido: () => false, incremental: false });
 
   if (r.erro) {
     await writeStatus(cache, alvo, await statusResumo(cache, alvo, 'erro_parcial', false));
@@ -450,11 +554,14 @@ async function passoIncremental(
   };
   if (!jobExistente) await writeJob(cache, job);
 
-  const r = await varrer(cache, fetchPage, job, status, cfg, o => conhecidos.has(String(o.id)));
+  const r = await varrer(cache, fetchPage, job, status, cfg, {
+    conhecido: o => conhecidos.has(String(o.id)),
+    incremental: true,
+  });
 
   if (r.erro) {
     await writeStatus(cache, alvo, await statusResumo(cache, alvo, 'erro_parcial', false));
-    return { ok: false, concluido: false, retomavel: true, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: r.coletados, motivo: `erro_parcial: ${r.erro}` };
+    return { ok: false, concluido: false, retomavel: true, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: r.novosColetados, motivo: `erro_parcial: ${r.erro}` };
   }
 
   if (r.limiteExcedido) {
@@ -464,12 +571,32 @@ async function passoIncremental(
   if (!r.encerrou) {
     // Parcial: NÃO publica; manifesto atual permanece intacto.
     await writeStatus(cache, alvo, await statusResumo(cache, alvo, 'parcial', false));
-    return { ok: true, concluido: false, retomavel: true, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: r.coletados, motivo: 'parcial' };
+    return { ok: true, concluido: false, retomavel: true, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: r.novosColetados, motivo: 'parcial' };
   }
 
-  // Concluído: reunir novos dos build chunks, dedup, merge, publicar, limpar.
-  const novos = await lerBuildChunks(cache, job.chunkKeys);
-  if (novos.length === 0) {
+  // Concluído. Os build chunks contêm os pedidos REVISADOS (novos + conhecidos
+  // recoletados na janela). Dedup interno (primeiro visto vence) protege contra
+  // um mesmo id aparecer em páginas distintas dentro da revisão.
+  const revisadosBrutos = await lerBuildChunks(cache, job.chunkKeys);
+  const revisados = dedupById(revisadosBrutos as unknown as OrderInput[]) as unknown as OrderSlim[];
+
+  // Mapa da base para classificar cada revisado: novo, atualizado ou igual.
+  const baseById = new Map<string, OrderSlim>();
+  for (const o of snapshotBase) baseById.set(String(o.id), o);
+
+  let novosPedidos = 0;   // só IDs ausentes da base
+  let atualizados = 0;    // mesmo ID, slim diferente
+  for (const rev of revisados) {
+    const antigo = baseById.get(String(rev.id));
+    if (!antigo) {
+      novosPedidos++;
+    } else if (!slimIgual(rev, antigo)) {
+      atualizados++;
+    }
+  }
+
+  // Nada novo E nada alterado → não publica; mantém versão atual.
+  if (novosPedidos === 0 && atualizados === 0) {
     await deleteBuildChunks(cache, job.chunkKeys);
     await clearJob(cache, alvo);
     await writeStatus(cache, alvo, {
@@ -480,7 +607,9 @@ async function passoIncremental(
     return { ok: true, concluido: false, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: 0, motivo: 'sem_novos' };
   }
 
-  const merged = dedupById([...novos, ...snapshotBase] as unknown as OrderInput[]) as unknown as OrderSlim[];
+  // Merge: revisados PRIMEIRO para que a versão atual do ML vença no dedup
+  // (primeiro visto vence). IDs conhecidos não revisados vêm da base.
+  const merged = dedupById([...revisados, ...snapshotBase] as unknown as OrderInput[]) as unknown as OrderSlim[];
   const manifesto = await publicarSnapshot(cache, alvo, merged, 'incremental', cfg.chunkSize);
   await deleteBuildChunks(cache, job.chunkKeys);
   await clearJob(cache, alvo);
@@ -489,7 +618,7 @@ async function passoIncremental(
     newestDate: manifesto.newestDate, lastSyncAt: manifesto.updatedAt,
     lastResult: 'ok', emAndamento: false,
   });
-  return { ok: true, concluido: true, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: novos.length };
+  return { ok: true, concluido: true, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos };
 }
 
 async function statusResumo(
