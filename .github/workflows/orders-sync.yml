@@ -1,0 +1,115 @@
+name: Atualizar snapshot de pedidos
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: overwine-orders-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sincronizar pedidos ativos
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validar configuração
+        shell: bash
+        env:
+          OVERWINE_ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OVERWINE_ADMIN_KEY:-}" ]; then
+            echo "::error::O secret OVERWINE_ADMIN_KEY não está configurado."
+            exit 1
+          fi
+
+      - name: Executar sincronização
+        shell: bash
+        env:
+          OVERWINE_ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          SYNC_URL: https://overwine-assistant.vercel.app/api/admin/orders-sync
+        run: |
+          set -euo pipefail
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          http_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --location \
+              --request POST \
+              --url "$SYNC_URL" \
+              --header "Content-Type: application/json" \
+              --header "x-admin-key: $OVERWINE_ADMIN_KEY" \
+              --data '{"alvo":"ativos"}' \
+              --connect-timeout 15 \
+              --max-time 120 \
+              --output "$response_file" \
+              --write-out "%{http_code}"
+          )"
+
+          echo "HTTP: $http_code"
+          echo "Resposta:"
+          cat "$response_file"
+          echo
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::O endpoint respondeu HTTP $http_code."
+            exit 1
+          fi
+
+          python3 - "$response_file" <<'PY'
+          import json
+          import sys
+
+          path = sys.argv[1]
+
+          try:
+              with open(path, "r", encoding="utf-8") as arquivo:
+                  resposta = json.load(arquivo)
+          except Exception as erro:
+              print(f"::error::Resposta não é um JSON válido: {erro}")
+              raise SystemExit(1)
+
+          ok = resposta.get("ok")
+          concluido = resposta.get("concluido")
+          retomavel = resposta.get("retomavel")
+          motivo = resposta.get("motivo")
+          paginas = resposta.get("paginasLidas")
+          offset = resposta.get("committedOffset")
+          novos = resposta.get("novosPedidos")
+
+          print(
+              "Resultado: "
+              f"ok={ok}, "
+              f"concluido={concluido}, "
+              f"retomavel={retomavel}, "
+              f"motivo={motivo}, "
+              f"paginasLidas={paginas}, "
+              f"committedOffset={offset}, "
+              f"novosPedidos={novos}"
+          )
+
+          if ok is not True:
+              print(
+                  "::error::A sincronização respondeu "
+                  f"ok=false. Motivo: {motivo or 'não informado'}."
+              )
+              raise SystemExit(1)
+
+          if retomavel is True:
+              print(
+                  "::warning::O passo foi parcial e retomável. "
+                  "A próxima execução continuará do offset confirmado."
+              )
+          PY
