@@ -14,13 +14,13 @@ const schema = z.object({
   SEED_ENABLED: z.enum(['true', 'false']).default('true'),
 
   /**
-   * Chave do provedor de IA usada SOMENTE por /api/chat (Fase 5e).
+   * Chave do provedor de IA (Google Gemini) usada SOMENTE por /api/chat.
    * OPCIONAL de propósito: getEnv() é chamado por http.ts (toda rota via
    * applyCors); torná-la obrigatória derrubaria health/auth/orders/sync
    * enquanto não estivesse configurada. Ausente => apenas /api/chat responde
    * 502 ai_provider_error; o restante do backend segue normal.
    */
-  ANTHROPIC_API_KEY: z.string().min(20).optional(),
+  GEMINI_API_KEY: z.string().min(20).optional(),
 
   // ── Sincronização de pedidos (Fase 4b) — todas com default ──────────────
   /** Pedidos por chunk no Redis (evita chave única gigante). */

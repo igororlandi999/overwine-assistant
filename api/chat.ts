@@ -24,17 +24,24 @@ const MAX_DEPTH = 8;
 const MAX_TOTAL_PROPS = 100;
 const MAX_ARRAY_LEN = 20;
 const MAX_STRING_LEN = 200;     // strings do contexto (message tem limite proprio)
-const RL_LIMIT = 20;            // 20 req / 60s por sessao
-const RL_WINDOW_S = 60;
 
-// ── IA (Fase 5e) ──
-/** Snapshot fixo do modelo (nao usar alias). Constante unica. */
-const AI_MODEL = 'claude-haiku-4-5-20251001';
-const AI_URL = 'https://api.anthropic.com/v1/messages';
-const AI_VERSION = '2023-06-01';
-const AI_MAX_TOKENS = 300;
+// ── IA (provedor: Google Gemini) ──
+/** Modelo fixo (GA, sem alias/preview/latest). Constante unica. */
+const AI_MODEL = 'gemini-3.5-flash-lite';
+const AI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${AI_MODEL}:generateContent`;
+const AI_MAX_OUTPUT_TOKENS = 800;   // teto de tokens; o limite real da resposta e AI_ANSWER_MAX
+const AI_TEMPERATURE = 0.2;         // tarefa e reproduzir numeros do contexto: baixa variacao
+/**
+ * thinkingLevel 'low': modelos 3.x tem "thinking" ligado por padrao e os tokens
+ * de raciocinio contam contra maxOutputTokens — sem isso a resposta pode vir
+ * vazia com finishReason MAX_TOKENS. Acompanha AI_MODEL: se o modelo mudar de
+ * familia, revisar este campo (2.5 usa thinkingBudget: 0).
+ */
+const AI_THINKING = { thinkingLevel: 'low' as const };
 const AI_TIMEOUT_MS = 10000;        // 10s (abaixo dos 15s de maxDuration)
 const AI_ANSWER_MAX = 3000;         // acima disso => 502 (sem truncar)
+const RL_LIMIT = 10;                // 10 req / 60s por sessao (cabe no free tier ~10 RPM)
+const RL_WINDOW_S = 60;
 const DAILY_LIMIT = 100;            // chamadas validas por sessao por dia (BRT)
 const DAILY_TTL_S = 60 * 60 * 26;   // cobre o dia BRT com folga
 
@@ -244,9 +251,39 @@ type AiFalha = { kind: 'timeout' } | { kind: 'provider' };
 type AiOk = { kind: 'ok'; answer: string };
 
 /**
- * Chama o provedor de IA. Envia EXATAMENTE: model, max_tokens, system, messages
- * (um unico item user com o contexto delimitado + a pergunta). Sem tools, sem
- * metadata, sem historico, sem conversation.id, sem sessao, sem tokens.
+ * Parte de "pensamento" (thinking) do Gemini generateContent — forma oficial
+ * { text: string, thought: true, thoughtSignature?: string }. Nunca entra na
+ * resposta final nem em log; e apenas reconhecida aqui e descartada.
+ */
+function isThoughtPart(v: Record<string, unknown>): boolean {
+  if (typeof v.text !== 'string' || v.thought !== true) return false;
+  const permitidas = new Set(['text', 'thought', 'thoughtSignature']);
+  if (!Object.keys(v).every((k) => permitidas.has(k))) return false;
+  if ('thoughtSignature' in v && typeof v.thoughtSignature !== 'string') return false;
+  return true;
+}
+
+/**
+ * Parte de resposta final — forma oficial { text: string, thoughtSignature?:
+ * string }. thoughtSignature e metadado opaco que pode vir anexado a QUALQUER
+ * part (inclusive a final), sem indicar pensamento (thought nao e true aqui,
+ * pois a chave nem e permitida). thoughtSignature nunca e concatenada,
+ * devolvida nem logada — esta integracao nao mantem historico/conversation.
+ */
+function isFinalTextPart(v: Record<string, unknown>): boolean {
+  if (typeof v.text !== 'string') return false;
+  const permitidas = new Set(['text', 'thoughtSignature']);
+  if (!Object.keys(v).every((k) => permitidas.has(k))) return false;
+  if ('thoughtSignature' in v && typeof v.thoughtSignature !== 'string') return false;
+  return true;
+}
+
+/**
+ * Chama o provedor de IA (Gemini generateContent). Envia EXATAMENTE:
+ * systemInstruction, contents (um unico item user com o contexto delimitado +
+ * a pergunta) e generationConfig. Sem tools, sem functionDeclarations, sem
+ * grounding, sem code execution, sem safetySettings, sem metadata, sem
+ * historico, sem conversation.id, sem sessao, sem tokens.
  * Uma tentativa apenas, sem retry. Timeout via AbortController.
  */
 async function chamarIA(apiKey: string, message: string, context: unknown): Promise<AiOk | AiFalha> {
@@ -255,10 +292,13 @@ async function chamarIA(apiKey: string, message: string, context: unknown): Prom
     '<PERGUNTA>\n' + message + '\n</PERGUNTA>';
 
   const payload = {
-    model: AI_MODEL,
-    max_tokens: AI_MAX_TOKENS,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: userContent }],
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [{ role: 'user', parts: [{ text: userContent }] }],
+    generationConfig: {
+      maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
+      temperature: AI_TEMPERATURE,
+      thinkingConfig: AI_THINKING,
+    },
   };
 
   const ctl = new AbortController();
@@ -268,8 +308,7 @@ async function chamarIA(apiKey: string, message: string, context: unknown): Prom
     res = await fetch(AI_URL, {
       method: 'POST',
       headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': AI_VERSION,
+        'x-goog-api-key': apiKey,   // chave SO no header, nunca na URL/body
         'content-type': 'application/json',
       },
       body: JSON.stringify(payload),
@@ -283,7 +322,8 @@ async function chamarIA(apiKey: string, message: string, context: unknown): Prom
     clearTimeout(timer);
   }
 
-  if (!res.ok) return { kind: 'provider' }; // status upstream NAO e repassado
+  // 400/401/403/429/500 upstream => 502 generico (status NAO e repassado).
+  if (!res.ok) return { kind: 'provider' };
 
   let data: unknown;
   try {
@@ -292,14 +332,38 @@ async function chamarIA(apiKey: string, message: string, context: unknown): Prom
     return { kind: 'provider' };
   }
 
-  // Valida a forma da resposta: objeto com content array de blocos SOMENTE text.
-  if (!isObj(data) || !Array.isArray(data.content)) return { kind: 'provider' };
+  // Validacao rigorosa da forma da resposta Gemini.
+  if (!isObj(data)) return { kind: 'provider' };
+  // Bloqueio de prompt (promptFeedback.blockReason) => 502.
+  if (isObj(data.promptFeedback) && data.promptFeedback.blockReason) return { kind: 'provider' };
+  if (!Array.isArray(data.candidates) || data.candidates.length !== 1) return { kind: 'provider' };
+
+  const cand = data.candidates[0];
+  if (!isObj(cand)) return { kind: 'provider' };
+  // Somente STOP e aceito (MAX_TOKENS, SAFETY, RECITATION, OTHER => 502).
+  if (cand.finishReason !== 'STOP') return { kind: 'provider' };
+  if (!isObj(cand.content) || !Array.isArray(cand.content.parts)) return { kind: 'provider' };
+
   let texto = '';
-  for (const bloco of data.content) {
-    if (!isObj(bloco) || bloco.type !== 'text' || typeof bloco.text !== 'string') {
-      return { kind: 'provider' }; // tool_use ou tipo inesperado
+  for (const parte of cand.content.parts) {
+    if (!isObj(parte)) return { kind: 'provider' };
+
+    // Parte de pensamento (thinking) legitima do Gemini: descartada, nunca
+    // entra no answer nem em log.
+    if (isThoughtPart(parte)) continue;
+
+    // Parte de resposta final: { text: string, thoughtSignature?: string }.
+    // thoughtSignature e ignorada (pode vir vazia junto de um texto ""; o
+    // texto final segue sendo montado pelas demais partes).
+    if (isFinalTextPart(parte)) {
+      texto += parte.text;
+      continue;
     }
-    texto += bloco.text;
+
+    // functionCall, executableCode, codeExecutionResult, inlineData, fileData,
+    // thought:false, thoughtSignature sem text/nao-string, chave desconhecida
+    // ou qualquer forma fora das duas permitidas => rejeitado.
+    return { kind: 'provider' };
   }
 
   const answer = texto.trim();
@@ -382,7 +446,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Chave do provedor: verificada APOS a validacao do payload e ANTES do
     // contador diario (chave ausente nao deve consumir limite diario).
-    const apiKey = getEnv().ANTHROPIC_API_KEY;
+    const apiKey = getEnv().GEMINI_API_KEY;
     if (!apiKey) {
       console.error('[chat] erro code=ai_key_ausente');
       return erro(res, 502, 'ai_provider_error', 'O serviço de inteligência está indisponível.');
