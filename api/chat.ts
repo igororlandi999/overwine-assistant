@@ -12,10 +12,30 @@
  * lib, env, vercel.json ou dependencia existente e alterada.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { Cache } from '../src/lib/cache/cache.js';
 import { getCache } from '../src/lib/cache/cache.js';
 import { getEnv } from '../src/config/env.js';
 import { validateSession } from '../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../src/lib/http.js';
+// ── Fase 5g: consultas historicas determinísticas ──
+import { ymdBRT } from '../src/lib/datas-brt.js';
+import { readSnapshot } from '../src/lib/orders-store.js';
+import { getReadStatus, type OrdersReadStatus } from '../src/services/orders-read.service.js';
+import type { OrderSlim } from '../src/services/orders.service.js';
+import {
+  parseChatQuery,
+  previousQueryValida,
+  type AmbiguousReason,
+  type ChatQuery,
+  type InvalidPeriodReason,
+} from '../src/services/chat-query.service.js';
+import {
+  calcularComparacao,
+  calcularConsulta,
+  type CoberturaSnapshot,
+  type ResultadoComparacao,
+  type ResultadoConsulta,
+} from '../src/services/sales-metrics.service.js';
 
 // ── Limites (constantes locais; sem env nova) ──
 const MAX_BODY_BYTES = 16384;   // 16 KB
@@ -78,6 +98,25 @@ const SYSTEM_PROMPT = [
   '- Português do Brasil, objetivo e operacional. 1 a 4 frases.',
   '- Sem markdown, sem HTML, sem listas longas, sem emojis.',
   '- Não recomende decisões comerciais com certeza excessiva; se opinar, deixe claro que é uma leitura dos números.',
+].join('\n');
+
+/**
+ * Fase 5g — EXTENSÃO MÍNIMA do system prompt, aplicada SOMENTE no caminho
+ * agregado (consulta histórica já calculada pelo backend). O SYSTEM_PROMPT do
+ * fluxo legado permanece intacto e continua sendo enviado antes desta parte.
+ */
+const SYSTEM_PROMPT_AGREGADO = [
+  '',
+  'MODO CONSULTA HISTÓRICA',
+  '- Os números dentro de <CONTEXTO> JÁ FORAM CALCULADOS pelo backend. Use exatamente esses valores.',
+  '- Você NÃO calcula: não some, não subtraia, não divida, não estime, não converta e não recalcule ticket médio nem percentuais.',
+  '- Você NÃO escolhe datas: o período é query.period.fromYmd a query.period.toYmd, já resolvido em America/Sao_Paulo. Cite datas no formato DD/MM/AAAA quando for útil.',
+  '- Se coverage.available for falso, diga que não há dados para o período pedido. NUNCA apresente ausência de dados como zero.',
+  '- Se coverage.type for "parcial", informe que o intervalo realmente coberto vai de coverage.effectiveFromYmd a coverage.effectiveToYmd.',
+  '- result null significa dado indisponível, não zero. averageTicket null significa que não houve pedidos pagos no período.',
+  '- Em comparações, use compare.variation como veio. Percentual null significa base zero: diga que a comparação percentual não se aplica.',
+  '- Mencione os itens de warnings quando forem relevantes à pergunta.',
+  '- Responda em português do Brasil, direto, de 1 a 3 frases.',
 ].join('\n');
 
 // Chaves proibidas (lista fechada, ja normalizadas: [^a-z0-9] removido).
@@ -286,13 +325,21 @@ function isFinalTextPart(v: Record<string, unknown>): boolean {
  * historico, sem conversation.id, sem sessao, sem tokens.
  * Uma tentativa apenas, sem retry. Timeout via AbortController.
  */
-async function chamarIA(apiKey: string, message: string, context: unknown): Promise<AiOk | AiFalha> {
+async function chamarIA(
+  apiKey: string,
+  message: string,
+  context: unknown,
+  systemExtra?: string
+): Promise<AiOk | AiFalha> {
   const userContent =
     '<CONTEXTO>\n' + JSON.stringify(context) + '\n</CONTEXTO>\n\n' +
     '<PERGUNTA>\n' + message + '\n</PERGUNTA>';
 
+  // O prompt base NUNCA é reescrito; a extensão apenas se soma a ele.
+  const system = systemExtra ? SYSTEM_PROMPT + '\n' + systemExtra : SYSTEM_PROMPT;
+
   const payload = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: system }] },
     contents: [{ role: 'user', parts: [{ text: userContent }] }],
     generationConfig: {
       maxOutputTokens: AI_MAX_OUTPUT_TOKENS,
@@ -375,6 +422,276 @@ function erro(res: VercelResponse, status: number, code: string, message: string
   return json(res, status, { ok: false, error: { code, message } });
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Fase 5g — consultas históricas de vendas.
+//
+// Pipeline: parser determinístico → snapshot ativos → métricas determinísticas
+// → contexto MÍNIMO → Gemini apenas REDIGE. A Gemini nunca escolhe período,
+// nunca soma e nunca decide se um módulo está disponível.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Allowlist determinística dos módulos JÁ presentes no contexto 1.0.0 do
+ * frontend. Quando o parser devolve `assunto_nao_suportado` e a mensagem cita
+ * um destes termos, a pergunta segue no FLUXO LEGADO (contexto completo +
+ * Gemini). Qualquer outro assunto vira indisponibilidade determinística.
+ *
+ * 'anuncio'/'anuncios' ficam DELIBERADAMENTE de fora nesta etapa: o contexto
+ * traz contagens de anúncios, mas não responde "qual anúncio vendeu mais",
+ * que é a forma como a pergunta costuma aparecer.
+ */
+const TERMOS_LEGADO = ['estoque', 'ruptura', 'sem estoque', 'inventory', 'full'];
+
+/** minúsculas, sem acentos, espaços colapsados (mesma convenção do parser). */
+function normalizarTexto(t: string): string {
+  return (t || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Casa termo inteiro (aceitando plural em -s) para evitar falso positivo por
+ * substring: 'full' não pode casar dentro de 'fulminante'.
+ */
+function pareceAssuntoLegado(message: string): boolean {
+  const n = normalizarTexto(message);
+  return TERMOS_LEGADO.some((termo) =>
+    new RegExp(`(^|[^a-z0-9])${termo}s?([^a-z0-9]|$)`).test(n));
+}
+
+// ── Respostas determinísticas (texto fixo; nenhuma vai ao provedor) ──
+const MSG_SENSIVEL =
+  'Não posso responder a esse pedido. Posso informar faturamento, pedidos, ticket médio e unidades vendidas por período.';
+const MSG_MODULO_INDISPONIVEL =
+  'Esse tipo de consulta ainda não está disponível nesta versão. Por enquanto consigo responder faturamento, pedidos, ticket médio e unidades vendidas por período.';
+const MSG_DADOS_INDISPONIVEIS =
+  'Os dados de vendas estão temporariamente indisponíveis. Tente novamente em alguns minutos.';
+
+function mensagemPeriodoInvalido(reason: InvalidPeriodReason): string {
+  switch (reason) {
+    case 'data_inexistente':
+      return 'Essa data não existe no calendário. Informe uma data válida, como 20/07/2026.';
+    case 'intervalo_invertido':
+      return 'O intervalo informado começa depois de terminar. Informe as datas em ordem, como 20/07/2026 a 25/07/2026.';
+    case 'intervalo_incompleto':
+      return 'O intervalo está incompleto. Informe as duas datas, como 20/07/2026 a 25/07/2026.';
+    default:
+      return 'Não consegui interpretar esse período. Informe uma data válida ou um intervalo como 20/07/2026 a 25/07/2026.';
+  }
+}
+
+function mensagemAmbigua(reason: AmbiguousReason): string {
+  switch (reason) {
+    case 'periodo_ausente':
+      return 'Preciso saber o período. Diga, por exemplo, hoje, ontem, esta semana ou uma data como 20/07/2026.';
+    case 'metrica_ausente':
+      return 'Preciso saber o que você quer medir: faturamento, pedidos, ticket médio ou unidades vendidas.';
+    default:
+      return 'Não entendi a consulta. Pergunte algo como: quanto vendemos ontem?';
+  }
+}
+
+/**
+ * Projeção pública da consulta para `meta.query`. SOMENTE intenção, métrica,
+ * período e período comparativo — sem pergunta, sem `source`, sem sessão, sem
+ * contexto, sem PII.
+ */
+interface PeriodoPublico { kind: string; fromYmd: string; toYmd: string }
+interface QueryPublica {
+  intent: ChatQuery['intent'];
+  metric: ChatQuery['metric'];
+  period: PeriodoPublico;
+  comparePeriod?: PeriodoPublico;
+}
+function projetarPeriodo(p: { kind: string; fromYmd: string; toYmd: string }): PeriodoPublico {
+  return { kind: p.kind, fromYmd: p.fromYmd, toYmd: p.toYmd };
+}
+function projetarQuery(q: ChatQuery): QueryPublica {
+  return {
+    intent: q.intent,
+    metric: q.metric,
+    period: projetarPeriodo(q.period),
+    ...(q.comparePeriod ? { comparePeriod: projetarPeriodo(q.comparePeriod) } : {}),
+  };
+}
+
+/**
+ * Resposta determinística: status 200, sem provedor, sem cota diária.
+ * `mode: 'ai'` preserva a compatibilidade com o frontend atual; `execution`
+ * distingue o caminho. `model: 'deterministic'` (string, não null) porque o
+ * frontend ainda não foi auditado — revisitar na etapa do frontend.
+ * O campo público `warnings` continua `[]`: a limitação é explicada em `answer`.
+ */
+function responderDeterministicamente(res: VercelResponse, answer: string, query?: ChatQuery) {
+  return json(res, 200, {
+    ok: true,
+    answer,
+    meta: {
+      mode: 'ai',
+      execution: 'deterministic',
+      model: 'deterministic',
+      contextSchemaVersion: '1.0.0',
+      generatedAt: new Date().toISOString(),
+      ...(query ? { query: projetarQuery(query) } : {}),
+    },
+    warnings: [],
+  });
+}
+
+// ── Contexto MÍNIMO enviado à Gemini (nunca o schema 1.0.0 completo) ──
+function projetarResultado(r: ResultadoConsulta) {
+  if (!r.metricas) return null;
+  return {
+    revenue: r.metricas.receita,
+    orders: r.metricas.pedidos,
+    averageTicket: r.metricas.ticketMedio,
+    units: r.metricas.unidades,
+  };
+}
+function projetarCobertura(r: ResultadoConsulta, st: OrdersReadStatus) {
+  return {
+    available: r.disponivel,
+    type: r.cobertura,
+    effectiveFromYmd: r.periodoCalculado?.fromYmd ?? null,
+    effectiveToYmd: r.periodoCalculado?.toYmd ?? null,
+    dataFromYmd: ymdBRT(st.oldestDate),
+    dataToYmd: ymdBRT(st.newestDate),
+  };
+}
+function unir(...listas: string[][]): string[] {
+  return Array.from(new Set(listas.flat()));
+}
+
+function montarContextoConsulta(q: ChatQuery, r: ResultadoConsulta, st: OrdersReadStatus) {
+  return {
+    query: { intent: q.intent, metric: q.metric, period: projetarPeriodo(q.period) },
+    result: projetarResultado(r),
+    coverage: projetarCobertura(r, st),
+    warnings: r.warnings,
+  };
+}
+
+function montarContextoComparacao(q: ChatQuery, c: ResultadoComparacao, st: OrdersReadStatus) {
+  const v = c.variacao;
+  return {
+    query: {
+      intent: q.intent,
+      metric: q.metric,
+      period: projetarPeriodo(q.period),
+      comparePeriod: q.comparePeriod ? projetarPeriodo(q.comparePeriod) : null,
+    },
+    result: projetarResultado(c.atual),
+    coverage: projetarCobertura(c.atual, st),
+    compare: {
+      result: projetarResultado(c.anterior),
+      coverage: projetarCobertura(c.anterior, st),
+      // Já calculado pelo backend. A Gemini apenas redige estes números.
+      variation: v === null ? null : {
+        revenueAbs: v.receitaAbs,
+        revenuePct: v.receitaPct,
+        ordersAbs: v.pedidosAbs,
+        ordersPct: v.pedidosPct,
+        unitsAbs: v.unidadesAbs,
+        unitsPct: v.unidadesPct,
+      },
+    },
+    warnings: unir(c.atual.warnings, c.anterior.warnings),
+  };
+}
+
+/**
+ * Plano de execução decidido pelo roteador.
+ *  - 'respondido': a resposta determinística JÁ foi enviada; o handler retorna.
+ *  - 'legado'    : segue o fluxo original (contexto 1.0.0 completo + Gemini).
+ *  - 'agregado'  : consulta histórica calculada; Gemini recebe só os agregados.
+ */
+type PlanoChat =
+  | { tipo: 'respondido' }
+  | { tipo: 'legado' }
+  | { tipo: 'agregado'; contexto: unknown; query: ChatQuery };
+
+/**
+ * Roteamento determinístico. Leituras de snapshot acontecem SOMENTE no ramo
+ * `recognized`: consulta inválida, ambígua, sensível ou de módulo indisponível
+ * não toca no Redis de pedidos, não exige GEMINI_API_KEY e não consome cota.
+ */
+async function rotearConsulta(
+  res: VercelResponse,
+  cache: Cache,
+  message: string,
+  previousQuery: ChatQuery | null
+): Promise<PlanoChat> {
+  const parsed = parseChatQuery(message, { previousQuery });
+
+  if (parsed.kind === 'invalid_period') {
+    responderDeterministicamente(res, mensagemPeriodoInvalido(parsed.reason));
+    return { tipo: 'respondido' };
+  }
+
+  if (parsed.kind === 'ambiguous') {
+    responderDeterministicamente(res, mensagemAmbigua(parsed.reason));
+    return { tipo: 'respondido' };
+  }
+
+  if (parsed.kind === 'out_of_scope') {
+    // Sem intenção de vendas: preserva estoque, ruptura e o restante do legado.
+    if (parsed.reason === 'sem_intencao_de_vendas') return { tipo: 'legado' };
+    if (parsed.reason === 'conteudo_sensivel') {
+      // Sem meta.query: a consulta recusada não é ecoada de volta.
+      responderDeterministicamente(res, MSG_SENSIVEL);
+      return { tipo: 'respondido' };
+    }
+    // assunto_nao_suportado: allowlist determinística, nunca a Gemini decidindo.
+    if (pareceAssuntoLegado(message)) return { tipo: 'legado' };
+    responderDeterministicamente(res, MSG_MODULO_INDISPONIVEL);
+    return { tipo: 'respondido' };
+  }
+
+  const q = parsed.query;
+
+  // Manifesto: ausente, corrompido, sem versão, sem datas ou vazio => sem
+  // números. Nunca inventar zero, nunca chamar a Gemini.
+  let st: OrdersReadStatus;
+  try {
+    st = await getReadStatus(cache, 'ativos');
+  } catch {
+    responderDeterministicamente(res, MSG_DADOS_INDISPONIVEIS, q);
+    return { tipo: 'respondido' };
+  }
+  if (st.versao === null || st.totalRegistros <= 0 || !st.oldestDate || !st.newestDate) {
+    responderDeterministicamente(res, MSG_DADOS_INDISPONIVEIS, q);
+    return { tipo: 'respondido' };
+  }
+
+  // UMA única leitura do snapshot por consulta reconhecida. Nunca 'cancelados'.
+  let pedidos: OrderSlim[];
+  try {
+    pedidos = await readSnapshot(cache, 'ativos');
+  } catch {
+    responderDeterministicamente(res, MSG_DADOS_INDISPONIVEIS, q);
+    return { tipo: 'respondido' };
+  }
+  if (pedidos.length === 0) {
+    responderDeterministicamente(res, MSG_DADOS_INDISPONIVEIS, q);
+    return { tipo: 'respondido' };
+  }
+
+  const cobertura: CoberturaSnapshot = {
+    oldestDate: st.oldestDate,
+    newestDate: st.newestDate,
+    partial: st.partial,
+  };
+
+  // Comparação reutiliza o MESMO array de pedidos nos dois períodos.
+  const contexto = q.intent === 'sales_comparison' && q.comparePeriod
+    ? montarContextoComparacao(q, calcularComparacao(pedidos, q.period, q.comparePeriod, cobertura), st)
+    : montarContextoConsulta(q, calcularConsulta(pedidos, q.period, cobertura), st);
+
+  return { tipo: 'agregado', contexto, query: q };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS -> 204
 
@@ -417,7 +734,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Chaves permitidas no topo do body.
-    if (!somenteChaves(body, new Set(['message', 'context', 'conversation']))) {
+    if (!somenteChaves(body, new Set(['message', 'context', 'conversation', 'previousQuery']))) {
       return erro(res, 400, 'invalid_request', 'Payload invalido.');
     }
 
@@ -444,6 +761,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const fCtx = validarContexto(body.context);
     if (fCtx) return erro(res, 400, fCtx.code, 'Payload invalido.');
 
+    // ── Fase 5g: roteamento determinístico ──
+    // Continuidade OPCIONAL. previousQuery inválida é ignorada em silêncio:
+    // não vira 400, não é herdada, não vai ao provedor e não é registrada.
+    const previousQuery = previousQueryValida(body.previousQuery) ? body.previousQuery : null;
+
+    // Entra ANTES da chave e do contador diário: respostas determinísticas não
+    // exigem GEMINI_API_KEY nem consomem cota.
+    const plano = await rotearConsulta(res, cache, message, previousQuery);
+    if (plano.tipo === 'respondido') return;
+
     // Chave do provedor: verificada APOS a validacao do payload e ANTES do
     // contador diario (chave ausente nao deve consumir limite diario).
     const apiKey = getEnv().GEMINI_API_KEY;
@@ -464,7 +791,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Chamada ao provedor: somente message + contexto sanitizado + system fixo.
     const t0 = Date.now();
     const inBytes = bodyBytes;
-    const ia = await chamarIA(apiKey, message, body.context);
+    // Caminho agregado: contexto MÍNIMO (sem pedidos, sem order_items, sem o
+    // contexto fixo do frontend). Caminho legado: contexto 1.0.0 como antes.
+    const ia = plano.tipo === 'agregado'
+      ? await chamarIA(apiKey, message, plano.contexto, SYSTEM_PROMPT_AGREGADO)
+      : await chamarIA(apiKey, message, body.context);
     const dur = Date.now() - t0;
 
     if (ia.kind === 'timeout') {
@@ -484,9 +815,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       answer: ia.answer,
       meta: {
         mode: 'ai',
+        execution: 'provider',
         model: AI_MODEL,
         contextSchemaVersion: '1.0.0',
         generatedAt: new Date().toISOString(),
+        ...(plano.tipo === 'agregado' ? { query: projetarQuery(plano.query) } : {}),
       },
       warnings: [],
     });
