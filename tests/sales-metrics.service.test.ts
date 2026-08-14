@@ -9,6 +9,8 @@ import {
   WARN_COBERTURA_PARCIAL_FIM,
   WARN_SNAPSHOT_PARCIAL,
   WARN_SEM_DADOS_NO_PERIODO,
+  WARN_COMPARACAO_DESIGUAL,
+  COBERTURA_MINIMA_COMPARACAO,
   type CoberturaSnapshot,
 } from '../src/services/sales-metrics.service.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
@@ -404,5 +406,169 @@ describe('sales-metrics — pureza e nao-mutacao', () => {
     expect(s).not.toContain('COMPRADOR_X');
     expect(s).not.toContain('nickname');
     expect(s).not.toContain('shipping');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Janela conhecida = ultimo pedido OU ultima sincronizacao bem-sucedida
+// ──────────────────────────────────────────────────────────────────────────
+// O caso que motivou isto: de manha, antes da primeira venda do dia, o ultimo
+// pedido e de ontem. Sem lastSyncAt, "quanto vendi hoje?" respondia cobertura
+// indisponivel — "nao sei" — quando a resposta correta e "nada ainda".
+// ══════════════════════════════════════════════════════════════════════════
+describe('avaliarCobertura — janela estendida pela sincronizacao', () => {
+  // Ultimo pedido em 03/08; sincronizacao concluida em 05/08 as 10:29 BRT.
+  const SINCRONIZADO_ATE_05: CoberturaSnapshot = {
+    ...COBERTURA_REAL,
+    lastSyncAt: '2026-08-05T13:29:00.000Z',
+    lastResult: 'sem_novos',
+  };
+
+  it('dia varrido SEM vendas e coberto (parcial), nao indisponivel', () => {
+    const r = avaliarCobertura({ fromYmd: '2026-08-05', toYmd: '2026-08-05' }, SINCRONIZADO_ATE_05);
+    expect(r.tipo).toBe('parcial');
+    expect(r.periodoEfetivo).toEqual({ fromYmd: '2026-08-05', toYmd: '2026-08-05' });
+    // Parcial porque o dia ainda nao terminou quando a varredura rodou.
+    expect(r.ultimoDiaIncompleto).toBe(true);
+    expect(r.warnings).toContain(WARN_COBERTURA_PARCIAL_FIM);
+  });
+
+  it('sem lastSyncAt o MESMO dia continua indisponivel (comportamento anterior)', () => {
+    const r = avaliarCobertura({ fromYmd: '2026-08-05', toYmd: '2026-08-05' }, COBERTURA_REAL);
+    expect(r.tipo).toBe('indisponivel');
+    expect(r.periodoEfetivo).toBeNull();
+  });
+
+  it('dia entre o ultimo pedido e a sincronizacao tambem e coberto', () => {
+    const r = avaliarCobertura({ fromYmd: '2026-08-04', toYmd: '2026-08-04' }, SINCRONIZADO_ATE_05);
+    expect(r.tipo).toBe('total');            // dia inteiro varrido, sem vendas
+    expect(r.periodoEfetivo).toEqual({ fromYmd: '2026-08-04', toYmd: '2026-08-04' });
+  });
+
+  it('lastResult de FALHA nao estende a janela — nunca afirmar cobertura inexistente', () => {
+    for (const lastResult of ['erro_parcial', 'parcial', 'sync_em_andamento', 'job_em_andamento']) {
+      const r = avaliarCobertura(
+        { fromYmd: '2026-08-05', toYmd: '2026-08-05' },
+        { ...SINCRONIZADO_ATE_05, lastResult }
+      );
+      expect(r.tipo, lastResult).toBe('indisponivel');
+    }
+  });
+
+  it("'ok' e 'sem_novos' sao ambos sucesso e estendem a janela", () => {
+    for (const lastResult of ['ok', 'sem_novos']) {
+      const r = avaliarCobertura(
+        { fromYmd: '2026-08-05', toYmd: '2026-08-05' },
+        { ...SINCRONIZADO_ATE_05, lastResult }
+      );
+      expect(r.tipo, lastResult).not.toBe('indisponivel');
+    }
+  });
+
+  it('sincronizacao ANTERIOR ao ultimo pedido nao encurta a janela', () => {
+    const r = avaliarCobertura(
+      { fromYmd: '2026-08-03', toYmd: '2026-08-03' },
+      { ...COBERTURA_REAL, lastSyncAt: '2026-07-01T12:00:00.000Z', lastResult: 'ok' }
+    );
+    expect(r.tipo).not.toBe('indisponivel');
+    expect(r.dadosAteYmd).toBe('2026-08-03');
+  });
+
+  it('dia POSTERIOR a sincronizacao continua indisponivel', () => {
+    const r = avaliarCobertura({ fromYmd: '2026-08-06', toYmd: '2026-08-06' }, SINCRONIZADO_ATE_05);
+    expect(r.tipo).toBe('indisponivel');
+  });
+
+  it('sem pedido algum, a sincronizacao sozinha nao inventa janela de inicio', () => {
+    const r = avaliarCobertura(
+      { fromYmd: '2026-08-05', toYmd: '2026-08-05' },
+      { oldestDate: null, newestDate: null, partial: false, lastSyncAt: '2026-08-05T13:29:00.000Z', lastResult: 'ok' }
+    );
+    expect(r.tipo).toBe('indisponivel');
+  });
+
+  it('metricas do dia varrido sem vendas: zero de verdade, nao ausencia de dado', () => {
+    const r = calcularConsulta([], { fromYmd: '2026-08-05', toYmd: '2026-08-05' }, SINCRONIZADO_ATE_05);
+    expect(r.disponivel).toBe(true);
+    expect(r.metricas?.receita).toBe(0);
+    expect(r.metricas?.pedidos).toBe(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Comparacao com cobertura DESIGUAL — o caso dos +160.030,95%
+// ──────────────────────────────────────────────────────────────────────────
+// O snapshot comeca em 13/08/2025. "Este ano vs ano passado" comparava 8 meses
+// de 2026 contra DOIS DIAS de 2025 e devolvia uma variacao de seis digitos:
+// aritmeticamente correta, informativamente falsa. Aqui a variacao e suprimida.
+// ══════════════════════════════════════════════════════════════════════════
+describe('calcularComparacao — cobertura desigual suprime a variacao', () => {
+  // Dados a partir de 13/08/2025, como no snapshot real.
+  const DESDE_AGOSTO: CoberturaSnapshot = {
+    oldestDate: '2025-08-13T18:12:01.000-04:00',
+    newestDate: '2026-08-13T09:13:15.000-04:00',
+    partial: false,
+  };
+  const pedido = (data: string, valor: number): OrderSlim => ({
+    id: 'o' + data + valor, status: 'paid', date_created: data,
+    paid_amount: valor, total_amount: null,
+    order_items: [{ quantity: 1, unit_price: valor, item: { id: 'MLB1', title: 'X', seller_sku: null, variation_id: null } }],
+  } as OrderSlim);
+
+  const ANO_ATUAL = { fromYmd: '2026-01-01', toYmd: '2026-08-14' };
+  const ANO_ANTERIOR = { fromYmd: '2025-01-01', toYmd: '2025-08-14' };
+
+  it('ano inteiro contra dois dias NAO produz variacao percentual', () => {
+    const orders = [pedido('2026-03-01T12:00:00.000Z', 345242), pedido('2025-08-14T12:00:00.000Z', 215)];
+    const r = calcularComparacao(orders, ANO_ATUAL, ANO_ANTERIOR, DESDE_AGOSTO);
+    expect(r.comparavel).toBe(false);
+    expect(r.variacao).toBeNull();
+    expect(r.warnings).toContain(WARN_COMPARACAO_DESIGUAL);
+  });
+
+  it('os valores absolutos dos DOIS lados continuam disponiveis', () => {
+    const orders = [pedido('2026-03-01T12:00:00.000Z', 345242), pedido('2025-08-14T12:00:00.000Z', 215)];
+    const r = calcularComparacao(orders, ANO_ATUAL, ANO_ANTERIOR, DESDE_AGOSTO);
+    // Suprimir a variacao NAO pode esconder os fatos.
+    expect(r.atual.metricas?.receita).toBe(345242);
+    expect(r.anterior.metricas?.receita).toBe(215);
+  });
+
+  it('a fracao coberta de cada lado e reportada, para explicar a recusa', () => {
+    const r = calcularComparacao([], ANO_ATUAL, ANO_ANTERIOR, DESDE_AGOSTO);
+    expect(r.cobertura.atual).toBeGreaterThan(0.99);
+    expect(r.cobertura.anterior).toBeLessThan(0.02);   // 2 dias de ~226
+  });
+
+  it('periodos AMBOS bem cobertos continuam comparaveis normalmente', () => {
+    const orders = [pedido('2026-07-10T12:00:00.000Z', 200), pedido('2026-06-10T12:00:00.000Z', 100)];
+    const r = calcularComparacao(
+      orders, { fromYmd: '2026-07-01', toYmd: '2026-07-31' }, { fromYmd: '2026-06-01', toYmd: '2026-06-30' },
+      DESDE_AGOSTO
+    );
+    expect(r.comparavel).toBe(true);
+    expect(r.variacao?.receitaPct).toBeCloseTo(100, 6);
+    expect(r.warnings).toHaveLength(0);
+  });
+
+  it('no limite exato de cobertura a comparacao AINDA vale', () => {
+    // Lado anterior coberto em 70% dos dias solicitados.
+    const cobertura: CoberturaSnapshot = {
+      oldestDate: '2026-06-08T00:00:00.000-03:00',   // dia 8 => 23 de 30 dias ~ 76%
+      newestDate: '2026-07-31T23:59:59.999-03:00',
+      partial: false,
+    };
+    const r = calcularComparacao(
+      [], { fromYmd: '2026-07-01', toYmd: '2026-07-31' }, { fromYmd: '2026-06-01', toYmd: '2026-06-30' },
+      cobertura
+    );
+    expect(r.cobertura.anterior).toBeGreaterThanOrEqual(COBERTURA_MINIMA_COMPARACAO);
+    expect(r.comparavel).toBe(true);
+  });
+
+  it('lado indisponivel continua sem variacao e marcado como nao comparavel', () => {
+    const r = calcularComparacao([], ANO_ATUAL, { fromYmd: '2020-01-01', toYmd: '2020-12-31' }, DESDE_AGOSTO);
+    expect(r.variacao).toBeNull();
+    expect(r.comparavel).toBe(false);
   });
 });

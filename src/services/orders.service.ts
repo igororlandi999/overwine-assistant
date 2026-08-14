@@ -423,8 +423,37 @@ export function cancelMotivos(
   );
 }
 
-// ── 10. contarPorStatus ─────────────────────────────────────────────────────
+// ── 9b. unidadesPorItem ──────────────────────────────────────────
 
+/**
+ * Unidades vendidas por item_id — porte do bloco `vendas30` de estGetSKUData
+ * (dashboard, aba Estoque). Convenç̃o PRÓPRIA, deliberadamente diferente das
+ * demais deste arquivo:
+ *  - EXCLUI apenas `cancelled` — pendentes CONTAM (igual a vendasPorItem, e
+ *    diferente de sales-metrics/faturamentoMensal, que exigem 'paid');
+ *  - percorre TODOS os order_items (vendasPorItem indexa só o primeiro);
+ *  - `quantity || 1` — fallback do legado, aplicado também a quantity 0.
+ * Período opcional (nulos = sem filtro), bordas conforme dentroDoPeriodo.
+ */
+export function unidadesPorItem(
+  orders: OrderInput[],
+  inicio: Date | null = null,
+  fim: Date | null = null
+): Map<string, number> {
+  const mapa = new Map<string, number>();
+  for (const o of orders) {
+    if (o.status === 'cancelled') continue;
+    if ((inicio || fim) && !dentroDoPeriodo(o.date_created, inicio, fim)) continue;
+    for (const oi of o.order_items ?? []) {
+      const id = oi.item?.id;
+      if (!id) continue;
+      mapa.set(id, (mapa.get(id) || 0) + (oi.quantity || 1));
+    }
+  }
+  return mapa;
+}
+
+// ── 10. contarPorStatus ─────────────────────────────────────────────────────
 /**
  * Conta pedidos por status. Utilitário para KPIs (ex.: taxa de cancelamento =
  * cancelled / (cancelled + paid)). status ausente → 'desconhecido'.

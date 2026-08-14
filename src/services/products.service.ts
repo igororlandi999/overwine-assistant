@@ -22,7 +22,7 @@
  *   empate dependia da ordem de entrada).
  */
 import { z } from 'zod';
-import custosConfig from '../config/custos.json';
+import custosConfig from '../config/custos.json' with { type: 'json' };
 
 // ── Contratos de entrada (somente os campos realmente usados) ─────────────
 
@@ -62,20 +62,32 @@ export interface OrderInput {
 const custoRegraSchema = z.object({
   ordem: z.number().int().positive(),
   id: z.string().min(1),
-  custoUnitario: z.number().min(0),
+  custoProduto: z.number().min(0),
   match: z.array(z.string().min(1)).min(1),
   tipo: z.array(z.string().min(1)).optional(),
   exclui: z.array(z.string().min(1)).optional(),
+});
+
+/**
+ * Custos logísticos por unidade vendida. `frete` incide em toda venda;
+ * `embalagem` incide SOMENTE em venda por estoque próprio — no Full o Mercado
+ * Livre embala e não há custo unitário de embalagem.
+ */
+const logisticaSchema = z.object({
+  frete: z.number().min(0),
+  embalagem: z.number().min(0),
 });
 
 const custosConfigSchema = z.object({
   versao: z.number().int().positive(),
   moeda: z.literal('BRL'),
   fonte: z.string().min(1),
+  logistica: logisticaSchema,
   regras: z.array(custoRegraSchema).min(1),
 });
 
 export type CustoRegra = z.infer<typeof custoRegraSchema>;
+export type Logistica = z.infer<typeof logisticaSchema>;
 export type CustosConfig = z.infer<typeof custosConfigSchema>;
 
 let regrasCache: { config: CustosConfig; regrasOrdenadas: CustoRegra[] } | null = null;
@@ -165,12 +177,12 @@ export function normalizeTitle(title: string | null | undefined): string {
 // ── getCustoUnitario ──────────────────────────────────────────────────────
 
 export type CustoProdutoResultado =
-  | { encontrado: true; custoUnitario: number; fonte: string; regraId: string }
-  | { encontrado: false; custoUnitario: null; fonte: null; regraId: null };
+  | { encontrado: true; custoProduto: number; fonte: string; regraId: string }
+  | { encontrado: false; custoProduto: null; fonte: null; regraId: null };
 
 const NAO_ENCONTRADO: CustoProdutoResultado = {
   encontrado: false,
-  custoUnitario: null,
+  custoProduto: null,
   fonte: null,
   regraId: null,
 };
@@ -181,7 +193,8 @@ function normalizarParaMatch(s: string): string {
 }
 
 /**
- * Custo unitário de um anúncio pelo título — paridade exata com o legado:
+ * Custo PURO de aquisição de um anúncio pelo título — não inclui frete nem
+ * embalagem (use `custoUnitarioVendido` para o custo por unidade vendida):
  * - título e termos de `match` são normalizados (minúsculas + sem acentos);
  * - termos de `tipo` e `exclui` são comparados COMO ESTÃO contra o título já
  *   normalizado (quirk herdado: 'rosé' em exclui nunca casa; 'rose' casa);
@@ -190,7 +203,7 @@ function normalizarParaMatch(s: string): string {
  * futura por SKU, mas — como no legado — NÃO participa do matching hoje.
  * Custo desconhecido retorna encontrado: false (nunca zero, nunca estimado).
  */
-export function getCustoUnitario(
+export function getCustoProduto(
   titulo: string | null | undefined,
   _sku?: string | null,
   regras: CustoRegra[] = carregarCustos().regrasOrdenadas,
@@ -205,10 +218,38 @@ export function getCustoUnitario(
     const temTipo = !regra.tipo || regra.tipo.some(tp => t.includes(tp));
     const temExcl = !!regra.exclui && regra.exclui.some(ex => t.includes(ex));
     if (temTipo && !temExcl) {
-      return { encontrado: true, custoUnitario: regra.custoUnitario, fonte, regraId: regra.id };
+      return { encontrado: true, custoProduto: regra.custoProduto, fonte, regraId: regra.id };
     }
   }
   return NAO_ENCONTRADO;
+}
+
+/**
+ * `logistic_type` do pedido que caracteriza venda pelo Full. Fora dessa lista
+ * (inclusive null/ausente) a venda é tratada como estoque próprio, que é o
+ * lado CONSERVADOR: soma embalagem e portanto nunca infla a margem.
+ */
+const LOGISTIC_TYPES_FULL: ReadonlySet<string> = new Set(['fulfillment']);
+
+/** true quando o pedido foi atendido pelo Full (sem custo de embalagem). */
+export function ehVendaFull(logisticType: string | null | undefined): boolean {
+  return typeof logisticType === 'string' && LOGISTIC_TYPES_FULL.has(logisticType.toLowerCase());
+}
+
+/**
+ * Custo por UNIDADE VENDIDA: custo do produto + frete + embalagem, sendo a
+ * embalagem aplicada apenas em venda por estoque próprio (no Full o Mercado
+ * Livre embala). Custo de produto desconhecido devolve null — nunca zero, para
+ * que a margem seja declarada indisponível em vez de fabricada.
+ */
+export function custoUnitarioVendido(
+  custoProduto: number | null,
+  logisticType: string | null | undefined,
+  logistica: Logistica = carregarCustos().config.logistica
+): number | null {
+  if (custoProduto === null) return null;
+  const embalagem = ehVendaFull(logisticType) ? 0 : logistica.embalagem;
+  return custoProduto + logistica.frete + embalagem;
 }
 
 // ── buildConsolidado ──────────────────────────────────────────────────────

@@ -162,3 +162,176 @@ describe('28. nenhuma rota importa/chama mlFetch (garantia estática)', () => {
     expect(src).not.toMatch(/\.scan\s*\(|\.keys\s*\(|\.mget\s*\(/);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// 29. GET /api/orders/metrics — agregados do snapshot ativos
+// ═════════════════════════════════════════════════════════════════════════
+describe('29. GET /api/orders/metrics', () => {
+  async function chamar(query: Record<string, unknown>, token?: string) {
+    const res = mockRes();
+    await handler(
+      mockReq({
+        query: { resource: 'metrics', ...query },
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      }),
+      res
+    );
+    return res;
+  }
+
+  it('401 sem sessao', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const res = await chamar({});
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe('unauthorized');
+  });
+
+  it('401 com token invalido', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const res = await chamar({}, 'sess_naoexiste');
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('405 fora do GET', async () => {
+    const t = await comSessao();
+    const res = mockRes();
+    await handler(
+      mockReq({ method: 'POST', query: { resource: 'metrics' }, headers: { authorization: `Bearer ${t}` } }),
+      res
+    );
+    expect(res.statusCode).toBe(405);
+  });
+
+  it('200 com sessao valida e snapshot publicado', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const res = await chamar({}, await comSessao());
+    expect(res.statusCode).toBe(200);
+    const b = res.json();
+    expect(b.ok).toBe(true);
+    expect(b.versao).toBe(1);
+    expect(b.coverage.alvo).toBe('ativos');
+    expect(b.coverage.totalRegistros).toBe(10);
+  });
+
+  it('409 not_ready quando nao ha snapshot', async () => {
+    const res = await chamar({}, await comSessao());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('not_ready');
+  });
+
+  it('409 not_ready com snapshot vazio (nunca zero disfarcado)', async () => {
+    await publicar(cache, 'ativos', 0, 5);
+    const res = await chamar({}, await comSessao());
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('not_ready');
+  });
+
+  it('NUNCA le o snapshot de cancelados, mesmo com alvo=cancelados', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    await publicar(cache, 'cancelados', 4, 5);
+    const lidas: string[] = [];
+    const orig = (cache as any).get.bind(cache);
+    (cache as any).get = async (k: string) => { lidas.push(k); return orig(k); };
+    const res = await chamar({ alvo: 'cancelados' }, await comSessao());
+    expect(res.statusCode).toBe(200);
+    expect(lidas.filter(k => k.includes('orders:cancel'))).toEqual([]);
+    expect(res.json().coverage.alvo).toBe('ativos');
+  });
+
+  it('nao publica cancelled em porStatus e declara indisponibilidade', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const b = (await chamar({}, await comSessao())).json();
+    expect(Object.keys(b.porStatus)).not.toContain('cancelled');
+    expect(b.cancelados).toEqual({
+      disponivel: false,
+      total: null,
+      motivo: 'fora_do_escopo_do_snapshot_ativos',
+      fonte: 'carga_sob_demanda_no_dashboard',
+    });
+  });
+
+  it('nenhuma PII no corpo serializado', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const res = await chamar({}, await comSessao());
+    const bruto = res.body as string;
+    for (const proibido of [
+      'buyer', 'nickname', 'shipping', 'order_items', 'seller_sku',
+      'unit_price', 'paid_amount', 'date_created', 'cursor', 'chunk',
+    ]) {
+      expect(bruto).not.toContain(proibido);
+    }
+  });
+
+  it('nao expoe chaves Redis, versao de chunk nem cursor', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const bruto = (await chamar({}, await comSessao())).body as string;
+    expect(bruto).not.toContain('orders:');
+    expect(bruto).not.toContain('nextCursor');
+  });
+
+  const parametrosInvalidos: Array<[string, Record<string, unknown>, string]> = [
+    ['parametro desconhecido', { foo: 'x' }, 'parametro_desconhecido'],
+    ['dias nao numerico', { dias: 'abc' }, 'dias_invalido'],
+    ['dias fora do limite', { dias: '99999' }, 'dias_fora_do_limite'],
+    ['dias com from', { dias: '7', from: '2026-07-01' }, 'combinacao_invalida'],
+    ['intervalo incompleto', { from: '2026-07-01' }, 'intervalo_incompleto'],
+    ['data inexistente', { from: '2026-02-31', to: '2026-03-01' }, 'data_invalida'],
+    ['intervalo invertido', { from: '2026-07-31', to: '2026-07-01' }, 'intervalo_invertido'],
+    ['intervalo excessivo', { from: '2015-01-01', to: '2026-07-01' }, 'intervalo_excessivo'],
+  ];
+  for (const [nome, q, code] of parametrosInvalidos) {
+    it(`400 deterministico: ${nome}`, async () => {
+      await publicar(cache, 'ativos', 10, 5);
+      const res = await chamar(q, await comSessao());
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'invalid_params', code });
+    });
+  }
+
+  it('parametros invalidos NAO leem o snapshot', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const t = await comSessao();
+    const lidas: string[] = [];
+    const orig = (cache as any).get.bind(cache);
+    (cache as any).get = async (k: string) => { lidas.push(k); return orig(k); };
+    const res = await chamar({ dias: 'abc' }, t);
+    expect(res.statusCode).toBe(400);
+    expect(lidas.filter(k => k.startsWith('orders:'))).toEqual([]);
+  });
+
+  it('dias e from/to validos resolvem o periodo devolvido', async () => {
+    await publicar(cache, 'ativos', 10, 5);
+    const t = await comSessao();
+    const b1 = (await chamar({ dias: '30' }, t)).json();
+    expect(b1.periodo.toYmd >= b1.periodo.fromYmd).toBe(true);
+    const b2 = (await chamar({ from: '2026-07-01', to: '2026-07-31' }, t)).json();
+    expect(b2.periodo).toMatchObject({ fromYmd: '2026-07-01', toYmd: '2026-07-31' });
+  });
+
+  it('contratos de status e list seguem intactos', async () => {
+    const man = await publicar(cache, 'ativos', 10, 5);
+    const t = await comSessao();
+    const st = mockRes();
+    await handler(mockReq({ query: { resource: 'status', alvo: 'ativos' }, headers: { authorization: `Bearer ${t}` } }), st);
+    expect(st.statusCode).toBe(200);
+    expect(st.json().versao).toBe(man.versao);
+    const li = mockRes();
+    await handler(mockReq({ query: { resource: 'list', alvo: 'ativos', pageSize: '5' }, headers: { authorization: `Bearer ${t}` } }), li);
+    expect(li.statusCode).toBe(200);
+    expect(li.json().items.length).toBe(5);
+    expect(typeof li.json().nextCursor).toBe('string');
+  });
+
+  it('recurso desconhecido continua 404', async () => {
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'metricas' } }), res);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('a rota metrics nao importa ml-auth nem menciona mercadolibre', () => {
+    const src = readFileSync(new URL('../api/orders/[resource].ts', import.meta.url), 'utf-8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    expect(src).not.toMatch(/mercadolibre/);
+    expect(src).not.toMatch(/mlFetch\s*\(/);
+  });
+});

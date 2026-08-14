@@ -1,9 +1,15 @@
 /**
  * GET /api/orders/status?alvo=ativos|cancelados
  * GET /api/orders/list?alvo=...&cursor=...&pageSize=...
+ * GET /api/orders/metrics?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
  *
  * Rota de LEITURA dos snapshots de pedidos (Fase 4c.1). Uma única função
- * serverless com `resource ∈ {status, list}` (padrão de api/auth/[action].ts).
+ * serverless com `resource ∈ {status, list, metrics}` (padrão de
+ * api/auth/[action].ts).
+ *
+ * `metrics` devolve SOMENTE agregados do snapshot `ativos`: nenhum pedido
+ * bruto, nenhum id de pedido, nenhuma data individual, nenhum buyer, nickname,
+ * shipping ou order_items. Contratos de `status` e `list` ficam intocados.
  *
  * Regras: só GET/OPTIONS; CORS pelos helpers existentes; Bearer de sessão
  * obrigatório (x-admin-key NÃO substitui sessão); rate limit por sessão.
@@ -16,6 +22,8 @@ import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import type { Alvo } from '../../src/lib/orders-store.js';
 import { getReadStatus, getPage } from '../../src/services/orders-read.service.js';
+import { readSnapshot } from '../../src/lib/orders-store.js';
+import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
 
 function parseAlvo(v: unknown): Alvo {
   return v === 'cancelados' ? 'cancelados' : 'ativos'; // default ativos
@@ -25,7 +33,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
 
   const resource = String(req.query.resource || '');
-  if (resource !== 'status' && resource !== 'list') {
+  if (resource !== 'status' && resource !== 'list' && resource !== 'metrics') {
     return json(res, 404, { error: `Recurso desconhecido: ${resource}` });
   }
   if (req.method !== 'GET') {
@@ -49,6 +57,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (resource === 'status') {
       const status = await getReadStatus(cache, alvo);
       return json(res, 200, status);
+    }
+
+    if (resource === 'metrics') {
+      // Métricas SEMPRE do snapshot 'ativos' — o parâmetro alvo é aceito na
+      // allowlist mas ignorado de propósito: cancelados têm outra fonte.
+      const p = resolverPeriodo(req.query as Record<string, unknown>);
+      if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
+
+      const status = await getReadStatus(cache, 'ativos');
+      if (status.versao === null || status.totalRegistros <= 0 || !status.oldestDate || !status.newestDate) {
+        return json(res, 409, { error: 'not_ready' });
+      }
+
+      let pedidos;
+      try {
+        pedidos = await readSnapshot(cache, 'ativos');   // UMA leitura por chamada
+      } catch {
+        return json(res, 409, { error: 'not_ready' });
+      }
+      if (pedidos.length === 0) return json(res, 409, { error: 'not_ready' });
+
+      return json(res, 200, { ok: true, ...montarMetrics(pedidos, status, p.periodo) });
     }
 
     // resource === 'list'

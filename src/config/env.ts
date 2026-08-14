@@ -33,6 +33,24 @@ const schema = z.object({
   ORDERS_SYNC_LOCK_TTL_S: z.coerce.number().int().positive().default(120),
   /** Tentativas por página antes de desistir do passo (retomável). */
   ORDERS_PAGE_RETRIES: z.coerce.number().int().min(0).default(2),
+    // ── Snapshot de catálogo (Onda E) ───────────────────────────
+  /** Anúncios por chunk no Redis. */
+  ITEMS_CATALOG_CHUNK_SIZE: z.coerce.number().int().positive().default(500),
+
+  /** TTL soft: após 15 min o snapshot é marcado como stale. */
+  ITEMS_CATALOG_SOFT_TTL_S: z.coerce.number().int().positive().default(900),
+
+  /** TTL hard: após 24 h o catálogo precisa ser reconstruído. */
+  ITEMS_CATALOG_HARD_TTL_S: z.coerce.number().int().positive().default(86400),
+
+  /** TTL do lock de reconstrução. */
+  ITEMS_CATALOG_LOCK_TTL_S: z.coerce.number().int().positive().default(60),
+
+  /** Cooldown entre reconstruções forçadas. */
+  ITEMS_CATALOG_COOLDOWN_S: z.coerce.number().int().positive().default(60),
+
+  /** Teto de chamadas ao ML por construção. */
+  ITEMS_CATALOG_MAX_CALLS: z.coerce.number().int().positive().default(200),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -55,3 +73,4 @@ export function getEnv(): Env {
 export function resetEnvForTests() {
   cached = null;
 }
+

@@ -10,6 +10,7 @@ import {
   faturamentoPorDia,
   cancelMotivos,
   contarPorStatus,
+  unidadesPorItem,
   type OrderInput,
 } from '../src/services/orders.service.js';
 import { brtStartOfDay, brtEndOfDay } from '../src/lib/datas-brt.js';
@@ -365,5 +366,86 @@ describe('contarPorStatus', () => {
       order({ id: 4, status: null }),
     ]);
     expect(c).toEqual({ paid: 2, cancelled: 1, desconhecido: 1 });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// 9b. unidadesPorItem — porte do bloco vendas30 de estGetSKUData
+// ═════════════════════════════════════════════════════════════════════════
+describe('unidadesPorItem', () => {
+  it('percorre TODOS os order_items, nao apenas o primeiro', () => {
+    const m = unidadesPorItem([
+      order({
+        id: 1,
+        order_items: [
+          { quantity: 2, unit_price: 10, item: { id: 'MLB1', title: 'A' } },
+          { quantity: 3, unit_price: 10, item: { id: 'MLB2', title: 'B' } },
+        ],
+      }),
+    ]);
+    expect(m.get('MLB1')).toBe(2);
+    expect(m.get('MLB2')).toBe(3);
+  });
+
+  it('exclui cancelled e CONTA pendentes (regra !== cancelled)', () => {
+    const m = unidadesPorItem([
+      order({ id: 1, status: 'paid' }),
+      order({ id: 2, status: 'payment_required' }),
+      order({ id: 3, status: 'cancelled' }),
+    ]);
+    expect(m.get('MLB1')).toBe(2); // paid + pendente; cancelado fora
+  });
+
+  it('quantity ausente ou 0 cai para 1 (fallback do legado)', () => {
+    const m = unidadesPorItem([
+      order({ id: 1, order_items: [{ quantity: 0, unit_price: 1, item: { id: 'MLB1', title: 'A' } }] }),
+      order({ id: 2, order_items: [{ unit_price: 1, item: { id: 'MLB2', title: 'B' } } as never] }),
+    ]);
+    expect(m.get('MLB1')).toBe(1);
+    expect(m.get('MLB2')).toBe(1);
+  });
+
+  it('ignora order_items sem item.id', () => {
+    const m = unidadesPorItem([
+      order({ id: 1, order_items: [{ quantity: 5, unit_price: 1, item: { title: 'sem id' } } as never] }),
+    ]);
+    expect(m.size).toBe(0);
+  });
+
+  it('order_items ausente nao quebra', () => {
+    const m = unidadesPorItem([{ id: 1, status: 'paid', date_created: '2026-07-10T12:00:00.000-03:00' }]);
+    expect(m.size).toBe(0);
+  });
+
+  it('filtra por periodo em BRT com bordas inclusivas', () => {
+    const pedidos = [
+      order({ id: 1, date_created: '2026-07-10T00:00:00.000-03:00' }),
+      order({ id: 2, date_created: '2026-07-12T23:59:59.999-03:00' }),
+      order({ id: 3, date_created: '2026-07-13T00:00:00.000-03:00' }),
+    ];
+    const m = unidadesPorItem(pedidos, brtStartOfDay('2026-07-10'), brtEndOfDay('2026-07-12'));
+    expect(m.get('MLB1')).toBe(2); // pedidos 1 e 2; o 3 fica de fora
+  });
+
+  it('sem periodo, agrega tudo', () => {
+    const m = unidadesPorItem([
+      order({ id: 1, date_created: '2020-01-01T12:00:00.000-03:00' }),
+      order({ id: 2, date_created: '2026-07-10T12:00:00.000-03:00' }),
+    ]);
+    expect(m.get('MLB1')).toBe(2);
+  });
+
+  it('difere de vendasPorItem: multi-item nao e subcontado', () => {
+    const pedidos = [
+      order({
+        id: 1,
+        order_items: [
+          { quantity: 1, unit_price: 10, item: { id: 'MLB1', title: 'A' } },
+          { quantity: 4, unit_price: 10, item: { id: 'MLB2', title: 'B' } },
+        ],
+      }),
+    ];
+    expect(vendasPorItem(pedidos).has('MLB2')).toBe(false); // so o primeiro order_item
+    expect(unidadesPorItem(pedidos).get('MLB2')).toBe(4);
   });
 });

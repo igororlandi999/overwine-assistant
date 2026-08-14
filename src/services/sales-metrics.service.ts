@@ -62,6 +62,45 @@ export interface CoberturaSnapshot {
   newestDate: string | null;
   /** partial do status de leitura: snapshot parcial (semântica do contrato atual). */
   partial: boolean;
+  /**
+   * lastSyncAt do status: TIMESTAMP da última sincronização concluída.
+   * Existe porque "não há pedido depois de X" NÃO é o mesmo que "não sabemos o
+   * que houve depois de X": um dia varrido sem nenhuma venda é conhecido e vale
+   * zero. Sem este campo, toda manhã antes da primeira venda o sistema
+   * declarava o dia indisponível. Ver `janelaAte`.
+   */
+  lastSyncAt?: string | null;
+  /**
+   * lastResult do status. A janela só é estendida até lastSyncAt quando a
+   * sincronização TERMINOU BEM — o timestamp é gravado mesmo em falha, e
+   * confiar nele nesse caso afirmaria cobertura que não existe.
+   */
+  lastResult?: string | null;
+}
+
+/**
+ * Desfechos de sincronização que autorizam estender a janela conhecida até
+ * lastSyncAt. 'sem_novos' É sucesso: significa que a varredura rodou e não
+ * encontrou pedido algum — exatamente o caso do dia sem vendas.
+ */
+const SYNC_RESULTS_CONFIAVEIS: ReadonlySet<string> = new Set(['ok', 'sem_novos']);
+
+/**
+ * Instante até o qual a janela é CONHECIDA: o mais recente entre o último
+ * pedido e a última sincronização bem-sucedida. Devolve também a origem, para
+ * que o chamador saiba se o limite veio de dado ou de varredura.
+ */
+export function janelaAte(c: CoberturaSnapshot): { instante: number; origem: 'pedido' | 'sync' } | null {
+  const tNewest = c.newestDate ? new Date(c.newestDate).getTime() : NaN;
+  const temPedido = Number.isFinite(tNewest);
+
+  const confiavel = typeof c.lastResult === 'string' && SYNC_RESULTS_CONFIAVEIS.has(c.lastResult);
+  const tSync = confiavel && c.lastSyncAt ? new Date(c.lastSyncAt).getTime() : NaN;
+  const temSync = Number.isFinite(tSync);
+
+  if (temSync && (!temPedido || tSync > tNewest)) return { instante: tSync, origem: 'sync' };
+  if (temPedido) return { instante: tNewest, origem: 'pedido' };
+  return null;
 }
 
 export type CoberturaTipo = 'total' | 'parcial' | 'indisponivel';
@@ -144,7 +183,10 @@ export function avaliarCobertura(
 
   // Dia civil BRT de cada limite + o instante exato, para saber se o dia é integral.
   const desde = ymdBRT(cobertura.oldestDate);
-  const ate = ymdBRT(cobertura.newestDate);
+  // O fim da janela é o mais recente entre o último pedido e a última
+  // sincronização bem-sucedida — ver janelaAte.
+  const limite = janelaAte(cobertura);
+  const ate = limite ? ymdBRT(new Date(limite.instante).toISOString()) : null;
 
   // Sem janela conhecida: não há como afirmar cobertura.
   if (!desde || !ate) {
@@ -162,7 +204,7 @@ export function avaliarCobertura(
   // O dia do oldest só é integral se o primeiro pedido estiver exatamente em
   // 00:00:00.000 BRT; idem para o newest em 23:59:59.999 BRT.
   const tOldest = new Date(cobertura.oldestDate as string).getTime();
-  const tNewest = new Date(cobertura.newestDate as string).getTime();
+  const tNewest = limite!.instante;
   const inicioDoDiaDesde = brtStartOfDay(desde)?.getTime() ?? NaN;
   const fimDoDiaAte = brtEndOfDay(ate)?.getTime() ?? NaN;
   const primeiroDiaIncompleto = !(tOldest <= inicioDoDiaDesde);
@@ -289,11 +331,47 @@ export function calcularConsulta(
   };
 }
 
+/**
+ * Fração MÍNIMA do período solicitado que precisa estar coberta por dados para
+ * que uma comparação seja legítima.
+ *
+ * Motivo concreto: o snapshot começa em 13/08/2025. "Este ano vs ano passado"
+ * comparava 8 meses de 2026 contra DOIS DIAS de 2025 e produzia uma variação de
+ * +160.030,95% — aritmeticamente correta e informativamente falsa. O aviso de
+ * cobertura parcial existia, mas vinha no rodapé de um número gigante.
+ *
+ * Abaixo deste limite a variação NÃO é calculada: os dois valores absolutos são
+ * informados e o motivo é declarado. Um número enganoso é pior que a ausência
+ * dele.
+ */
+export const COBERTURA_MINIMA_COMPARACAO = 0.7;
+
+export const WARN_COMPARACAO_DESIGUAL = 'comparacao_cobertura_desigual';
+
+/** Fração do período solicitado efetivamente coberta (0..1). */
+export function fracaoCoberta(r: ResultadoConsulta): number {
+  if (!r.disponivel || !r.periodoCalculado) return 0;
+  const pedidos = diasNoPeriodo(r.periodoSolicitado);
+  const cobertos = diasNoPeriodo(r.periodoCalculado);
+  return pedidos > 0 ? cobertos / pedidos : 0;
+}
+
+function diasNoPeriodo(p: PeriodoYmd): number {
+  const ini = brtStartOfDay(p.fromYmd)?.getTime();
+  const fim = brtStartOfDay(p.toYmd)?.getTime();
+  if (ini === undefined || fim === undefined || !Number.isFinite(ini) || !Number.isFinite(fim)) return 0;
+  return Math.round((fim - ini) / 86400000) + 1;
+}
+
 /** Resultado de comparação entre dois períodos (ex.: esta semana × anterior). */
 export interface ResultadoComparacao {
   atual: ResultadoConsulta;
   anterior: ResultadoConsulta;
-  /** Variações absolutas e percentuais; null quando algum lado indisponível. */
+  /**
+   * Variações absolutas e percentuais. null quando algum lado está
+   * indisponível OU quando a cobertura de um dos lados é baixa demais para
+   * que a comparação signifique alguma coisa — ver COBERTURA_MINIMA_COMPARACAO.
+   */
   variacao: {
     receitaAbs: number;
     receitaPct: number | null;   // null quando a base é 0 (divisão indefinida)
@@ -302,6 +380,11 @@ export interface ResultadoComparacao {
     unidadesAbs: number;
     unidadesPct: number | null;
   } | null;
+  /** Fração coberta de cada lado, para a redação poder explicar a recusa. */
+  cobertura: { atual: number; anterior: number };
+  /** true quando a variação foi suprimida por cobertura desigual. */
+  comparavel: boolean;
+  warnings: string[];
 }
 
 /** Variação percentual segura: base 0 → null (não inventa "100%" nem Infinity). */
@@ -323,9 +406,19 @@ export function calcularComparacao(
 ): ResultadoComparacao {
   const atual = calcularConsulta(orders, periodoAtual, cobertura);
   const anterior = calcularConsulta(orders, periodoAnterior, cobertura);
+  const cob = { atual: fracaoCoberta(atual), anterior: fracaoCoberta(anterior) };
 
   if (!atual.disponivel || !anterior.disponivel || !atual.metricas || !anterior.metricas) {
-    return { atual, anterior, variacao: null };
+    return { atual, anterior, variacao: null, cobertura: cob, comparavel: false, warnings: [] };
+  }
+
+  // Cobertura desigual: os dois lados existem, mas um deles mal foi coberto.
+  // Calcular percentual aqui produziria um número grande e falso.
+  if (cob.atual < COBERTURA_MINIMA_COMPARACAO || cob.anterior < COBERTURA_MINIMA_COMPARACAO) {
+    return {
+      atual, anterior, variacao: null, cobertura: cob,
+      comparavel: false, warnings: [WARN_COMPARACAO_DESIGUAL],
+    };
   }
 
   const a = atual.metricas;
@@ -333,6 +426,9 @@ export function calcularComparacao(
   return {
     atual,
     anterior,
+    cobertura: cob,
+    comparavel: true,
+    warnings: [],
     variacao: {
       receitaAbs: a.receita - b.receita,
       receitaPct: pct(a.receita, b.receita),

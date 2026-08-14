@@ -32,6 +32,12 @@ import {
 import {
   calcularComparacao,
   calcularConsulta,
+} from '../src/services/sales-metrics.service.js';
+import {
+  calcularMargem,
+  type ResultadoMargem,
+} from '../src/services/margin-metrics.service.js';
+import {
   type CoberturaSnapshot,
   type ResultadoComparacao,
   type ResultadoConsulta,
@@ -58,7 +64,12 @@ const AI_TEMPERATURE = 0.2;         // tarefa e reproduzir numeros do contexto: 
  * familia, revisar este campo (2.5 usa thinkingBudget: 0).
  */
 const AI_THINKING = { thinkingLevel: 'low' as const };
-const AI_TIMEOUT_MS = 10000;        // 10s (abaixo dos 15s de maxDuration)
+// 25s, abaixo dos 30s de maxDuration. Era 10s: suficiente para a resposta
+// tipica (~900ms), mas insuficiente quando o provedor engasga — o corte caia
+// exatamente em 10001ms com o MESMO tamanho de entrada que sucessos de 862ms.
+// Espera longa e preferivel a falha; o teto continua abaixo do limite da
+// funcao para que o erro seja NOSSO 504 tratado, nao um kill da plataforma.
+const AI_TIMEOUT_MS = 25000;
 const AI_ANSWER_MAX = 3000;         // acima disso => 502 (sem truncar)
 const RL_LIMIT = 10;                // 10 req / 60s por sessao (cabe no free tier ~10 RPM)
 const RL_WINDOW_S = 60;
@@ -87,7 +98,7 @@ const SYSTEM_PROMPT = [
   '',
   'REGRAS DE NEGÓCIO',
   '- Faturamento considera SOMENTE pedidos com status pago.',
-  '- Datas e períodos usam o fuso America/Sao_Paulo.',
+  '- Datas e períodos usam o fuso America/Sao_Paulo. A data de hoje é o valor de periodo.hojeBRT no contexto; use-a como referência do dia corrente.',
   '- Diferencie estoque próprio de estoque Full.',
   '- Formate moeda como R$ 1.234,56.',
   '- Se readiness.ready for falso ou houver blockers, avise que os dados ainda não estão prontos e não apresente números.',
@@ -110,13 +121,32 @@ const SYSTEM_PROMPT_AGREGADO = [
   'MODO CONSULTA HISTÓRICA',
   '- Os números dentro de <CONTEXTO> JÁ FORAM CALCULADOS pelo backend. Use exatamente esses valores.',
   '- Você NÃO calcula: não some, não subtraia, não divida, não estime, não converta e não recalcule ticket médio nem percentuais.',
+  '- A data de HOJE é o valor de periodo.hojeBRT no contexto, no fuso America/Sao_Paulo. Use-a ao mencionar o dia corrente ou ao situar o período na conversa; nunca deduza a data de outros campos.',
   '- Você NÃO escolhe datas: o período é query.period.fromYmd a query.period.toYmd, já resolvido em America/Sao_Paulo. Cite datas no formato DD/MM/AAAA quando for útil.',
   '- Se coverage.available for falso, diga que não há dados para o período pedido. NUNCA apresente ausência de dados como zero.',
   '- Se coverage.type for "parcial", informe que o intervalo realmente coberto vai de coverage.effectiveFromYmd a coverage.effectiveToYmd.',
   '- result null significa dado indisponível, não zero. averageTicket null significa que não houve pedidos pagos no período.',
   '- Em comparações, use compare.variation como veio. Percentual null significa base zero: diga que a comparação percentual não se aplica.',
   '- Mencione os itens de warnings quando forem relevantes à pergunta.',
+  '- Se compare.comparable for falso, NUNCA calcule nem cite variação percentual entre os períodos: informe os dois valores absolutos e diga que a comparação não é possível porque um dos períodos tem poucos dias de dados. Não estime, não deduza, não use expressões como "cresceu X vezes".',
   '- Responda em português do Brasil, direto, de 1 a 3 frases.',
+].join('\n');
+
+/**
+ * Extensão ADICIONAL, somada ao modo agregado apenas quando a consulta é de
+ * margem. Traduz em regras de redação as convenções do margin-metrics: a base
+ * de receita, a estimativa das tarifas, a exclusão da publicidade e o
+ * tratamento de custo desconhecido.
+ */
+const SYSTEM_PROMPT_MARGEM = [
+  '',
+  'MODO MARGEM',
+  '- A margem em result é ANTES de publicidade. Diga isso na resposta; nunca a apresente como margem final.',
+  '- Os valores são ESTIMATIVA: as tarifas de ML e envio são percentuais médios, não taxas reais por pedido. Marque o número com "est.".',
+  '- productRevenue é a receita dos PRODUTOS (preço unitário × quantidade). Ela NÃO inclui o frete cobrado do comprador, então é MENOR que o faturamento das consultas de vendas. Se o usuário estranhar a diferença, explique isso; nunca diga que um dos dois está errado.',
+  '- Se noCost.units for maior que zero, avise que os itens sem custo cadastrado ficaram de fora e cite os títulos de noCost.titles.',
+  '- Se available for falso com o aviso custo_insuficiente, diga que a margem não pode ser calculada porque falta custo para boa parte da receita, e liste noCost.titles para o usuário cadastrar. NUNCA apresente isso como margem zero.',
+  '- Margem negativa é um resultado legítimo: reporte o prejuízo com clareza.',
 ].join('\n');
 
 // Chaves proibidas (lista fechada, ja normalizadas: [^a-z0-9] removido).
@@ -477,6 +507,8 @@ function mensagemPeriodoInvalido(reason: InvalidPeriodReason): string {
       return 'O intervalo informado começa depois de terminar. Informe as datas em ordem, como 20/07/2026 a 25/07/2026.';
     case 'intervalo_incompleto':
       return 'O intervalo está incompleto. Informe as duas datas, como 20/07/2026 a 25/07/2026.';
+    case 'janela_excessiva':
+      return 'Essa janela é longa demais. Consulte no máximo os últimos 365 dias.';
     default:
       return 'Não consegui interpretar esse período. Informe uma data válida ou um intervalo como 20/07/2026 a 25/07/2026.';
   }
@@ -596,8 +628,50 @@ function montarContextoComparacao(q: ChatQuery, c: ResultadoComparacao, st: Orde
         unitsAbs: v.unidadesAbs,
         unitsPct: v.unidadesPct,
       },
+      // false => a variacao foi SUPRIMIDA de proposito (cobertura desigual).
+      comparable: c.comparavel,
+      coverageFraction: { current: c.cobertura.atual, previous: c.cobertura.anterior },
     },
     warnings: unir(c.atual.warnings, c.anterior.warnings),
+  };
+}
+
+/** Projeção de uma linha de margem. Nomes em inglês, como o resto do contexto. */
+function projetarLinhaMargem(l: ResultadoMargem['total']) {
+  if (l === null) return null;
+  return {
+    productRevenue: l.receitaProdutos,
+    mlFee: l.tarifaML,
+    shippingFee: l.tarifaEnvio,
+    cost: l.custoTotal,
+    margin: l.margem,
+    marginPct: l.margemPct,
+    units: l.unidades,
+  };
+}
+
+function montarContextoMargem(q: ChatQuery, r: ResultadoMargem, st: OrdersReadStatus) {
+  return {
+    query: { intent: q.intent, metric: q.metric, period: projetarPeriodo(q.period) },
+    result: projetarLinhaMargem(r.total),
+    coverage: {
+      available: r.disponivel,
+      type: r.cobertura,
+      effectiveFromYmd: r.periodoCalculado?.fromYmd ?? null,
+      effectiveToYmd: r.periodoCalculado?.toYmd ?? null,
+      dataFromYmd: ymdBRT(st.oldestDate),
+      dataToYmd: ymdBRT(st.newestDate),
+    },
+    // Itens sem custo cadastrado: ficam FORA da margem e são declarados.
+    noCost: {
+      productRevenue: r.semCusto.receitaProdutos,
+      units: r.semCusto.unidades,
+      revenueShare: r.semCusto.fracaoReceita,
+      titles: r.semCusto.titulos,
+    },
+    beforeAdvertising: r.antesDePublicidade,
+    estimated: r.estimado,
+    warnings: r.warnings,
   };
 }
 
@@ -610,7 +684,7 @@ function montarContextoComparacao(q: ChatQuery, c: ResultadoComparacao, st: Orde
 type PlanoChat =
   | { tipo: 'respondido' }
   | { tipo: 'legado' }
-  | { tipo: 'agregado'; contexto: unknown; query: ChatQuery };
+  | { tipo: 'agregado'; contexto: unknown; query: ChatQuery; margem?: boolean };
 
 /**
  * Roteamento determinístico. Leituras de snapshot acontecem SOMENTE no ramo
@@ -682,7 +756,16 @@ async function rotearConsulta(
     oldestDate: st.oldestDate,
     newestDate: st.newestDate,
     partial: st.partial,
+    // Permitem declarar "hoje sem vendas" em vez de "hoje desconhecido".
+    lastSyncAt: st.lastSyncAt,
+    lastResult: st.lastResult,
   };
+
+  // Margem tem pipeline próprio (custos + tarifas) e sinaliza o prompt extra.
+  if (q.metric === 'margin') {
+    const contexto = montarContextoMargem(q, calcularMargem(pedidos, q.period, cobertura), st);
+    return { tipo: 'agregado', contexto, query: q, margem: true };
+  }
 
   // Comparação reutiliza o MESMO array de pedidos nos dois períodos.
   const contexto = q.intent === 'sales_comparison' && q.comparePeriod
@@ -794,7 +877,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Caminho agregado: contexto MÍNIMO (sem pedidos, sem order_items, sem o
     // contexto fixo do frontend). Caminho legado: contexto 1.0.0 como antes.
     const ia = plano.tipo === 'agregado'
-      ? await chamarIA(apiKey, message, plano.contexto, SYSTEM_PROMPT_AGREGADO)
+      ? await chamarIA(
+          apiKey,
+          message,
+          plano.contexto,
+          plano.margem ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_MARGEM : SYSTEM_PROMPT_AGREGADO
+        )
       : await chamarIA(apiKey, message, body.context);
     const dur = Date.now() - t0;
 

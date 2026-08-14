@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   parseChatQuery,
   previousQueryValida,
+  CHAT_PERIOD_KINDS,
   type ChatQuery,
 } from '../src/services/chat-query.service.js';
 
@@ -372,6 +373,63 @@ describe('chat-query — continuidade minima', () => {
   });
 });
 
+describe('chat-query — continuidade com janela movel (last_n_days)', () => {
+  /** Turno 1 real: a consulta que o backend devolveria em meta.query. */
+  const ULTIMOS_7 = q('qual o faturamento nos ultimos 7 dias?');
+
+  it('a propria query de janela movel e aceita como previousQuery', () => {
+    expect(ULTIMOS_7.period.kind).toBe('last_n_days');
+    expect(previousQueryValida(ULTIMOS_7)).toBe(true);
+  });
+
+  it('"e nos ultimos 7 dias?" apos faturamento herda a metrica (nao vira metrica_ausente)', () => {
+    const x = q('e nos ultimos 7 dias?', { previousQuery: BASE });
+    expect(x.metric).toBe('revenue');
+    expect(x.period).toEqual({ kind: 'last_n_days', fromYmd: '2026-07-17', toYmd: '2026-07-23' });
+    expect(x.source).toEqual({ intent: 'previous', metric: 'previous', period: 'text' });
+  });
+
+  it('cadeia que COMECA em janela movel continua no turno seguinte', () => {
+    const x = q('e ontem?', { previousQuery: ULTIMOS_7 });
+    expect(x.metric).toBe('revenue');
+    expect(x.period.kind).toBe('yesterday');
+    expect(x.source.metric).toBe('previous');
+  });
+
+  it('"e os pedidos?" apos janela movel herda o periodo movel intacto', () => {
+    const x = q('e os pedidos?', { previousQuery: ULTIMOS_7 });
+    expect(x.metric).toBe('orders');
+    expect(x.period).toEqual(ULTIMOS_7.period);
+    expect(x.source.period).toBe('previous');
+  });
+
+  it('projecao publica (meta.query, sem source) e aceita como previousQuery', () => {
+    // Contrato com o frontend: ele ecoa meta.query verbatim, e meta.query nao
+    // carrega `source`. A validacao nao pode exigir esse campo.
+    const projecao = {
+      intent: ULTIMOS_7.intent,
+      metric: ULTIMOS_7.metric,
+      period: ULTIMOS_7.period,
+    } as unknown as ChatQuery;
+    expect(previousQueryValida(projecao)).toBe(true);
+    expect(q('e os pedidos?', { previousQuery: projecao }).period).toEqual(ULTIMOS_7.period);
+  });
+});
+
+describe('chat-query — lista canonica de kinds', () => {
+  it('todo kind declarado em CHAT_PERIOD_KINDS e aceito na continuidade', () => {
+    for (const kind of CHAT_PERIOD_KINDS) {
+      const prev = { ...BASE, period: { ...BASE.period, kind } } as ChatQuery;
+      expect(previousQueryValida(prev), `kind rejeitado: ${kind}`).toBe(true);
+    }
+  });
+
+  it('kind fora da lista canonica e rejeitado', () => {
+    const ruim = { ...BASE, period: { ...BASE.period, kind: 'ultimos_n_dias' } } as unknown as ChatQuery;
+    expect(previousQueryValida(ruim)).toBe(false);
+  });
+});
+
 describe('chat-query — pureza', () => {
   it('nao muta previousQuery nem as opcoes', () => {
     const prev: ChatQuery = JSON.parse(JSON.stringify(BASE));
@@ -470,10 +528,35 @@ describe('chat-query — dimensao nao suportada recusa mesmo com metrica valida'
     expect((r as any).reason).toBe('assunto_nao_suportado');
   });
 
-  it('"qual foi a margem ontem?" => out_of_scope', () => {
+  it('"qual foi a margem ontem?" => reconhecida com metrica margin', () => {
+    // Margem saiu de RE_FORA_ESCOPO ao ganhar pipeline proprio. O que continua
+    // recusado e a DIMENSAO por produto/sku (ver o teste logo abaixo).
     const r = parseChatQuery('qual foi a margem ontem?', opt());
-    expect(r.kind).toBe('out_of_scope');
-    expect((r as any).reason).toBe('assunto_nao_suportado');
+    expect(r.kind).toBe('recognized');
+    expect((r as any).query.metric).toBe('margin');
+    expect((r as any).query.period.kind).toBe('yesterday');
+  });
+
+  it('"lucro" e sinonimos tambem caem em margin', () => {
+    for (const frase of ['qual o lucro de ontem?', 'qual a lucratividade de ontem?', 'quao rentavel foi ontem?']) {
+      const r = parseChatQuery(frase, opt());
+      expect(r.kind, frase).toBe('recognized');
+      expect((r as any).query.metric, frase).toBe('margin');
+    }
+  });
+
+  it('custo e publicidade continuam FORA de escopo', () => {
+    for (const frase of ['qual o custo do arcos ontem?', 'quanto gastei com publicidade ontem?']) {
+      const r = parseChatQuery(frase, opt());
+      expect(r.kind, frase).toBe('out_of_scope');
+    }
+  });
+
+  it('continuidade herda a metrica margin', () => {
+    const anterior = parseChatQuery('qual a margem de ontem?', opt());
+    const seguinte = parseChatQuery('e no mes passado?', opt({ previousQuery: (anterior as any).query }));
+    expect(seguinte.kind).toBe('recognized');
+    expect((seguinte as any).query.metric).toBe('margin');
   });
 
   it('NAO reduz a resumo geral quando a dimensao pedida nao e suportada', () => {
@@ -492,5 +575,191 @@ describe('chat-query — dimensao nao suportada recusa mesmo com metrica valida'
     expect(parseChatQuery('quantos pedidos tivemos ontem?', opt()).kind).toBe('recognized');
     expect(parseChatQuery('qual o ticket medio de ontem?', opt()).kind).toBe('recognized');
     expect(parseChatQuery('quantas unidades vendemos ontem?', opt()).kind).toBe('recognized');
+  });
+});
+
+// ── Janela móvel: "ultimos N dias" (AGORA = quinta, 2026-07-23) ─────────────
+describe('chat-query — janela movel (last_n_days)', () => {
+  it('ultimos 7 dias e inclusiva ate hoje', () => {
+    expect(q('qual o faturamento dos ultimos 7 dias?').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-07-17', toYmd: '2026-07-23' });
+  });
+
+  it('preposicao antes ("nos ultimos 30 dias")', () => {
+    expect(q('quanto vendemos nos ultimos 30 dias?').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-06-24', toYmd: '2026-07-23' });
+  });
+
+  it('forma invertida ("7 ultimos dias")', () => {
+    expect(q('faturamento dos 7 ultimos dias').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-07-17', toYmd: '2026-07-23' });
+  });
+
+  it('semanas viram multiplos de 7', () => {
+    expect(q('quanto vendemos nas ultimas 2 semanas?').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-07-10', toYmd: '2026-07-23' });
+  });
+
+  it('meses viram 30 dias corridos', () => {
+    expect(q('faturamento dos ultimos 3 meses').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-04-25', toYmd: '2026-07-23' });
+  });
+
+  it('ultimo 1 dia = so hoje', () => {
+    expect(q('faturamento do ultimo 1 dia').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2026-07-23', toYmd: '2026-07-23' });
+  });
+
+  it('metrica do texto e preservada', () => {
+    const x = q('quantos pedidos nos ultimos 7 dias?');
+    expect(x.metric).toBe('orders');
+    expect(x.period.kind).toBe('last_n_days');
+  });
+
+  it('ticket medio nos ultimos 14 dias', () => {
+    const x = q('qual o ticket medio dos ultimos 14 dias?');
+    expect(x.metric).toBe('average_ticket');
+    expect(x.period).toEqual({ kind: 'last_n_days', fromYmd: '2026-07-10', toYmd: '2026-07-23' });
+  });
+
+  it('unidades nos ultimos 7 dias', () => {
+    const x = q('quantas unidades vendemos nos ultimos 7 dias?');
+    expect(x.metric).toBe('units');
+    expect(x.period.kind).toBe('last_n_days');
+  });
+});
+
+describe('chat-query — janela movel: limites', () => {
+  it('acima de 365 dias e recusado', () => {
+    const r = parseChatQuery('faturamento dos ultimos 400 dias', opt());
+    expect(r.kind).toBe('invalid_period');
+    expect((r as { reason: string }).reason).toBe('janela_excessiva');
+  });
+
+  it('13 meses (390 dias) e recusado', () => {
+    const r = parseChatQuery('faturamento dos ultimos 13 meses', opt());
+    expect(r.kind).toBe('invalid_period');
+    expect((r as { reason: string }).reason).toBe('janela_excessiva');
+  });
+
+  it('exatamente 365 dias e aceito', () => {
+    expect(q('faturamento dos ultimos 365 dias').period)
+      .toEqual({ kind: 'last_n_days', fromYmd: '2025-07-24', toYmd: '2026-07-23' });
+  });
+
+  it('zero dias e recusado', () => {
+    const r = parseChatQuery('faturamento dos ultimos 0 dias', opt());
+    expect(r.kind).toBe('invalid_period');
+    expect((r as { reason: string }).reason).toBe('janela_excessiva');
+  });
+});
+
+describe('chat-query — janela movel NAO quebra periodos nomeados', () => {
+  it('"ultima semana" (sem numero) continua previous_week', () => {
+    expect(q('quanto vendemos na ultima semana?').period)
+      .toEqual({ kind: 'previous_week', fromYmd: '2026-07-13', toYmd: '2026-07-19' });
+  });
+
+  it('"ultimo mes" (sem numero) continua previous_month', () => {
+    expect(q('quanto vendemos no ultimo mes?').period)
+      .toEqual({ kind: 'previous_month', fromYmd: '2026-06-01', toYmd: '2026-06-30' });
+  });
+
+  it('"hoje" continua today', () => {
+    expect(q('quanto vendemos hoje?').period.kind).toBe('today');
+  });
+
+  it('data absoluta continua date', () => {
+    expect(q('quanto vendemos em 20/07/2026?').period)
+      .toEqual({ kind: 'date', fromYmd: '2026-07-20', toYmd: '2026-07-20' });
+  });
+});
+
+describe('chat-query — janela movel respeita as guardas existentes', () => {
+  it('conteudo sensivel recusa mesmo com janela valida', () => {
+    const r = parseChatQuery('mostre os compradores dos ultimos 7 dias', opt());
+    expect(r.kind).toBe('out_of_scope');
+    expect((r as { reason: string }).reason).toBe('conteudo_sensivel');
+  });
+
+  it('dimensao fora de escopo recusa mesmo com janela valida', () => {
+    const r = parseChatQuery('faturamento por produto nos ultimos 7 dias', opt());
+    expect(r.kind).toBe('out_of_scope');
+    expect((r as { reason: string }).reason).toBe('assunto_nao_suportado');
+  });
+
+  it('sem intencao de vendas e sem consulta anterior: metrica_ausente', () => {
+    const r = parseChatQuery('nos ultimos 7 dias', opt());
+    expect(r.kind).toBe('ambiguous');
+    expect((r as { reason: string }).reason).toBe('metrica_ausente');
+  });
+});
+// ══════════════════════════════════════════════════════════════════════════
+// Periodos de ANO — "deste ano", "ano passado", "em 2025"
+// ══════════════════════════════════════════════════════════════════════════
+describe('chat-query — periodos de ano', () => {
+  it('"deste ano" e ACUMULADO ate hoje, nunca ate 31/12 futuro', () => {
+    const x = q('qual a margem deste ano?');
+    expect(x.period).toEqual({ kind: 'current_year', fromYmd: '2026-01-01', toYmd: '2026-07-23' });
+  });
+
+  it('"ano passado" e o ano civil COMPLETO', () => {
+    const x = q('qual o faturamento do ano passado?');
+    expect(x.period).toEqual({ kind: 'previous_year', fromYmd: '2025-01-01', toYmd: '2025-12-31' });
+  });
+
+  it('ano explicito passado vira o ano completo', () => {
+    for (const frase of ['quanto vendi em 2025?', 'faturamento durante 2024', 'pedidos de 2023']) {
+      const x = q(frase);
+      expect(x.period.kind, frase).toBe('year');
+      expect(x.period.toYmd.slice(5), frase).toBe('12-31');
+    }
+  });
+
+  it('o ano CORRENTE escrito por extenso tambem e acumulado', () => {
+    const x = q('quanto vendi em 2026?');
+    expect(x.period).toEqual({ kind: 'current_year', fromYmd: '2026-01-01', toYmd: '2026-07-23' });
+  });
+
+  it('ano futuro nao e periodo consultavel', () => {
+    const r = parseChatQuery('faturamento em 2027', opt());
+    expect(r.kind).toBe('invalid_period');
+  });
+
+  it('comparacao de anos alinha pelo mesmo dia decorrido', () => {
+    const x = q('faturamento este ano vs ano passado');
+    expect(x.intent).toBe('sales_comparison');
+    expect(x.period.kind).toBe('current_year');
+    expect(x.comparePeriod).toEqual({ kind: 'previous_year', fromYmd: '2025-01-01', toYmd: '2025-07-23' });
+  });
+
+  it('data por extenso COM ano continua sendo data, nao ano inteiro', () => {
+    // "25 de julho de 2026" contem "de 2026": o trecho de ano NAO pode vencer.
+    const x = q('faturamento em 25 de julho de 2026');
+    expect(x.period).toEqual({ kind: 'date', fromYmd: '2026-07-25', toYmd: '2026-07-25' });
+  });
+
+  it('intervalo entre datas com ano continua intervalo', () => {
+    const x = q('faturamento entre 01/01/2025 e 31/03/2025');
+    expect(x.period).toEqual({ kind: 'range', fromYmd: '2025-01-01', toYmd: '2025-03-31' });
+  });
+
+  it('numero solto de 4 digitos que NAO e ano nao vira periodo', () => {
+    // "750ml 2461" e nome de produto; sem preposicao+ano, nada de periodo.
+    const r = parseChatQuery('faturamento do 2461', opt());
+    expect(r.kind).not.toBe('recognized');
+  });
+
+  it('mes passado continua vencendo sobre qualquer leitura de ano', () => {
+    const x = q('qual a margem do mes passado?');
+    expect(x.period.kind).toBe('previous_month');
+  });
+
+  it('continuidade herda a metrica em periodo de ano', () => {
+    const anterior = q('qual a margem de ontem?');
+    const seguinte = parseChatQuery('e no ano passado?', opt({ previousQuery: anterior }));
+    expect(seguinte.kind).toBe('recognized');
+    expect((seguinte as { query: { metric: string; period: { kind: string } } }).query.metric).toBe('margin');
+    expect((seguinte as { query: { period: { kind: string } } }).query.period.kind).toBe('previous_year');
   });
 });

@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   itemSKU,
   normalizeTitle,
-  getCustoUnitario,
+  getCustoProduto,
+  custoUnitarioVendido,
+  ehVendaFull,
   buildConsolidado,
   carregarCustos,
   type ProductItemInput,
@@ -105,116 +107,129 @@ describe('normalizeTitle', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// getCustoUnitario
+// getCustoProduto
 // ══════════════════════════════════════════════════════════════════════════
-describe('getCustoUnitario', () => {
+describe('getCustoProduto', () => {
   it('produto com custo conhecido retorna contrato completo', () => {
-    const r = getCustoUnitario('Vinho Carrascal Colheita 2020');
+    const r = getCustoProduto('Vinho Carrascal Colheita 2020');
     expect(r).toEqual({
       encontrado: true,
-      custoUnitario: 17.81,
-      fonte: 'dashboard_legado',
+      custoProduto: 18.68,
+      fonte: 'proprietario_2026_08',
       regraId: 'carrascal',
     });
   });
 
   it('produto desconhecido: encontrado false e custo null — NUNCA zero', () => {
-    const r = getCustoUnitario('Vinho Inexistente da Serra');
+    const r = getCustoProduto('Vinho Inexistente da Serra');
     expect(r.encontrado).toBe(false);
-    expect(r.custoUnitario).toBeNull();
-    expect(r.custoUnitario).not.toBe(0);
+    expect(r.custoProduto).toBeNull();
+    expect(r.custoProduto).not.toBe(0);
     expect(r.fonte).toBeNull();
     expect(r.regraId).toBeNull();
   });
 
   it('match parcial válido (termo no meio do título, com acento divergente)', () => {
-    const r = getCustoUnitario('Promoção MORABITINO Safra Especial 2019');
+    const r = getCustoProduto('Promoção MORABITINO Safra Especial 2019');
     expect(r.encontrado).toBe(true);
-    expect(r.custoUnitario).toBe(31.56);
+    expect(r.custoProduto).toBe(33.82);
   });
 
   it('regra com exclusão bloqueia e a precedência escolhe a regra seguinte', () => {
-    // 'Além do Rio Branco Rosé': regra 1 casa match e tipo (branco), mas a
-    // exclusão (rose) bloqueia; a regra 2 (rosé) vence.
-    const r = getCustoUnitario('Além do Rio Branco Rosé');
-    expect(r.regraId).toBe('alem_rio_rose');
-    expect(r.custoUnitario).toBe(14.15);
+    // 'Arcos do Convento Branco 750ml' casa a regra do branco (ordem 3) ANTES
+    // da regra do tinto 750 (ordem 4), que ainda exclui 'branco'. Sem essa
+    // precedência o branco sairia com o custo do tinto.
+    const branco = getCustoProduto('Arcos do Convento Branco 750ml');
+    expect(branco.regraId).toBe('arcos_branco');
+    expect(branco.custoProduto).toBe(14.75);
+    const tinto = getCustoProduto('Arcos do Convento Tinto 750ml');
+    expect(tinto.regraId).toBe('arcos_750');
+    expect(tinto.custoProduto).toBe(12.80);
   });
 
   it('conflito entre duas regras é resolvido pela ordem explícita', () => {
     // Gran Reserva casa as duas regras djoao_*; a de menor `ordem` vence.
-    const gran = getCustoUnitario('D. João V Magnânimo Gran Reserva');
+    const gran = getCustoProduto('D. João V Magnânimo Gran Reserva');
     expect(gran.regraId).toBe('djoao_gran_reserva');
-    expect(gran.custoUnitario).toBe(76.33);
-    // Sem 'gran', a regra reserva (ordem 10) vence antes da branco (11).
-    const reserva = getCustoUnitario('D. João V Magnânimo Reserva Tinto');
+    expect(gran.custoProduto).toBe(66.12);
+    // Sem 'gran', a regra branco (ordem 10) não casa e a reserva (11) vence.
+    const reserva = getCustoProduto('D. João V Magnânimo Reserva Tinto');
     expect(reserva.regraId).toBe('djoao_reserva');
-    expect(reserva.custoUnitario).toBe(40.6);
+    expect(reserva.custoProduto).toBe(47.18);
   });
 
   it('custo zero legítimo é distinguível de custo ausente', () => {
     const regras: CustoRegra[] = [
-      { ordem: 1, id: 'brinde', custoUnitario: 0, match: ['brinde overwine'] },
+      { ordem: 1, id: 'brinde', custoProduto: 0, match: ['brinde overwine'] },
     ];
-    const zero = getCustoUnitario('Brinde Overwine Saca-rolhas', null, regras, 'teste');
-    expect(zero).toEqual({ encontrado: true, custoUnitario: 0, fonte: 'teste', regraId: 'brinde' });
-    const ausente = getCustoUnitario('Outro produto', null, regras, 'teste');
+    const zero = getCustoProduto('Brinde Overwine Saca-rolhas', null, regras, 'teste');
+    expect(zero).toEqual({ encontrado: true, custoProduto: 0, fonte: 'teste', regraId: 'brinde' });
+    const ausente = getCustoProduto('Outro produto', null, regras, 'teste');
     expect(ausente.encontrado).toBe(false);
-    expect(ausente.custoUnitario).toBeNull();
+    expect(ausente.custoProduto).toBeNull();
   });
 
   it('título vazio/ausente nunca encontra custo', () => {
-    expect(getCustoUnitario('').encontrado).toBe(false);
-    expect(getCustoUnitario(null).encontrado).toBe(false);
-    expect(getCustoUnitario(undefined).encontrado).toBe(false);
+    expect(getCustoProduto('').encontrado).toBe(false);
+    expect(getCustoProduto(null).encontrado).toBe(false);
+    expect(getCustoProduto(undefined).encontrado).toBe(false);
   });
 
   it('o parâmetro sku é aceito mas não altera o matching (paridade legado)', () => {
-    const semSku = getCustoUnitario('Vinho Carrascal');
-    const comSku = getCustoUnitario('Vinho Carrascal', '21002');
+    const semSku = getCustoProduto('Vinho Carrascal');
+    const comSku = getCustoProduto('Vinho Carrascal', '21002');
     expect(comSku).toEqual(semSku);
   });
 
-  // ── Paridade: TODAS as 25 regras do CUSTO_PRODUTO legado ────────────────
+  // ── Custos vigentes: TODAS as regras de custos.json v2 ──────────────────
+  // Fonte: lista do proprietario (13/08/2026). Sao custos PUROS de aquisicao:
+  // frete e embalagem entram em custoUnitarioVendido, nao aqui.
   const paridade: Array<[string, string, number]> = [
-    ['alem_rio_branco',      'Vinho Além do Rio Branco 750ml',            14.15],
-    ['alem_rio_rose',        'Vinho Além do Rio Rosé Frisante',           14.15],
-    ['arcos_750',            'Arcos do Convento Tinto 750ml',             13.02],
-    ['arcos_bib',            'Arcos do Convento Bag In Box 5 Litros',     47.15],
-    ['vitoria_regia',        'Vinho Vitória Régia Tinto Seco',            16.79],
-    ['carrascal',            'Carrascal Colheita Tinto',                  17.81],
-    ['capricho_marselan',    'Capricho do Rei Marselan',                  24.14],
-    ['morabitino',           'Morabitino Tinto Português',                31.56],
-    ['djoao_gran_reserva',   'D. João V Magnânimo Gran Reserva',          76.33],
-    ['djoao_reserva',        'D. João V Magnânimo Reserva Tinto',         40.6],
-    ['djoao_branco',         'Magnânimo Branco Seco',                     40.6],
-    ['quinta_sao_cristovao', 'Quinta de São Cristóvão Tinto',             21.82],
-    ['allgodao',             'Allgodão Reserva Tinto',                    29.13],
-    ['ouro_meu_exclusive',   'Ouro Meu Exclusive Edition Tinto',          14.62],
-    ['ouro_meu_base',        'Vinho Ouro Meu Tinto Seco',                 13.62],
-    ['bolota_dourada',       'Bolota Dourada Tinto',                      37.37],
-    ['ouro_obidos',          'Ouro de Óbidos Tinto',                      38.19],
-    ['cajado_real',          'Cajado Real Tinto Português',               33.82],
-    ['hfc',                  'HFC Alicante Bouschet',                     36.84],
-    ['coro_maestro',         'Quinta do Côro Maestro',                    17.41],
-    ['coro_private',         'Quinta do Côro Private Collection',         43.08],
-    ['coro_reserva',         'Quinta do Côro Reserva Syrah',              40.48],
-    ['estremoz_aragones',    'Marquês de Estremoz Aragonês',              60.1],
-    ['estremoz_reserva',     'Marquês de Estremoz Reserva',               31.98],
+    ['alem_do_rio',          'Vinho Alem do Rio Branco 750ml',            13.40],
+    ['alem_do_rio',          'Vinho Alem do Rio Rose Frisante',           13.40],
+    ['alem_do_rio',          'Vinho Branco Frisante Portugues Lisboa Alem D Rio 750ml 2461', 13.40],
+    ['alem_do_rio',          'Vinho Branco Frisante Português Lisboa Além D Rio 750ml',       13.40],
+    ['arcos_750',            'Arcos do Convento Tinto 750ml',             12.80],
+    ['arcos_branco',         'Arcos do Convento Branco 750ml',            14.75],
+    ['arcos_bib',            'Arcos do Convento Bag In Box 5 Litros',     51.88],
+    ['vitoria_regia',        'Vinho Vitoria Regia Tinto Seco',            18.08],
+    ['carrascal',            'Carrascal Colheita Tinto',                  18.68],
+    ['capricho_marselan',    'Capricho do Rei Marselan',                  56.28],
+    ['morabitino',           'Morabitino Tinto Portugues',                33.82],
+    ['djoao_gran_reserva',   'D. Joao V Magnanimo Gran Reserva',          66.12],
+    ['djoao_reserva',        'D. Joao V Magnanimo Reserva Tinto',         47.18],
+    ['djoao_branco',         'Magnanimo Branco Seco',                     40.60],
+    ['quinta_sao_cristovao', 'Quinta de Sao Cristovao Tinto',             25.17],
+    ['allgodao',             'Allgodao Reserva Tinto',                    30.88],
+    ['ouro_meu_exclusive',   'Ouro Meu Exclusive Edition Tinto',          14.93],
+    ['ouro_meu_base',        'Vinho Ouro Meu Tinto Seco',                 13.78],
+    ['ouro_meu_base',        'Vinho Ouro Meu Branco',                     13.78],
+    ['bolota_dourada',       'Bolota Dourada Tinto',                      38.47],
+    ['ouro_obidos',          'Ouro de Obidos Tinto',                      40.72],
+    ['cajado_real',          'Cajado Real Tinto Portugues',               40.72],
+    ['hfc',                  'HFC Alicante Bouschet',                     48.79],
+    ['hfc',                  'HFC Cabernet Sauvignon',                    48.79],
+    ['hfc',                  'HFC Reserva',                               48.79],
+    ['coro_maestro',         'Quinta do Coro Maestro',                    40.09],
+    ['coro_private',         'Quinta do Coro Private Collection',        172.57],
+    ['coro_reserva',         'Quinta do Coro Reserva Syrah',              85.16],
+    ['acai_overberry',       'Polpa de Acai Overberry 1kg',               40.00],
+    ['estremoz_aragones',    'Marques de Estremoz Aragones',              60.10],
+    ['estremoz_reserva',     'Marques de Estremoz Reserva',               31.98],
     ['beiral',               'Beiral Vineyards Tinto',                    42.99],
   ];
 
-  it.each(paridade)('paridade legado: %s', (regraId, titulo, custo) => {
-    const r = getCustoUnitario(titulo);
+  it.each(paridade)('custo vigente: %s', (regraId, titulo, custo) => {
+    const r = getCustoProduto(titulo);
     expect(r.encontrado).toBe(true);
     expect(r.regraId).toBe(regraId);
-    expect(r.custoUnitario).toBe(custo);
+    expect(r.custoProduto).toBe(custo);
   });
 
-  it('a tabela carregada tem exatamente as 25 regras do legado, sem ordem duplicada', () => {
+  it('a tabela carregada tem exatamente as 26 regras vigentes, sem ordem duplicada', () => {
     const { regrasOrdenadas } = carregarCustos();
-    expect(regrasOrdenadas).toHaveLength(25);
-    expect(new Set(regrasOrdenadas.map(r => r.id)).size).toBe(25);
+    expect(regrasOrdenadas).toHaveLength(26);
+    expect(new Set(regrasOrdenadas.map(r => r.id)).size).toBe(26);
     // ordenada de forma estrita
     for (let i = 1; i < regrasOrdenadas.length; i++) {
       expect(regrasOrdenadas[i].ordem).toBeGreaterThan(regrasOrdenadas[i - 1].ordem);
@@ -224,17 +239,18 @@ describe('getCustoUnitario', () => {
   it('precedência independe da ordem do array recebido (ordena por `ordem`)', () => {
     const { regrasOrdenadas } = carregarCustos();
     const invertidas = [...regrasOrdenadas].reverse();
-    // getCustoUnitario recebe regras já ordenadas por contrato; quem embaralha
+    // getCustoProduto recebe regras já ordenadas por contrato; quem embaralha
     // deve reordenar via carregarCustos. Este teste garante que carregarCustos
     // reordena mesmo com o arquivo embaralhado.
     const embaralhado = carregarCustos({
       versao: 1,
       moeda: 'BRL',
       fonte: 'teste',
+      logistica: { frete: 1.49, embalagem: 3 },
       regras: invertidas,
     });
-    expect(embaralhado.regrasOrdenadas[0].id).toBe('alem_rio_branco');
-    const r = getCustoUnitario(
+    expect(embaralhado.regrasOrdenadas[0].id).toBe('alem_do_rio');
+    const r = getCustoProduto(
       'D. João V Magnânimo Gran Reserva',
       null,
       embaralhado.regrasOrdenadas,
@@ -243,6 +259,57 @@ describe('getCustoUnitario', () => {
     expect(r.regraId).toBe('djoao_gran_reserva');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// custoUnitarioVendido — custo do produto + logistica
+// ══════════════════════════════════════════════════════════════════════════
+describe('custoUnitarioVendido', () => {
+  const LOG = { frete: 1.49, embalagem: 3 };
+
+  it('venda propria soma frete E embalagem', () => {
+    expect(custoUnitarioVendido(12.8, 'drop_off', LOG)).toBeCloseTo(17.29, 2);
+  });
+
+  it('venda pelo Full soma SO o frete (o ML embala)', () => {
+    expect(custoUnitarioVendido(12.8, 'fulfillment', LOG)).toBeCloseTo(14.29, 2);
+  });
+
+  it('a diferenca entre Full e proprio e exatamente a embalagem', () => {
+    const proprio = custoUnitarioVendido(40.09, 'xd_drop_off', LOG)!;
+    const full = custoUnitarioVendido(40.09, 'fulfillment', LOG)!;
+    expect(proprio - full).toBeCloseTo(LOG.embalagem, 2);
+  });
+
+  it('logistic_type ausente ou desconhecido cai no lado CONSERVADOR (com embalagem)', () => {
+    // Nunca inflar margem: sem informacao, assume o custo maior.
+    expect(custoUnitarioVendido(12.8, null, LOG)).toBeCloseTo(17.29, 2);
+    expect(custoUnitarioVendido(12.8, undefined, LOG)).toBeCloseTo(17.29, 2);
+    expect(custoUnitarioVendido(12.8, 'me2', LOG)).toBeCloseTo(17.29, 2);
+  });
+
+  it('custo de produto desconhecido devolve null — nunca zero', () => {
+    expect(custoUnitarioVendido(null, 'fulfillment', LOG)).toBeNull();
+    expect(custoUnitarioVendido(null, 'drop_off', LOG)).not.toBe(0);
+  });
+
+  it('custo zero legitimo (brinde) nao vira null e ainda soma logistica', () => {
+    expect(custoUnitarioVendido(0, 'fulfillment', LOG)).toBeCloseTo(1.49, 2);
+  });
+
+  it('usa a logistica de custos.json quando nao recebe override', () => {
+    const { config } = carregarCustos();
+    expect(custoUnitarioVendido(10, 'fulfillment')).toBeCloseTo(10 + config.logistica.frete, 2);
+  });
+
+  it('ehVendaFull reconhece fulfillment em qualquer caixa e rejeita o resto', () => {
+    expect(ehVendaFull('fulfillment')).toBe(true);
+    expect(ehVendaFull('FULFILLMENT')).toBe(true);
+    expect(ehVendaFull('drop_off')).toBe(false);
+    expect(ehVendaFull(null)).toBe(false);
+    expect(ehVendaFull(undefined)).toBe(false);
+  });
+});
+
 
 // ══════════════════════════════════════════════════════════════════════════
 // buildConsolidado

@@ -46,14 +46,30 @@ import type { PeriodoYmd } from './sales-metrics.service.js';
 
 // ── Tipos públicos ──────────────────────────────────────────────────────────
 
-export type ChatIntent = 'sales_summary' | 'sales_comparison';
-export type ChatMetric = 'revenue' | 'orders' | 'average_ticket' | 'units';
+/** FONTE ÚNICA das intenções. Ver a nota de CHAT_PERIOD_KINDS abaixo. */
+export const CHAT_INTENTS = ['sales_summary', 'sales_comparison'] as const;
+export type ChatIntent = typeof CHAT_INTENTS[number];
 
-export type ChatPeriodKind =
-  | 'today' | 'yesterday' | 'day_before_yesterday'
-  | 'date' | 'range'
-  | 'current_week' | 'previous_week'
-  | 'current_month' | 'previous_month';
+/** FONTE ÚNICA das métricas. Ver a nota de CHAT_PERIOD_KINDS abaixo. */
+export const CHAT_METRICS = ['revenue', 'orders', 'average_ticket', 'units', 'margin'] as const;
+export type ChatMetric = typeof CHAT_METRICS[number];
+
+/**
+ * FONTE ÚNICA dos kinds de período. O tipo `ChatPeriodKind` e o conjunto usado
+ * por `previousQueryValida` derivam desta lista — não existe segunda cópia a
+ * manter em sincronia. Um kind novo declarado aqui já entra automaticamente na
+ * validação de continuidade; declarado só no tipo, o typecheck acusa.
+ */
+export const CHAT_PERIOD_KINDS = [
+  'today', 'yesterday', 'day_before_yesterday',
+  'date', 'range',
+  'current_week', 'previous_week',
+  'current_month', 'previous_month',
+  'current_year', 'previous_year', 'year',
+  'last_n_days',
+] as const;
+
+export type ChatPeriodKind = typeof CHAT_PERIOD_KINDS[number];
 
 export interface ChatPeriod extends PeriodoYmd {
   kind: ChatPeriodKind;
@@ -84,7 +100,8 @@ export type ChatQueryResult =
 export type AmbiguousReason = 'periodo_ausente' | 'metrica_ausente' | 'consulta_vaga';
 export type OutOfScopeReason = 'sem_intencao_de_vendas' | 'assunto_nao_suportado' | 'conteudo_sensivel';
 export type InvalidPeriodReason =
-  | 'data_inexistente' | 'intervalo_invertido' | 'intervalo_incompleto' | 'data_ininteligivel';
+  | 'data_inexistente' | 'intervalo_invertido' | 'intervalo_incompleto' | 'data_ininteligivel'
+  | 'janela_excessiva';
 
 export interface ParseOptions {
   /** Relógio injetável (testes determinísticos). Default: agora. */
@@ -157,6 +174,12 @@ const MESES: Record<string, number> = {
 
 /** Termos que indicam intenção de VENDAS (não são métrica por si sós). */
 const RE_INTENCAO_VENDAS = /\b(vend[ei]|vendas|vendemos|vendeu|vendido|vendidas?|faturamento|faturamos|faturou|receita|arrecad\w*|movimento)\b/;
+/**
+ * Intenção de MARGEM/LUCRO. Separada de RE_INTENCAO_VENDAS porque a pergunta
+ * "qual a margem?" não menciona venda nenhuma, mas é uma consulta legítima ao
+ * mesmo snapshot. Os termos saíram de RE_FORA_ESCOPO ao entrar aqui.
+ */
+const RE_INTENCAO_MARGEM = /\b(margem|margens|lucro|lucros|lucratividade|rentabilidade|rentavel|rentaveis)\b/;
 const RE_COMPARACAO = /\b(compar\w*|versus|vs|em relacao a|frente a|contra)\b/;
 
 /** Conteúdo sensível: recusa mesmo com período presente. */
@@ -164,11 +187,14 @@ const RE_SENSIVEL = /\b(token|tokens|senha|password|chave|api key|credencial|ses
 const RE_INJECAO = /\b(ignore|ignorar|desconsidere|esqueca|finja|aja como|voce agora)\b/;
 
 /** Assuntos fora do escopo desta fase (existem no dashboard, não no parser). */
-const RE_FORA_ESCOPO = /\b(margem|lucro|custo|tacos|anuncio|anuncios|ads|publicidade|estoque|ruptura|cobertura|reputacao|qualidade|cancelad\w*|motivo|ranking|mais vendido|top \d+|produto|produtos|sku)\b/;
+const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|estoque|ruptura|cobertura|reputacao|qualidade|cancelad\w*|motivo|ranking|mais vendido|top \d+|produto|produtos|sku)\b/;
 
 // ── Detecção de métrica ─────────────────────────────────────────────────────
 
 function detectarMetrica(t: string): ChatMetric | null {
+  // margem antes de tudo: "qual a margem do faturamento?" carrega os dois
+  // vocabulários, e a pergunta é de margem.
+  if (RE_INTENCAO_MARGEM.test(t)) return 'margin';
   // ticket médio antes de "pedidos" (a frase costuma conter ambos)
   if (/\bticket\b/.test(t)) return 'average_ticket';
   if (/\b(unidade|unidades|pecas|itens vendidos|quantas unidades)\b/.test(t)) return 'units';
@@ -248,7 +274,48 @@ function extrairDatas(t: string, hoje: string): { datas: DataBruta[]; invalida: 
   return { datas, invalida };
 }
 
+/** Teto da janela móvel: acima disso a consulta é recusada (decisão 7). */
+const MAX_JANELA_DIAS = 365;
+
+/** Multiplicador de unidade para janelas móveis. Mês = 30 dias corridos. */
+const UNIDADE_JANELA: Record<string, number> = {
+  dia: 1, dias: 1,
+  semana: 7, semanas: 7,
+  mes: 30, meses: 30,
+};
+
+/**
+ * Janela móvel "últimos N dias/semanas/meses", INCLUSIVA até hoje.
+ * "últimos 7 dias" em 13/08 => 07/08 a 13/08 (7 dias civis).
+ * Exige N numérico: "última semana" (sem número) continua sendo previous_week.
+ */
+const RE_JANELA_MOVEL =
+  /\b(?:nos?\s+|nas?\s+)?ultim[oa]s?\s+(\d{1,5})\s+(dias?|semanas?|mes|meses)\b|\b(\d{1,5})\s+ultim[oa]s?\s+(dias?|semanas?|mes|meses)\b/;
+
+function detectarJanelaMovel(t: string, hoje: string): PeriodoDetectado {
+  const m = RE_JANELA_MOVEL.exec(t);
+  if (!m) return null;
+
+  const quantidade = Number(m[1] ?? m[3]);
+  const unidade = (m[2] ?? m[4]) as string;
+  const fator = UNIDADE_JANELA[unidade];
+  if (!Number.isInteger(quantidade) || fator === undefined) return null;
+
+  const dias = quantidade * fator;
+  if (dias < 1 || dias > MAX_JANELA_DIAS) {
+    return { ok: false, erro: 'janela_excessiva' };
+  }
+
+  // Inclusiva: N dias civis terminando HOJE.
+  return { ok: true, period: periodo('last_n_days', somaDias(hoje, -(dias - 1)), hoje) };
+}
+
 function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
+  // ── Janela móvel ("ultimos N dias") — antes dos relativos nomeados, para que
+  //    "ultimos 7 dias" não seja capturado por outra regra. ──
+  const janela = detectarJanelaMovel(t, hoje);
+  if (janela !== null) return janela;
+
   // ── Períodos relativos nomeados ──
   if (/\banteontem\b/.test(t)) {
     const d = somaDias(hoje, -2);
@@ -266,6 +333,11 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
   const semanaAtual = /\b(esta semana|essa semana|desta semana|dessa semana|nesta semana|nessa semana|semana atual|na semana)\b/.test(t);
   const mesPassado = /\b(mes passado|mes anterior|ultimo mes|do mes passado)\b/.test(t);
   const mesAtual = /\b(este mes|esse mes|deste mes|desse mes|neste mes|nesse mes|mes atual|no mes)\b/.test(t);
+  const anoPassado = /\b(ano passado|ano anterior|ultimo ano|do ano passado)\b/.test(t);
+  const anoAtual = /\b(este ano|esse ano|deste ano|desse ano|neste ano|nesse ano|ano atual|no ano)\b/.test(t);
+  // Ano explícito: "em 2025", "de 2025". Restrito a 20xx para não capturar
+  // números soltos (quantidades, valores, SKUs).
+  const anoCitado = /\b(?:em|de|do|no|ano de|durante)\s+(20\d{2})\b/.exec(t);
 
   // ── Períodos CORRENTES são acumulados até HOJE (nunca incluem dias futuros).
   const segAtual = segundaDaSemana(hoje);
@@ -298,6 +370,14 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
     `${primeiroDiaMesAnterior.slice(0, 7)}-${String(diaLimiteAnterior).padStart(2, '0')}`
   );
 
+  const anoHoje = Number(hoje.slice(0, 4));
+  // Ano corrente ACUMULADO: 1º de janeiro → hoje, nunca até 31/12 futuro.
+  const anoAtualP = periodo('current_year', `${anoHoje}-01-01`, hoje);
+  // Ano anterior COMPLETO.
+  const anoAnteriorCompletoP = periodo('previous_year', `${anoHoje - 1}-01-01`, `${anoHoje - 1}-12-31`);
+  // Em comparação: mesmo dia/mês decorrido do ano atual (alinhamento justo).
+  const anoAnteriorAlinhadoP = periodo('previous_year', `${anoHoje - 1}-01-01`, `${anoHoje - 1}${hoje.slice(4)}`);
+
   // Comparação: períodos alinhados pelo número de dias decorridos.
   if (RE_COMPARACAO.test(t) && (semanaAtual || semanaPassada)) {
     return { ok: true, period: semanaAtualP, compare: semanaAnteriorAlinhadaP };
@@ -305,18 +385,35 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
   if (RE_COMPARACAO.test(t) && (mesAtual || mesPassado)) {
     return { ok: true, period: mesAtualP, compare: mesAnteriorAlinhadoP };
   }
+  if (RE_COMPARACAO.test(t) && (anoAtual || anoPassado)) {
+    return { ok: true, period: anoAtualP, compare: anoAnteriorAlinhadoP };
+  }
 
   // Consulta isolada: períodos anteriores permanecem COMPLETOS.
   if (semanaPassada) return { ok: true, period: semanaAnteriorCompletaP };
   if (semanaAtual) return { ok: true, period: semanaAtualP };
   if (mesPassado) return { ok: true, period: mesAnteriorCompletoP };
   if (mesAtual) return { ok: true, period: mesAtualP };
+  if (anoPassado) return { ok: true, period: anoAnteriorCompletoP };
+  if (anoAtual) return { ok: true, period: anoAtualP };
 
   // ── Datas absolutas ──
   const { datas, invalida } = extrairDatas(t, hoje);
   const querIntervalo = /\b(entre|de \d|a partir de|ate|periodo)\b/.test(t) || datas.length >= 2;
 
   if (datas.length === 0) {
+    // Ano solto ("em 2025", "durante 2024"). SÓ aqui: antes da extração de
+    // datas, "25 de julho de 2026" seria capturado pelo trecho "de 2026" e o
+    // dia se perderia.
+    if (anoCitado) {
+      const a = Number(anoCitado[1]);
+      // O ano corrente é o ACUMULADO até hoje, não até 31/12 futuro.
+      if (a === anoHoje) return { ok: true, period: anoAtualP };
+      // Ano futuro não é período consultável. Reusa o motivo existente em vez
+      // de ampliar o contrato público de erros.
+      if (a > anoHoje) return { ok: false, erro: 'data_inexistente' };
+      return { ok: true, period: periodo('year', `${a}-01-01`, `${a}-12-31`) };
+    }
     if (invalida) return { ok: false, erro: 'data_ininteligivel' };
     return null; // nenhum período no texto
   }
@@ -352,12 +449,9 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
 
 // ── Validação de previousQuery ──────────────────────────────────────────────
 
-const INTENTS: ReadonlySet<string> = new Set(['sales_summary', 'sales_comparison']);
-const METRICS: ReadonlySet<string> = new Set(['revenue', 'orders', 'average_ticket', 'units']);
-const KINDS: ReadonlySet<string> = new Set([
-  'today', 'yesterday', 'day_before_yesterday', 'date', 'range',
-  'current_week', 'previous_week', 'current_month', 'previous_month',
-]);
+const INTENTS: ReadonlySet<string> = new Set<string>(CHAT_INTENTS);
+const METRICS: ReadonlySet<string> = new Set<string>(CHAT_METRICS);
+const KINDS: ReadonlySet<string> = new Set<string>(CHAT_PERIOD_KINDS);
 
 /** previousQuery só é aceita se for estruturalmente íntegra. */
 export function previousQueryValida(q: unknown): q is ChatQuery {
@@ -397,7 +491,8 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
   // ("compare esta semana com a anterior" — exemplo canônico da Fase 5g),
   // desde que haja de fato dois períodos a comparar (verificado adiante).
   const comparacaoDePeriodos = ehComparacao && /\b(semana|mes|periodo)\b/.test(t);
-  const temIntencaoVendas = RE_INTENCAO_VENDAS.test(t) || metricaTexto !== null || comparacaoDePeriodos;
+  const temIntencaoVendas = RE_INTENCAO_VENDAS.test(t) || RE_INTENCAO_MARGEM.test(t)
+    || metricaTexto !== null || comparacaoDePeriodos;
 
   // 2) Assunto conhecido do dashboard, porém fora do escopo desta fase.
   //    Recusa SEMPRE, mesmo havendo uma métrica suportada na frase: uma
