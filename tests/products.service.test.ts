@@ -210,6 +210,12 @@ describe('getCustoProduto', () => {
     ['hfc',                  'HFC Alicante Bouschet',                     48.79],
     ['hfc',                  'HFC Cabernet Sauvignon',                    48.79],
     ['hfc',                  'HFC Reserva',                               48.79],
+    // HFC = Herdade da Fonte Coberta. O anuncio real usa o nome por extenso,
+    // com a REGIAO (Alentejo) no titulo, e a sigla nunca aparece — por isso a
+    // regra existia e mesmo assim o produto figurava como sem custo.
+    ['hfc',                  'Alentejo Herdade Da Fonte Coberta Reserva',  48.79],
+    ['hfc',                  'Vinho Herdade da Fonte Coberta Tinto 750ml', 48.79],
+    ['hfc',                  'Fonte Coberta Alicante Bouschet',            48.79],
     ['coro_maestro',         'Quinta do Coro Maestro',                    40.09],
     ['coro_private',         'Quinta do Coro Private Collection',        172.57],
     ['coro_reserva',         'Quinta do Coro Reserva Syrah',              85.16],
@@ -516,5 +522,31 @@ describe('buildConsolidado', () => {
     // sem callback → null (não calculado), nunca zero enganoso
     const semCb = buildConsolidado([item({ id: 'MLB1', seller_custom_field: '21002' })], []);
     expect(semCb[0].estTotal).toBeNull();
+  });
+});
+// ── Regressao: match do HFC por extenso ────────────────────────────────────
+describe('custos — HFC pelo nome por extenso', () => {
+  it('a sigla continua casando (nao houve troca, houve acrescimo)', () => {
+    expect(getCustoProduto('HFC Reserva').regraId).toBe('hfc');
+  });
+
+  it('acento e caixa nao atrapalham', () => {
+    for (const t of [
+      'ALENTEJO HERDADE DA FONTE COBERTA RESERVA',
+      'Herdade Da Fonte Coberta - Reserva 750ml',
+    ]) {
+      expect(getCustoProduto(t).regraId, t).toBe('hfc');
+    }
+  });
+
+  it('nao rouba titulos de outras regras', () => {
+    // As 26 regras continuam resolvendo para o mesmo id de antes.
+    expect(getCustoProduto('Arcos do Convento Tinto 750ml').regraId).toBe('arcos_750');
+    expect(getCustoProduto('Marques de Estremoz Reserva').regraId).toBe('estremoz_reserva');
+    expect(getCustoProduto('Quinta do Coro Reserva Syrah').regraId).toBe('coro_reserva');
+  });
+
+  it('titulo sem relacao continua sem custo', () => {
+    expect(getCustoProduto('Vinho Fantasma da Serra Reserva').encontrado).toBe(false);
   });
 });
