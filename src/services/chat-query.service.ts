@@ -18,6 +18,16 @@
  *    1–28 ou 1–29 de fevereiro). Consultados ISOLADAMENTE, `previous_week` e
  *    `previous_month` permanecem COMPLETOS.
  *
+ * 1c. MÊS NOMEADO ("em julho", "julho de 2025") é o kind `month`. Antes desta
+ *    regra a frase caía no ano solto: "quanto faturamos em março de 2026"
+ *    devolvia 01/01 a hoje (o ANO INTEIRO), porque o nome do mês era ignorado
+ *    e "de 2026" era capturado por `anoCitado`. Responder o ano quando se
+ *    pergunta o mês é resposta errada sem aviso — pior que recusar.
+ *    O mês corrente é ACUMULADO até hoje (decisão 1b): em 14/08, "agosto" é
+ *    01/08 → 14/08, nunca 01/08 → 31/08. Somente nomes por EXTENSO disparam a
+ *    regra; abreviações (jan, mar, set, out) continuam exigindo um dia junto,
+ *    porque isoladas produziriam falso positivo em texto livre.
+ *
  * 2. FUSO: todo período é resolvido em dias civis de America/Sao_Paulo,
  *    ancorado em `hojeBRT(agora)` de datas-brt. O relógio é INJETÁVEL
  *    (opts.agora) para testes determinísticos.
@@ -62,7 +72,7 @@ export type ChatMetric = typeof CHAT_METRICS[number];
  */
 export const CHAT_PERIOD_KINDS = [
   'today', 'yesterday', 'day_before_yesterday',
-  'date', 'range',
+  'date', 'range', 'month',
   'current_week', 'previous_week',
   'current_month', 'previous_month',
   'current_year', 'previous_year', 'year',
@@ -173,7 +183,7 @@ const MESES: Record<string, number> = {
 };
 
 /** Termos que indicam intenção de VENDAS (não são métrica por si sós). */
-const RE_INTENCAO_VENDAS = /\b(vend[ei]|vendas|vendemos|vendeu|vendido|vendidas?|faturamento|faturamos|faturou|receita|arrecad\w*|movimento)\b/;
+const RE_INTENCAO_VENDAS = /\b(vend[ei]|vendas|vendemos|vendeu|vendido|vendidas?|vender\w*|faturamento|faturamos|faturou|faturaram|faturei|receita|arrecad\w*|movimento)\b/;
 /**
  * Intenção de MARGEM/LUCRO. Separada de RE_INTENCAO_VENDAS porque a pergunta
  * "qual a margem?" não menciona venda nenhuma, mas é uma consulta legítima ao
@@ -199,7 +209,7 @@ function detectarMetrica(t: string): ChatMetric | null {
   if (/\bticket\b/.test(t)) return 'average_ticket';
   if (/\b(unidade|unidades|pecas|itens vendidos|quantas unidades)\b/.test(t)) return 'units';
   if (/\b(pedido|pedidos|vendas realizadas|quantidade de pedidos)\b/.test(t)) return 'orders';
-  if (/\b(faturamento|faturamos|faturou|receita|quanto vendemos|quanto vendeu|quanto foi|arrecad\w*)\b/.test(t)) return 'revenue';
+  if (/\b(faturamento|faturamos|faturou|faturaram|faturei|receita|quanto vendemos|quanto vendeu|quanto foi|arrecad\w*)\b/.test(t)) return 'revenue';
   return null;
 }
 
@@ -310,6 +320,46 @@ function detectarJanelaMovel(t: string, hoje: string): PeriodoDetectado {
   return { ok: true, period: periodo('last_n_days', somaDias(hoje, -(dias - 1)), hoje) };
 }
 
+/**
+ * Mês por EXTENSO, com ano opcional: "julho", "em julho", "julho de 2025",
+ * "julho/2025". Abreviações (jan, mar, set, out) NÃO entram: isoladas casariam
+ * em texto livre ("no set", "marco zero") e criariam período onde não há.
+ */
+const RE_MES_NOMEADO =
+  /\b(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b(?:\s*(?:de|do|em)\s+|\s*\/\s*|\s+)?(20\d{2})?/;
+
+/**
+ * Resolve um mês nomeado em período civil.
+ *
+ * Ano AUSENTE: escolhe o ano que deixa o mês no passado mais recente — mesma
+ * regra das datas sem ano (decisão 3). Em 14/08/2026, "julho" é 2026 e
+ * "dezembro" é 2025.
+ *
+ * O fim é limitado a HOJE: o mês corrente devolve 01 → hoje, jamais dias
+ * futuros (decisão 1b). Um mês inteiramente no futuro (só possível com ano
+ * explícito) é recusado com `data_inexistente`, reusando o motivo já existente
+ * em vez de ampliar o contrato público de erros.
+ */
+function detectarMesNomeado(t: string, hoje: string): PeriodoDetectado {
+  const m = RE_MES_NOMEADO.exec(t);
+  if (!m) return null;
+
+  const mes = MESES[m[1]];
+  if (!mes) return null; // defensivo: a alternância acima só produz nomes válidos
+
+  const anoHoje = Number(hoje.slice(0, 4));
+  const mm = String(mes).padStart(2, '0');
+  const anoExplicito = m[2] ? Number(m[2]) : null;
+  // Sem ano no texto: o ano corrente só vale se o mês JÁ COMEÇOU.
+  const ano = anoExplicito ?? (`${anoHoje}-${mm}-01` <= hoje ? anoHoje : anoHoje - 1);
+
+  const from = `${ano}-${mm}-01`;
+  if (from > hoje) return { ok: false, erro: 'data_inexistente' };
+
+  const ultimo = ultimoDiaDoMes(from);
+  return { ok: true, period: periodo('month', from, ultimo > hoje ? hoje : ultimo) };
+}
+
 function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
   // ── Janela móvel ("ultimos N dias") — antes dos relativos nomeados, para que
   //    "ultimos 7 dias" não seja capturado por outra regra. ──
@@ -327,6 +377,18 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
   }
   if (/\b(hoje|no dia de hoje)\b/.test(t)) {
     return { ok: true, period: periodo('today', hoje, hoje) };
+  }
+
+  // ── Mês nomeado ("em julho", "julho de 2025") ──
+  // A extração de datas é hoisted porque o mês nomeado só pode valer quando o
+  // texto NÃO traz uma data com dia: em "25 de julho" quem manda é a data
+  // absoluta, e o mês seria uma leitura mais larga do que a pedida.
+  // Vem ANTES dos relativos nomeados porque "no mês de julho" casa com o regex
+  // de `mesAtual` (`\bno mes\b`) e devolveria o mês corrente.
+  const { datas, invalida } = extrairDatas(t, hoje);
+  if (datas.length === 0) {
+    const mesNomeado = detectarMesNomeado(t, hoje);
+    if (mesNomeado !== null) return mesNomeado;
   }
 
   const semanaPassada = /\b(semana passada|semana anterior|ultima semana|semana retrasada|da semana passada)\b/.test(t);
@@ -397,8 +459,7 @@ function detectarPeriodo(t: string, hoje: string): PeriodoDetectado {
   if (anoPassado) return { ok: true, period: anoAnteriorCompletoP };
   if (anoAtual) return { ok: true, period: anoAtualP };
 
-  // ── Datas absolutas ──
-  const { datas, invalida } = extrairDatas(t, hoje);
+  // ── Datas absolutas (extraídas no topo, junto com a guarda do mês nomeado) ──
   const querIntervalo = /\b(entre|de \d|a partir de|ate|periodo)\b/.test(t) || datas.length >= 2;
 
   if (datas.length === 0) {
