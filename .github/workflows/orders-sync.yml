@@ -14,61 +14,94 @@ concurrency:
 
 jobs:
   sync:
-    name: Sincronizar pedidos ativos
+    # Uma execução por backend. São PROJETOS SEPARADOS, com Redis separados:
+    # o oficial e o isolado de preview. Antes deste arquivo só o oficial era
+    # sincronizado, e o snapshot do preview ficou parado de 13 a 17/08/2026 —
+    # o chatbot passou a recusar consultas de "ontem" por falta de cobertura.
+    name: Sincronizar pedidos (${{ matrix.nome }})
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+
+    strategy:
+      # Um backend fora do ar NAO pode impedir a sincronizacao do outro.
+      fail-fast: false
+      matrix:
+        include:
+          - nome: oficial
+            url: https://overwine-assistant.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_ADMIN_KEY
+          - nome: preview
+            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_PREVIEW_ADMIN_KEY
 
     steps:
       - name: Validar configuração
         shell: bash
         env:
-          OVERWINE_ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          ADMIN_KEY: ${{ secrets[matrix.secret] }}
+          NOME_SECRET: ${{ matrix.secret }}
         run: |
           set -euo pipefail
 
-          if [ -z "${OVERWINE_ADMIN_KEY:-}" ]; then
-            echo "::error::O secret OVERWINE_ADMIN_KEY não está configurado."
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::O secret $NOME_SECRET não está configurado."
             exit 1
           fi
 
       - name: Executar sincronização
         shell: bash
         env:
-          OVERWINE_ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
-          SYNC_URL: https://overwine-assistant.vercel.app/api/admin/orders-sync
+          ADMIN_KEY: ${{ secrets[matrix.secret] }}
+          SYNC_URL: ${{ matrix.url }}
+          # O endpoint lê no máximo ORDERS_SYNC_MAX_PAGES (5) páginas por
+          # invocação e devolve committedOffset para retomar. Repetimos até
+          # concluir em vez de esperar a próxima hora: uma chamada por hora
+          # levaria dias para recuperar um atraso grande.
+          # Teto de 6: o rate limit do endpoint é 10 chamadas por 10 minutos.
+          MAX_PASSOS: '6'
         run: |
           set -euo pipefail
 
           response_file="$(mktemp)"
           trap 'rm -f "$response_file"' EXIT
 
-          http_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --location \
-              --request POST \
-              --url "$SYNC_URL" \
-              --header "Content-Type: application/json" \
-              --header "x-admin-key: $OVERWINE_ADMIN_KEY" \
-              --data '{"alvo":"ativos"}' \
-              --connect-timeout 15 \
-              --max-time 120 \
-              --output "$response_file" \
-              --write-out "%{http_code}"
-          )"
+          passo=1
+          while [ "$passo" -le "$MAX_PASSOS" ]; do
+            echo "── Passo $passo de $MAX_PASSOS ──"
 
-          echo "HTTP: $http_code"
-          echo "Resposta:"
-          cat "$response_file"
-          echo
+            http_code="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --request POST \
+                --url "$SYNC_URL" \
+                --header "Content-Type: application/json" \
+                --header "x-admin-key: $ADMIN_KEY" \
+                --data '{"alvo":"ativos"}' \
+                --connect-timeout 15 \
+                --max-time 120 \
+                --output "$response_file" \
+                --write-out "%{http_code}"
+            )"
 
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "::error::O endpoint respondeu HTTP $http_code."
-            exit 1
-          fi
+            echo "HTTP: $http_code"
+            echo "Resposta:"
+            cat "$response_file"
+            echo
 
-          python3 - "$response_file" <<'PY'
+            if [ "$http_code" = "429" ]; then
+              echo "::warning::Rate limit atingido no passo $passo. O offset confirmado está salvo; a próxima execução continua daqui."
+              exit 0
+            fi
+
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "::error::O endpoint respondeu HTTP $http_code."
+              exit 1
+            fi
+
+            set +e
+            python3 - "$response_file" <<'PY'
           import json
           import sys
 
@@ -107,9 +140,32 @@ jobs:
               )
               raise SystemExit(1)
 
-          if retomavel is True:
+          if concluido is True:
+              raise SystemExit(0)
+
+          if retomavel is not True:
               print(
-                  "::warning::O passo foi parcial e retomável. "
-                  "A próxima execução continuará do offset confirmado."
+                  "::error::O passo não concluiu e não é retomável. "
+                  f"Motivo: {motivo or 'não informado'}."
               )
+              raise SystemExit(1)
+
+          raise SystemExit(10)
           PY
+            status=$?
+            set -e
+
+            if [ "$status" -eq 0 ]; then
+              echo "Sincronização concluída em $passo passo(s)."
+              exit 0
+            fi
+
+            if [ "$status" -ne 10 ]; then
+              exit "$status"
+            fi
+
+            passo=$((passo + 1))
+            sleep 5
+          done
+
+          echo "::warning::Ainda parcial após $MAX_PASSOS passos. O offset confirmado está salvo; a próxima execução continua daqui."
