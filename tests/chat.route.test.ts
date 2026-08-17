@@ -1224,7 +1224,9 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
       ['SKU1', 120], ['SKU2', 90],
     ]);
     expect(ctx.result.items[0].rank).toBe(1);
-    expect(ctx.result.totals.distinctSkus).toBe(2);
+    // Totais do periodo ficam FORA de result, com nome inequivoco.
+    expect(ctx.result.totals).toBeUndefined();
+    expect(ctx.periodTotalsAllProducts.distinctSkus).toBe(2);
   });
 
   it('ranking por quantidade ordena diferente do de faturamento', async () => {
@@ -1241,13 +1243,23 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     await semearSnapshot(pedidosRanking());
     await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
     const ctx = contextoEnviado();
+    // Em ranking de RECEITA nao ha bloco de custo: o produto continua na lista
+    // com a receita real, e margem nao e assunto da pergunta.
     const fantasma = ctx.result.items.find((i: any) => i.sku === 'SKU2');
     expect(fantasma).toBeDefined();
-    expect(fantasma.costKnown).toBe(false);
-    expect(fantasma.margin).toBeNull();
     expect(fantasma.productRevenue).toBe(90);
-    expect(ctx.noCost.skus).toBe(1);
-    expect(ctx.noCost.titles).toContain('Vinho Fantasma da Serra Reserva');
+    expect(fantasma.costKnown).toBeUndefined();
+    expect(fantasma.margin).toBeUndefined();
+    expect(ctx.noCost).toBeUndefined();
+    expect(ctx.estimated).toBeUndefined();
+
+    // No ranking por MARGEM os blocos aparecem, com o produto sinalizado.
+    fetchCalls.length = 0;
+    await chamar(bodyValido5g('qual foi o produto com maior margem ontem?'), t);
+    const ctxM = contextoEnviado();
+    expect(ctxM.noCost.skus).toBe(1);
+    expect(ctxM.noCost.titles).toContain('Vinho Fantasma da Serra Reserva');
+    expect(ctxM.estimated).toBe(true);
   });
 
   it('ranking por MARGEM exclui quem nao tem custo e declara a cobertura', async () => {
@@ -1307,6 +1319,56 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const res = await chamar(bodyValido5g('compare o top 5 de ontem com o mes passado'), t);
     expect(res.statusCode).toBe(200);
     expect(fetchCalls.length).toBe(0);
+  });
+
+
+  it('ranking por RECEITA nao carrega custo, margem nem marcador de estimativa', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosRanking());
+    await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
+    const ctx = contextoEnviado();
+    for (const item of ctx.result.items) {
+      expect(item.cost).toBeUndefined();
+      expect(item.margin).toBeUndefined();
+      expect(item.marginPct).toBeUndefined();
+      expect(item.costKnown).toBeUndefined();
+    }
+    expect(ctx.estimated).toBeUndefined();
+    expect(ctx.beforeAdvertising).toBeUndefined();
+    expect(ctx.marginCoverage).toBeUndefined();
+    // Avisos de custo tambem somem: nao ha custo no contexto para justifica-los.
+    expect(ctx.warnings).not.toContain('antes_de_publicidade');
+    expect(ctx.warnings).not.toContain('custo_parcial');
+  });
+
+  it('ranking por QUANTIDADE tambem sai sem marcador de estimativa', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosRanking());
+    await chamar(bodyValido5g('quais produtos mais venderam ontem?'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.query.rankBy).toBe('units');
+    expect(ctx.estimated).toBeUndefined();
+    expect(ctx.result.items[0].units).toBeGreaterThan(0);
+  });
+
+  it('ranking por MARGEM mantem custo, estimativa e publicidade', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosRanking());
+    await chamar(bodyValido5g('qual foi o produto com maior margem ontem?'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.estimated).toBe(true);
+    expect(ctx.beforeAdvertising).toBe(true);
+    expect(ctx.result.items[0].margin).not.toBeUndefined();
+    expect(ctx.warnings).toContain('antes_de_publicidade');
+  });
+
+  it('o prompt proibe carimbar est. em unidades e faturamento', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosRanking());
+    await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
+    const sys = JSON.parse(fetchCalls[0].init.body as string).systemInstruction.parts[0].text as string;
+    expect(sys).toContain('nunca marque "est." neles');
+    expect(sys).toContain('periodTotalsAllProducts');
   });
 
   // ── o que a Gemini recebe no caminho novo ──

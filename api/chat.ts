@@ -167,11 +167,13 @@ const SYSTEM_PROMPT_RANKING = [
   '- result.items JÁ vem ordenado e cortado pelo backend. Apresente na ordem recebida, sem reordenar, sem recalcular posições e sem omitir itens.',
   '- Responda como lista numerada curta, uma linha por produto: posição, label e o número do critério (rankBy). Aqui a regra de "sem listas longas" não se aplica.',
   '- productRevenue é a receita dos PRODUTOS (preço unitário × quantidade), sem o frete cobrado do comprador. A soma do ranking é MENOR que o faturamento do mesmo período. Se o usuário estranhar, explique a diferença; nunca diga que um dos dois está errado.',
-  '- Valores são ESTIMATIVA e ANTES de publicidade quando envolverem margem. Marque com "est.".',
+  '- Cada produto tem os PRÓPRIOS números dentro de result.items. NUNCA descreva um produto com um número que veio de outro bloco.',
+  '- periodTotalsAllProducts é a soma de TODOS os produtos do período, não do top N e não de nenhum produto isolado. Só cite se o usuário pedir o total, e sempre identificando que é o total do período.',
+  '- Escreva "est." APENAS em margem, custo e percentual de margem: as tarifas do Mercado Livre são percentuais médios. Unidades e faturamento são contagem e soma exatas — nunca marque "est." neles.',
+  '- Só fale de margem, custo ou publicidade se esses campos estiverem no contexto. Em ranking por receita ou por quantidade eles não vêm, e a ausência não é zero nem desconhecido: é assunto fora da pergunta.',
   '- costKnown falso significa custo NÃO CADASTRADO, jamais custo zero. Nunca apresente margem para esses itens nem os trate como sem lucro.',
   '- Se noCost.skus for maior que zero, avise que há produtos sem custo cadastrado e cite noCost.titles.',
-  '- Em rankBy "margin", se marginCoverage.skusExcluidos for maior que zero, diga quantos produtos ficaram FORA da classificação por falta de custo. Não sugira que o ranking cobre todo o período.',
-  '- totals descreve TODOS os produtos do período, não apenas os do top N. Não apresente a soma do top N como total do período.',
+  '- Em rankBy "margin", se marginCoverage.skusExcluded for maior que zero, diga quantos produtos ficaram FORA da classificação por falta de custo. Não sugira que o ranking cobre todo o período.',
   '- Se items vier vazio com available verdadeiro, não houve venda no período. Isso é zero real, não ausência de dado.',
 ].join('\n');
 
@@ -706,7 +708,12 @@ function montarContextoMargem(q: ChatQuery, r: ResultadoMargem, st: OrdersReadSt
 }
 
 /** Projeção de uma linha do ranking. Nomes em inglês, como o resto do contexto. */
-function projetarLinhaRanking(l: ResultadoRanking['linhas'][number]) {
+/**
+ * Uma linha do ranking. Campos de custo/margem só entram quando o ranking É
+ * por margem: num ranking de receita eles são ruído, e ruído com número dentro
+ * é convite para o modelo citar o número errado.
+ */
+function projetarLinhaRanking(l: ResultadoRanking['linhas'][number], comMargem: boolean) {
   return {
     rank: l.posicao,
     sku: l.sku,
@@ -714,15 +721,23 @@ function projetarLinhaRanking(l: ResultadoRanking['linhas'][number]) {
     units: l.unidades,
     productRevenue: l.receitaProdutos,
     orders: l.pedidos,
-    // 'total' | 'parcial' | 'ausente' -> booleano simples para a redação.
-    costKnown: l.custoCobertura === 'total',
-    cost: l.custoTotal,
-    margin: l.margem,
-    marginPct: l.margemPct,
+    ...(comMargem ? {
+      // 'total' | 'parcial' | 'ausente' -> booleano simples para a redação.
+      costKnown: l.custoCobertura === 'total',
+      cost: l.custoTotal,
+      margin: l.margem,
+      marginPct: l.margemPct,
+    } : {}),
   };
 }
 
+/** Avisos que só fazem sentido quando há margem no contexto. */
+const WARNINGS_SO_DE_MARGEM: ReadonlySet<string> = new Set([
+  'antes_de_publicidade', 'custo_parcial', 'ranking_margem_cobertura_parcial',
+]);
+
 function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersReadStatus) {
+  const comMargem = r.criterio === 'margin';
   return {
     query: {
       intent: q.intent,
@@ -734,12 +749,19 @@ function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersRead
     result: {
       // Base de receita ATRIBUÍVEL ao produto — nunca paid_amount do pedido.
       basis: 'product_revenue',
-      totals: {
-        productRevenue: r.totais.receitaProdutos,
-        units: r.totais.unidades,
-        distinctSkus: r.totais.skusDistintos,
-      },
-      items: r.linhas.map(projetarLinhaRanking),
+      items: r.linhas.map(l => projetarLinhaRanking(l, comMargem)),
+    },
+    /**
+     * Soma de TODOS os produtos do período, não do top N. Fica FORA de `result`
+     * e com nome longo de propósito: quando este bloco se chamava `totals` e
+     * ficava ao lado de `items`, o modelo colou o total do período no primeiro
+     * produto da lista ("824 unidades no total (175 unidades)"). Distância e
+     * nome inequívoco valem mais que uma regra a mais no prompt.
+     */
+    periodTotalsAllProducts: {
+      productRevenue: r.totais.receitaProdutos,
+      units: r.totais.unidades,
+      distinctSkus: r.totais.skusDistintos,
     },
     coverage: {
       available: r.disponivel,
@@ -749,22 +771,30 @@ function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersRead
       dataFromYmd: ymdBRT(st.oldestDate),
       dataToYmd: ymdBRT(st.newestDate),
     },
-    // Produtos sem custo cadastrado: CONTINUAM no ranking de receita e de
-    // quantidade; só a margem deles é desconhecida.
-    noCost: {
-      skus: r.semCusto.skus,
-      productRevenue: r.semCusto.receitaProdutos,
-      units: r.semCusto.unidades,
-      revenueShare: r.semCusto.fracaoReceita,
-      titles: r.semCusto.titulos,
-    },
-    marginCoverage: r.margemCobertura === null ? null : {
-      revenueShareWithCost: r.margemCobertura.fracaoReceitaComCusto,
-      skusExcluded: r.margemCobertura.skusExcluidos,
-    },
-    beforeAdvertising: r.antesDePublicidade,
-    estimated: r.estimado,
-    warnings: r.warnings,
+    // Blocos de custo só existem no ranking POR MARGEM. Num ranking de receita
+    // ou de quantidade eles não descrevem o número pedido, e a presença deles
+    // fazia o modelo carimbar "est." em contagem exata.
+    ...(comMargem ? {
+      // Produtos sem custo cadastrado: CONTINUAM no ranking de receita e de
+      // quantidade; só a margem deles é desconhecida.
+      noCost: {
+        skus: r.semCusto.skus,
+        productRevenue: r.semCusto.receitaProdutos,
+        units: r.semCusto.unidades,
+        revenueShare: r.semCusto.fracaoReceita,
+        titles: r.semCusto.titulos,
+      },
+      marginCoverage: r.margemCobertura === null ? null : {
+        revenueShareWithCost: r.margemCobertura.fracaoReceitaComCusto,
+        skusExcluded: r.margemCobertura.skusExcluidos,
+      },
+      beforeAdvertising: r.antesDePublicidade,
+      // ESTIMATIVA descreve as TARIFAS (percentuais médios de planilha), que só
+      // entram no cálculo de margem. Unidades são contagem e faturamento é soma
+      // de preço × quantidade: exatos dentro do snapshot, nunca estimados.
+      estimated: r.estimado,
+    } : {}),
+    warnings: comMargem ? r.warnings : r.warnings.filter(w => !WARNINGS_SO_DE_MARGEM.has(w)),
   };
 }
 
