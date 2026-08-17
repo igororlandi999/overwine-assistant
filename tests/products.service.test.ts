@@ -4,6 +4,7 @@ import {
   normalizeTitle,
   getCustoProduto,
   custoUnitarioVendido,
+  garrafasPorVenda,
   ehVendaFull,
   buildConsolidado,
   carregarCustos,
@@ -117,6 +118,7 @@ describe('getCustoProduto', () => {
       custoProduto: 18.68,
       fonte: 'proprietario_2026_08',
       regraId: 'carrascal',
+      garrafasPorVenda: 1,   // anuncio avulso
     });
   });
 
@@ -163,7 +165,9 @@ describe('getCustoProduto', () => {
       { ordem: 1, id: 'brinde', custoProduto: 0, match: ['brinde overwine'] },
     ];
     const zero = getCustoProduto('Brinde Overwine Saca-rolhas', null, regras, 'teste');
-    expect(zero).toEqual({ encontrado: true, custoProduto: 0, fonte: 'teste', regraId: 'brinde' });
+    expect(zero).toEqual({
+      encontrado: true, custoProduto: 0, fonte: 'teste', regraId: 'brinde', garrafasPorVenda: 1,
+    });
     const ausente = getCustoProduto('Outro produto', null, regras, 'teste');
     expect(ausente.encontrado).toBe(false);
     expect(ausente.custoProduto).toBeNull();
@@ -548,5 +552,106 @@ describe('custos — HFC pelo nome por extenso', () => {
 
   it('titulo sem relacao continua sem custo', () => {
     expect(getCustoProduto('Vinho Fantasma da Serra Reserva').encontrado).toBe(false);
+  });
+});
+
+// ── Kits: N garrafas em UMA unidade vendida ────────────────────────────────
+// Regra do proprietario (17/08/2026): kits sao montados no estoque, entao
+// produto e frete escalam com o numero de garrafas; a embalagem NAO — o kit
+// inteiro vai numa caixa so.
+describe('garrafasPorVenda', () => {
+  it('detecta os oito kits reais do catalogo', () => {
+    const casos: Array<[string, number]> = [
+      ['Kit Com 6 Un Vinho Tinto Seco Português Ouro Meu 750ml', 6],
+      ['Kit Com 4 Un Vinho Branco Português Além Do Rio 750ml', 4],
+      ['Kit Com 4 Un Vinho Tinto Seco Português Ouro Meu 750ml', 4],
+      ['Kit Com 6 Un Vinho Tinto Português Arcos Do Convento 750ml', 6],
+      ['Kit Com 6 Un Vinho Rosé Português Além Do Rio 750ml', 6],
+      ['Kit Com 6 Un Vinho Branco Português Além Do Rio 750ml', 6],
+      ['Kit Com 4 Un Vinho Tinto Português Arcos Do Convento 750ml', 4],
+    ];
+    for (const [titulo, n] of casos) expect(garrafasPorVenda(titulo), titulo).toBe(n);
+  });
+
+  it('anuncio avulso e 1', () => {
+    for (const t of [
+      'Vinho Tinto Seco Português - Ouro Meu 750ml - Overwine',
+      'Vinho Rosé Português Regional Lisboa Além Do Rio 750ml',
+      '',
+    ]) expect(garrafasPorVenda(t), t).toBe(1);
+  });
+
+  it('CRITICO: Bag In Box 5 Litros NAO e kit', () => {
+    // O BiB e um recipiente unico de 5 L com custo proprio (regra arcos_bib,
+    // R$ 51,88). Tratar "5 Litros" como multiplicador contaria cinco vezes um
+    // custo que ja e do conjunto — erro de ordem de magnitude no maior
+    // faturamento do catalogo.
+    for (const t of [
+      'Vinho Tinto Português Arcos Do Convento Bag In Box 5 Litros',
+      'Vinho Tinto Portugues Arcos Do Convento Bag In Box 5 Lts',
+      'Vinho 5 Litros  Bag In Box Arcos Do Convento Tinto Português',
+    ]) expect(garrafasPorVenda(t), t).toBe(1);
+  });
+
+  it('volume e numeros soltos no titulo nao viram multiplicador', () => {
+    for (const t of [
+      'Vinho Branco Frisante Português Lisboa Além D Rio 750ml 2461',
+      'Vinho Tinto Meio Seco Português Arcos Do Convento 3571',
+      'Açaí Liofilizado Em Pó 100% Natural 100g Overberry Açaí',
+      'Vinho Tinto Cajado Real Reserva 2020 Alentejo Trincadeira Syrah 750ml',
+    ]) expect(garrafasPorVenda(t), t).toBe(1);
+  });
+
+  it('variantes de escrita e teto defensivo', () => {
+    expect(garrafasPorVenda('Caixa com 12 garrafas')).toBe(12);
+    expect(garrafasPorVenda('Combo 3 unidades')).toBe(3);
+    expect(garrafasPorVenda('Kit 2 un')).toBe(2);
+    expect(garrafasPorVenda('Kit com 1 un')).toBe(1);   // 1 nao e kit
+    expect(garrafasPorVenda('Kit com 99 un')).toBe(1);  // acima do teto: ignora
+  });
+
+  it('getCustoProduto devolve o multiplicador junto do custo da GARRAFA', () => {
+    const r = getCustoProduto('Kit Com 6 Un Vinho Tinto Seco Português Ouro Meu 750ml');
+    expect(r.encontrado).toBe(true);
+    expect(r.regraId).toBe('ouro_meu_base');
+    expect(r.custoProduto).toBe(13.78);   // custo de UMA garrafa, nao do kit
+    expect(r.garrafasPorVenda).toBe(6);
+  });
+});
+
+describe('custoUnitarioVendido — kits', () => {
+  const LOGK = { frete: 1.49, embalagem: 3.00 };
+
+  it('produto e frete escalam; embalagem entra UMA vez', () => {
+    // Kit de 6 do Ouro Meu, estoque proprio:
+    // (13.78 + 1.49) x 6 + 3.00 = 94.62
+    expect(custoUnitarioVendido(13.78, 'drop_off', LOGK, 6)).toBeCloseTo(94.62, 2);
+  });
+
+  it('no Full nao ha embalagem, mas frete continua escalando', () => {
+    // (13.78 + 1.49) x 6 = 91.62
+    expect(custoUnitarioVendido(13.78, 'fulfillment', LOGK, 6)).toBeCloseTo(91.62, 2);
+  });
+
+  it('garrafas ausente ou 1 preserva o comportamento anterior', () => {
+    expect(custoUnitarioVendido(13.78, 'drop_off', LOGK)).toBeCloseTo(18.27, 2);
+    expect(custoUnitarioVendido(13.78, 'drop_off', LOGK, 1)).toBeCloseTo(18.27, 2);
+  });
+
+  it('valores invalidos de garrafas caem para 1, nunca inflam', () => {
+    for (const n of [0, -5, NaN, 0.5]) {
+      expect(custoUnitarioVendido(13.78, 'drop_off', LOGK, n as number), String(n))
+        .toBeCloseTo(18.27, 2);
+    }
+  });
+
+  it('custo desconhecido continua null mesmo em kit', () => {
+    expect(custoUnitarioVendido(null, 'drop_off', LOGK, 6)).toBeNull();
+  });
+
+  it('REGRESSAO: kit de 6 nao e mais custeado como uma garrafa', () => {
+    const umaGarrafa = custoUnitarioVendido(13.78, 'drop_off', LOGK, 1) as number;
+    const kitDeSeis = custoUnitarioVendido(13.78, 'drop_off', LOGK, 6) as number;
+    expect(kitDeSeis).toBeGreaterThan(umaGarrafa * 5);
   });
 });

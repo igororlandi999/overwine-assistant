@@ -309,9 +309,13 @@ export function calcularRanking(
       g.receitaProdutos += receita;
 
       const custoBase = getCustoProduto(titulo, oi?.item?.seller_sku ?? null);
+      // garrafasPorVenda: um "Kit Com 6 Un" é UMA unidade vendida contendo seis
+      // garrafas. O custo escala; a embalagem não (uma caixa por venda).
       const custoUn = custoUnitarioVendido(
         custoBase.encontrado ? custoBase.custoProduto : null,
-        logisticType
+        logisticType,
+        undefined,
+        custoBase.garrafasPorVenda
       );
 
       if (custoUn === null) {

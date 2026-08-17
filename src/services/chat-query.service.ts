@@ -57,8 +57,16 @@ import type { PeriodoYmd } from './sales-metrics.service.js';
 // ── Tipos públicos ──────────────────────────────────────────────────────────
 
 /** FONTE ÚNICA das intenções. Ver a nota de CHAT_PERIOD_KINDS abaixo. */
-export const CHAT_INTENTS = ['sales_summary', 'sales_comparison'] as const;
+export const CHAT_INTENTS = ['sales_summary', 'sales_comparison', 'sales_ranking'] as const;
 export type ChatIntent = typeof CHAT_INTENTS[number];
+
+/**
+ * Critérios de ranking. Subconjunto DELIBERADO de CHAT_METRICS: só faz sentido
+ * ordenar produtos por receita, quantidade ou margem. Ticket médio e nº de
+ * pedidos por produto seriam outra pergunta, com outra conta.
+ */
+export const CHAT_RANK_BY = ['revenue', 'units', 'margin'] as const;
+export type ChatRankBy = typeof CHAT_RANK_BY[number];
 
 /** FONTE ÚNICA das métricas. Ver a nota de CHAT_PERIOD_KINDS abaixo. */
 export const CHAT_METRICS = ['revenue', 'orders', 'average_ticket', 'units', 'margin'] as const;
@@ -98,6 +106,15 @@ export interface ChatQuery {
   period: ChatPeriod;
   /** Presente somente em sales_comparison. */
   comparePeriod?: ChatPeriod;
+  /**
+   * Presentes somente em sales_ranking. `rankBy` sempre coincide com `metric`
+   * — a duplicação é intencional: `metric` mantém o contrato antigo (e sobrevive
+   * à continuidade, que o frontend projeta), e `rankBy` declara explicitamente
+   * que este é o eixo de ORDENAÇÃO, não só o número pedido.
+   */
+  rankBy?: ChatRankBy;
+  /** Top N pedido. Ausente = padrão do serviço de ranking. */
+  limit?: number;
   source: ChatQuerySource;
 }
 
@@ -196,8 +213,75 @@ const RE_COMPARACAO = /\b(compar\w*|versus|vs|em relacao a|frente a|contra)\b/;
 const RE_SENSIVEL = /\b(token|tokens|senha|password|chave|api key|credencial|sessao|cliente|clientes|comprador|compradores|nickname|apelido|endereco|enderecos|cpf|cnpj|telefone|email|e-mail|instrucoes|instrucao|prompt|system|regras internas|revele|revelar)\b/;
 const RE_INJECAO = /\b(ignore|ignorar|desconsidere|esqueca|finja|aja como|voce agora)\b/;
 
-/** Assuntos fora do escopo desta fase (existem no dashboard, não no parser). */
-const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|estoque|ruptura|cobertura|reputacao|qualidade|cancelad\w*|motivo|ranking|mais vendido|top \d+|produto|produtos|sku)\b/;
+/**
+ * Assuntos fora do escopo desta fase (existem no dashboard, não no parser).
+ *
+ * SAÍRAM daqui ao ganhar suporte: `ranking`, `mais vendido`, `top N`,
+ * `produto`, `produtos`, `sku` — agora tratados por RE_RANKING_EXPLICITO e
+ * RE_DIMENSAO_PRODUTO. `anuncio` PERMANECE: um anúncio não é um produto (três
+ * anúncios do mesmo vinho compartilham um SKU), e responder ranking de produto
+ * a uma pergunta sobre anúncio seria trocar a dimensão pedida.
+ */
+const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|estoque|ruptura|cobertura|reputacao|qualidade|cancelad\w*|motivo)\b/;
+
+/**
+ * Ranking por PALAVRA EXPLÍCITA. Basta um destes termos: a pergunta já é
+ * inequivocamente de classificação, com ou sem menção a produto.
+ * "o que mais vendeu ontem?" cai aqui — antes deste bloco ela era reconhecida
+ * como sales_summary e recebia o faturamento TOTAL do dia, respondendo outra
+ * pergunta sem nenhum aviso.
+ */
+const RE_RANKING_EXPLICITO = /\b(ranking|rankings|top\s*\d+|mais vendid\w+|menos vendid\w+|campe\w+ de vendas?|best sellers?|que mais (vendeu|venderam|faturou|faturaram|saiu|sairam)|o que mais (vendeu|vende|saiu|sai))\b/;
+
+/**
+ * Dimensão de PRODUTO. Sozinha não basta ("qual produto tem estoque?" não é
+ * ranking); exige intenção de vendas ou margem junto, verificada no parser.
+ */
+const PROD = '(?:produto|produtos|sku|skus|item|itens|vinho|vinhos)';
+const RE_DIMENSAO_PRODUTO = new RegExp(
+  // "faturamento POR PRODUTO"
+  `\\bpor ${PROD}\\b`
+  // "QUAL FOI O PRODUTO...", "QUAIS os 5 VINHOS..." — até 4 palavras de folga
+  // entre o interrogativo e o substantivo, que é o que separa "qual" de
+  // "produto" em "qual foi o produto com maior margem".
+  + `|\\b(?:quais|qual|que)\\b(?:\\s+\\w+){0,4}\\s+\\b${PROD}\\b`
+  // "PRODUTOS QUE mais venderam", "PRODUTO COM maior margem"
+  + `|\\b${PROD}\\s+(?:que|com)\\b`
+);
+
+/**
+ * Top N. Só é lido quando a consulta JÁ foi classificada como ranking, o que
+ * evita disputa com números de data. O sufixo exigido ("produtos", "maiores"…)
+ * impede que "25 de julho" ou "10 unidades" virem limite.
+ */
+const RE_LIMITE = /\btop\s*(\d{1,2})\b|\b(\d{1,2})\s+(?:maiores|melhores|principais|primeiros|produtos|vinhos|itens|skus)\b/;
+
+/**
+ * FILTRO por um produto específico ("a margem DO PRODUTO x", "quanto vendi DO
+ * SKU ABC"). NÃO é ranking e NÃO é suportado: o serviço classifica todos os
+ * produtos, não isola um. Sem esta guarda a frase perderia a dimensão e seria
+ * respondida com o número GERAL do período — a mesma classe de erro que o
+ * bloco de dimensão não suportada existe para impedir.
+ */
+const RE_FILTRO_PRODUTO = /\b(d[oa]s? (produto|produtos|sku|skus|item|itens|vinho|vinhos)|(deste|desse|daquele) (produto|sku|item|vinho))\b/;
+
+function detectarRankBy(t: string): ChatRankBy {
+  // Margem primeiro: "ranking de margem por produto" carrega os dois léxicos.
+  if (RE_INTENCAO_MARGEM.test(t)) return 'margin';
+  // Receita explícita vence o coloquial: "que mais FATURARAM" é receita.
+  if (/\b(faturamento|faturou|faturaram|faturamos|faturei|receita|valor vendido)\b/.test(t)) return 'revenue';
+  // "que mais vendeu", "mais vendidos", "por quantidade" — leitura coloquial de
+  // VOLUME, não de dinheiro.
+  if (/\b(quantidade|quantidades|unidade|unidades|volume|pecas|mais vendid\w+|menos vendid\w+|vendeu mais|venderam mais|que mais (vendeu|venderam|saiu|sairam)|o que mais (vendeu|vende|saiu|sai))\b/.test(t)) return 'units';
+  return 'revenue';
+}
+
+function detectarLimite(t: string): number | undefined {
+  const m = RE_LIMITE.exec(t);
+  if (!m) return undefined;
+  const n = Number(m[1] ?? m[2]);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
 
 // ── Detecção de métrica ─────────────────────────────────────────────────────
 
@@ -514,6 +598,18 @@ const INTENTS: ReadonlySet<string> = new Set<string>(CHAT_INTENTS);
 const METRICS: ReadonlySet<string> = new Set<string>(CHAT_METRICS);
 const KINDS: ReadonlySet<string> = new Set<string>(CHAT_PERIOD_KINDS);
 
+const RANK_BY: ReadonlySet<string> = new Set<string>(CHAT_RANK_BY);
+
+/**
+ * Converte a métrica herdada em critério de ranking. `average_ticket` e
+ * `orders` não são eixos de ranking (ver CHAT_RANK_BY); caem em receita, que é
+ * o padrão e nunca produz número errado — só uma ordenação diferente da que o
+ * usuário talvez esperasse.
+ */
+function rankByDeMetric(m: ChatMetric): ChatRankBy {
+  return RANK_BY.has(m) ? (m as ChatRankBy) : 'revenue';
+}
+
 /** previousQuery só é aceita se for estruturalmente íntegra. */
 export function previousQueryValida(q: unknown): q is ChatQuery {
   if (!q || typeof q !== 'object') return false;
@@ -555,6 +651,26 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
   const temIntencaoVendas = RE_INTENCAO_VENDAS.test(t) || RE_INTENCAO_MARGEM.test(t)
     || metricaTexto !== null || comparacaoDePeriodos;
 
+  // 1b) Ranking. Palavra explícita basta; a dimensão de produto sozinha exige
+  //     intenção de vendas junto ("qual produto tem estoque?" não é ranking, e
+  //     de todo modo cai em RE_FORA_ESCOPO logo abaixo).
+  const ehRanking = RE_RANKING_EXPLICITO.test(t)
+    || (RE_DIMENSAO_PRODUTO.test(t) && temIntencaoVendas);
+
+  // Filtro por UM produto ("a margem do produto x") não é ranking e não é
+  // suportado. Recusa antes de qualquer outra interpretação, para a frase não
+  // perder a dimensão e virar o número geral do período.
+  if (RE_FILTRO_PRODUTO.test(t) && !RE_RANKING_EXPLICITO.test(t)) {
+    return { kind: 'out_of_scope', reason: 'assunto_nao_suportado' };
+  }
+
+  // Comparar RANKINGS entre períodos é outra pergunta ("o top 5 mudou?"), com
+  // outro contrato de dados. Recusa explícita em vez de responder o ranking de
+  // um só período e dar a impressão de ter comparado.
+  if (ehRanking && ehComparacao) {
+    return { kind: 'out_of_scope', reason: 'assunto_nao_suportado' };
+  }
+
   // 2) Assunto conhecido do dashboard, porém fora do escopo desta fase.
   //    Recusa SEMPRE, mesmo havendo uma métrica suportada na frase: uma
   //    dimensão não suportada ("faturamento POR PRODUTO", "pedidos
@@ -572,15 +688,20 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
 
   // 4) Sem intenção de vendas no texto: só prossegue via continuidade válida.
   //    NUNCA assume revenue para frases sem intenção de vendas (decisão 4).
-  if (!temIntencaoVendas) {
+  if (!temIntencaoVendas && !ehRanking) {
     if (temPeriodo && prev) {
       // Continuidade tipo "e ontem?": herda intenção e métrica, troca o período.
+      // Um ranking anterior continua ranking; rankBy vem de prev.metric, que é
+      // o campo que o frontend projeta de volta (limit não sobrevive e volta ao
+      // padrão do serviço — degradação aceitável, jamais número errado).
+      const rankingHerdado = prev.intent === 'sales_ranking';
       return {
         kind: 'recognized',
         query: {
           intent: prev.intent === 'sales_comparison' ? 'sales_summary' : prev.intent,
           metric: prev.metric,
           period: (per as { ok: true; period: ChatPeriod }).period,
+          ...(rankingHerdado ? { rankBy: rankByDeMetric(prev.metric) } : {}),
           source: { intent: 'previous', metric: 'previous', period: 'text' },
         },
       };
@@ -590,9 +711,17 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
   }
 
   // 5) Há intenção de vendas. Métrica: do texto, ou herdada, ou padrão revenue.
+  //    Em ranking, a métrica É o critério de ordenação: perguntar "top 5 por
+  //    quantidade" e receber faturamento seria responder outra coisa.
+  const rankBy: ChatRankBy | null = ehRanking ? detectarRankBy(t) : null;
+  const limite = ehRanking ? detectarLimite(t) : undefined;
+
   let metric: ChatMetric;
   let metricFrom: ChatQuerySource['metric'];
-  if (metricaTexto) {
+  if (rankBy) {
+    metric = rankBy;
+    metricFrom = 'text';
+  } else if (metricaTexto) {
     metric = metricaTexto;
     metricFrom = 'text';
   } else if (prev) {
@@ -603,16 +732,21 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
     metricFrom = 'default';
   }
 
+  const extraRanking = rankBy
+    ? { rankBy, ...(limite !== undefined ? { limit: limite } : {}) }
+    : {};
+
   // 6) Período: do texto ou herdado ("e os pedidos?" mantém o período anterior).
   if (!temPeriodo) {
     if (prev) {
       return {
         kind: 'recognized',
         query: {
-          intent: 'sales_summary',
+          intent: rankBy ? 'sales_ranking' : 'sales_summary',
           metric,
           period: { ...prev.period },
-          source: { intent: 'previous', metric: metricFrom, period: 'previous' },
+          ...extraRanking,
+          source: { intent: rankBy ? 'text' : 'previous', metric: metricFrom, period: 'previous' },
         },
       };
     }
@@ -621,7 +755,8 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
 
   const p = per as { ok: true; period: ChatPeriod; compare?: ChatPeriod };
 
-  // 7) Comparação exige dois períodos resolvidos.
+  // 7) Comparação exige dois períodos resolvidos. (Ranking + comparação já foi
+  //    recusado no passo 1b.)
   if (ehComparacao) {
     if (!p.compare) return { kind: 'ambiguous', reason: 'periodo_ausente' };
     return {
@@ -639,9 +774,10 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
   return {
     kind: 'recognized',
     query: {
-      intent: 'sales_summary',
+      intent: rankBy ? 'sales_ranking' : 'sales_summary',
       metric,
       period: p.period,
+      ...extraRanking,
       source: { intent: 'text', metric: metricFrom, period: 'text' },
     },
   };

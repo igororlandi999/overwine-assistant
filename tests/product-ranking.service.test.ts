@@ -470,3 +470,47 @@ describe('calcularRanking — pureza', () => {
     expect(rank(orders).linhas.length).toBe(1);
   });
 });
+
+describe('calcularRanking — kits', () => {
+  const KIT6 = 'Kit Com 6 Un Vinho Ouro Meu Tinto Seco 750ml';
+
+  it('kit de 6 e custeado com SEIS garrafas, nao uma', () => {
+    // (13.78 + 1.49) x 6 + 3.00 = 94.62 por kit vendido; 2 kits = 189.24
+    const r = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])], { criterio: 'margin' });
+    expect(r.linhas[0].custoTotal).toBeCloseTo(189.24, 2);
+  });
+
+  it('REGRESSAO: a margem do kit nao e mais inflada', () => {
+    // Antes desta correcao o kit custava 18.27 por venda (uma garrafa), e a
+    // margem saia ~R$ 152 maior a cada dois kits.
+    const kit = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])], { criterio: 'margin' });
+    const comoUmaGarrafa = 18.27 * 2;
+    expect(kit.linhas[0].custoTotal).toBeGreaterThan(comoUmaGarrafa * 5);
+  });
+
+  it('embalagem entra UMA vez por kit, nao por garrafa', () => {
+    const proprio = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 1, sku: 'K6' }])], { criterio: 'margin' });
+    const full = rank(
+      [pedido([{ titulo: KIT6, preco: 240, qtd: 1, sku: 'K6' }], { logisticType: 'fulfillment' })],
+      { criterio: 'margin' }
+    );
+    // A diferenca entre proprio e Full e exatamente UMA embalagem (3.00).
+    expect((proprio.linhas[0].custoTotal as number) - (full.linhas[0].custoTotal as number))
+      .toBeCloseTo(3.00, 2);
+  });
+
+  it('Bag In Box NAO e tratado como kit', () => {
+    // 51.88 + 1.49 + 3.00 = 56.37 — uma unidade, nao cinco.
+    const r = rank([pedido([
+      { titulo: 'Vinho Tinto Arcos do Convento Bag In Box 5 Litros', preco: 140, qtd: 1, sku: 'BIB' },
+    ])], { criterio: 'margin' });
+    expect(r.linhas[0].custoTotal).toBeCloseTo(56.37, 2);
+  });
+
+  it('unidades continuam contando VENDAS, nao garrafas', () => {
+    // Decisao explicita: 2 kits sao 2 unidades vendidas. Contar 12 garrafas
+    // misturaria as bases e quebraria a comparacao com o ticket medio.
+    const r = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])]);
+    expect(r.linhas[0].unidades).toBe(2);
+  });
+});

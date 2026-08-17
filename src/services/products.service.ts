@@ -177,15 +177,51 @@ export function normalizeTitle(title: string | null | undefined): string {
 // ── getCustoUnitario ──────────────────────────────────────────────────────
 
 export type CustoProdutoResultado =
-  | { encontrado: true; custoProduto: number; fonte: string; regraId: string }
-  | { encontrado: false; custoProduto: null; fonte: null; regraId: null };
+  | {
+      encontrado: true;
+      /** Custo de aquisição de UMA garrafa. Em kit, NÃO é o custo da venda. */
+      custoProduto: number;
+      fonte: string;
+      regraId: string;
+      /**
+       * Garrafas embutidas em uma unidade vendida. 1 para anúncio avulso, N
+       * para "Kit Com N Un". Fica explícito no retorno para ser auditável: a
+       * detecção vem do TÍTULO, e título é fonte frágil (foi o que escondeu o
+       * HFC). Quem calcular custo DEVE multiplicar por este número.
+       */
+      garrafasPorVenda: number;
+    }
+  | { encontrado: false; custoProduto: null; fonte: null; regraId: null; garrafasPorVenda: 1 };
 
 const NAO_ENCONTRADO: CustoProdutoResultado = {
   encontrado: false,
   custoProduto: null,
   fonte: null,
   regraId: null,
+  garrafasPorVenda: 1,
 };
+
+/**
+ * Kits são montados no estoque a partir de garrafas avulsas, então o custo de
+ * aquisição é N × o custo unitário. O ML vende o kit como UMA unidade, e o
+ * título é o único lugar onde a quantidade aparece — não há campo estruturado.
+ *
+ * Só dispara com um substantivo de contagem explícito ("6 un", "4 garrafas").
+ * Isso evita casar com volume: "Bag In Box 5 Litros" é um recipiente único de
+ * 5 L, com custo próprio já cadastrado (regra arcos_bib), e NÃO pode virar
+ * multiplicador — seria contar cinco vezes um custo que já é do conjunto.
+ */
+const RE_KIT = /\b(?:kit|caixa|pack|combo|c\/)\s*(?:com\s+)?(\d{1,2})\s*(?:un|und|unid\w*|garrafas?|gfs?)\b/;
+
+/** Garrafas por unidade vendida detectadas no título. 1 quando não é kit. */
+export function garrafasPorVenda(titulo: string | null | undefined): number {
+  const m = RE_KIT.exec(normalizarParaMatch(titulo ?? ''));
+  if (!m) return 1;
+  const n = Number(m[1]);
+  // Teto defensivo: acima disso é quase certo erro de leitura do título, e
+  // inflar custo silenciosamente é pior que ignorar o kit.
+  return Number.isFinite(n) && n >= 2 && n <= 24 ? n : 1;
+}
 
 /** Minúsculas + remoção de marcas de acento (mesmo regex do legado: U+0300–U+036F). */
 function normalizarParaMatch(s: string): string {
@@ -218,7 +254,13 @@ export function getCustoProduto(
     const temTipo = !regra.tipo || regra.tipo.some(tp => t.includes(tp));
     const temExcl = !!regra.exclui && regra.exclui.some(ex => t.includes(ex));
     if (temTipo && !temExcl) {
-      return { encontrado: true, custoProduto: regra.custoProduto, fonte, regraId: regra.id };
+      return {
+        encontrado: true,
+        custoProduto: regra.custoProduto,
+        fonte,
+        regraId: regra.id,
+        garrafasPorVenda: garrafasPorVenda(titulo),
+      };
     }
   }
   return NAO_ENCONTRADO;
@@ -237,19 +279,28 @@ export function ehVendaFull(logisticType: string | null | undefined): boolean {
 }
 
 /**
- * Custo por UNIDADE VENDIDA: custo do produto + frete + embalagem, sendo a
- * embalagem aplicada apenas em venda por estoque próprio (no Full o Mercado
- * Livre embala). Custo de produto desconhecido devolve null — nunca zero, para
- * que a margem seja declarada indisponível em vez de fabricada.
+ * Custo por UNIDADE VENDIDA: (custo do produto + frete) × garrafas + embalagem.
+ *
+ * O que escala com o número de garrafas e o que NÃO escala foi definido pelo
+ * proprietário (17/08/2026):
+ * - custo do produto ESCALA: o kit é montado com N garrafas do estoque;
+ * - frete ESCALA: mais garrafas aumentam o volume, e o frete sobe junto;
+ * - embalagem NÃO escala: o kit inteiro vai em UMA embalagem.
+ *
+ * A embalagem só entra em venda por estoque próprio (no Full o Mercado Livre
+ * embala). Custo de produto desconhecido devolve null — nunca zero, para que a
+ * margem seja declarada indisponível em vez de fabricada.
  */
 export function custoUnitarioVendido(
   custoProduto: number | null,
   logisticType: string | null | undefined,
-  logistica: Logistica = carregarCustos().config.logistica
+  logistica: Logistica = carregarCustos().config.logistica,
+  garrafas: number = 1
 ): number | null {
   if (custoProduto === null) return null;
+  const n = Number.isFinite(garrafas) && garrafas >= 1 ? Math.floor(garrafas) : 1;
   const embalagem = ehVendaFull(logisticType) ? 0 : logistica.embalagem;
-  return custoProduto + logistica.frete + embalagem;
+  return (custoProduto + logistica.frete) * n + embalagem;
 }
 
 // ── buildConsolidado ──────────────────────────────────────────────────────

@@ -23,10 +23,11 @@
  *    produtos. São médias de planilha, NÃO fees reais da API do ML. Por isso
  *    todo resultado sai com `estimado: true`.
  *
- * 4. CUSTO: custoUnitarioVendido (products.service) = custo de aquisição +
- *    frete + embalagem, esta última APENAS em venda por estoque próprio. A
- *    decisão é por PEDIDO, via shipping.logistic_type; ausente ou desconhecido
- *    é tratado como próprio (lado conservador: nunca infla a margem).
+ * 4. CUSTO: custoUnitarioVendido (products.service) = (custo de aquisição +
+ *    frete) × garrafas + embalagem, esta última APENAS em venda por estoque
+ *    próprio e UMA vez por venda, mesmo em kit. A decisão é por PEDIDO, via
+ *    shipping.logistic_type; ausente ou desconhecido é tratado como próprio
+ *    (lado conservador: nunca infla a margem).
  *
  * 5. PUBLICIDADE FORA: o custo de anúncios não entra. Todo resultado é margem
  *    ANTES de publicidade e o campo `antesDePublicidade: true` obriga a camada
@@ -208,9 +209,14 @@ export function calcularMargem(
       const titulo = oi?.item?.title ?? '';
 
       const custoBase = getCustoProduto(titulo, oi?.item?.seller_sku ?? null);
+      // garrafasPorVenda: kits ("Kit Com 6 Un") são UMA unidade vendida com N
+      // garrafas dentro. Sem este fator o kit era custeado como uma garrafa só
+      // e a margem dele saía inflada.
       const custoUn = custoUnitarioVendido(
         custoBase.encontrado ? custoBase.custoProduto : null,
-        logisticType
+        logisticType,
+        undefined,
+        custoBase.garrafasPorVenda
       );
 
       if (custoUn === null) {
