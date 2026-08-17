@@ -22,6 +22,13 @@
  *    A alternativa (atribuir paid_amount do pedido inteiro ao primeiro item,
  *    quirk de `vendasPorItem`) infla pedidos multi-item e não é usada aqui.
  *
+ * 3b. LABEL: título do anúncio que MAIS FATURA no grupo, não o mais curto. O
+ *    consolidado legado usa o mais curto, e em produção isso exibia o anúncio
+ *    errado: o SKU 25101 fatura R$ 46 mil no anúncio principal e R$ 388 numa
+ *    variante chamada "...Exclusive Edition 3571"; por ter um caractere a
+ *    menos, o código interno virava o nome do produto no ranking. Números
+ *    certos com nome irreconhecível é um erro de leitura, não de estética.
+ *
  * 3. AGRUPAMENTO: por `itemSKU` do anúncio, com fallback `sem-sku-<itemId>` —
  *    EXATAMENTE a mesma chave de margin-metrics. Duas convenções de
  *    agrupamento coexistindo repetiria o erro de `!== 'cancelled'` vs
@@ -190,7 +197,8 @@ export function normalizarLimite(n: unknown): number {
 interface Acc {
   sku: string;
   semSku: boolean;
-  label: string;
+  /** Receita acumulada por título, para eleger o label representativo. */
+  receitaPorTitulo: Map<string, number>;
   itemIds: Set<string>;
   pedidoIds: Set<string>;
   unidades: number;
@@ -202,11 +210,11 @@ interface Acc {
   receitaSemCusto: number;
 }
 
-function novoAcc(sku: string, semSku: boolean, label: string): Acc {
+function novoAcc(sku: string, semSku: boolean): Acc {
   return {
     sku,
     semSku,
-    label,
+    receitaPorTitulo: new Map(),
     itemIds: new Set(),
     pedidoIds: new Set(),
     unidades: 0,
@@ -217,6 +225,24 @@ function novoAcc(sku: string, semSku: boolean, label: string): Acc {
     unidadesSemCusto: 0,
     receitaSemCusto: 0,
   };
+}
+
+/**
+ * Título representativo do grupo: o de MAIOR receita (decisão 3b). Empate
+ * resolve pelo mais curto e, se ainda empatar, pela ordem alfabética — para o
+ * resultado não depender da ordem de leitura dos pedidos.
+ */
+function elegerLabel(receitaPorTitulo: Map<string, number>): string {
+  let melhor = '';
+  let melhorReceita = -Infinity;
+  for (const [titulo, receita] of receitaPorTitulo) {
+    if (receita > melhorReceita) { melhor = titulo; melhorReceita = receita; continue; }
+    if (receita === melhorReceita) {
+      if (titulo.length < melhor.length) { melhor = titulo; continue; }
+      if (titulo.length === melhor.length && titulo.localeCompare(melhor, 'pt-BR') < 0) melhor = titulo;
+    }
+  }
+  return melhor;
 }
 
 function indisponivel(
@@ -298,11 +324,13 @@ export function calcularRanking(
 
       let g = grupos.get(chave);
       if (!g) {
-        g = novoAcc(chave, skuReal === null, titulo);
+        g = novoAcc(chave, skuReal === null);
         grupos.set(chave, g);
       }
-      // Label: o título mais curto entre os vistos (mesma regra do consolidado).
-      if (titulo !== '' && (g.label === '' || titulo.length < g.label.length)) g.label = titulo;
+      // Label: acumula receita por título; o vencedor é eleito ao fechar (3b).
+      if (titulo !== '') {
+        g.receitaPorTitulo.set(titulo, (g.receitaPorTitulo.get(titulo) ?? 0) + receita);
+      }
       if (itemId !== '') g.itemIds.add(itemId);
       g.pedidoIds.add(pedidoId);
       g.unidades += qtd;
@@ -370,7 +398,7 @@ export function calcularRanking(
       posicao: 0, // atribuído depois da ordenação
       sku: g.sku,
       semSku: g.semSku,
-      label: g.label,
+      label: elegerLabel(g.receitaPorTitulo),
       itemIds: [...g.itemIds].sort(),
       unidades: g.unidades,
       receitaProdutos: g.receitaProdutos,

@@ -118,8 +118,8 @@ describe('calcularRanking — agrupamento por SKU', () => {
     expect(r.linhas[0].receitaProdutos).toBe(85);
     expect(r.linhas[0].unidades).toBe(2);
     expect(r.linhas[0].itemIds).toEqual(['MLB1', 'MLB2']);
-    // Label: o titulo mais curto entre os vistos.
-    expect(r.linhas[0].label).toBe(ARCOS);
+    // Label: o titulo de MAIOR receita do grupo (45 > 40), nao o mais curto.
+    expect(r.linhas[0].label).toBe(ARCOS + ' Premium');
   });
 
   it('sem sku vira grupo proprio sem-sku-<itemId> com semSku true', () => {
@@ -512,5 +512,51 @@ describe('calcularRanking — kits', () => {
     // misturaria as bases e quebraria a comparacao com o ticket medio.
     const r = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])]);
     expect(r.linhas[0].unidades).toBe(2);
+  });
+});
+
+describe('calcularRanking — label representativo', () => {
+  it('REGRESSAO: codigo interno de anuncio secundario nao vira o nome', () => {
+    // Caso real observado em producao no SKU 25101: o anuncio principal fatura
+    // ~46 mil e a variante "...3571" fatura ~388, mas o titulo dela e um
+    // caractere mais curto e virava o nome exibido no ranking.
+    const principal = 'Vinho Tinto Seco Portugues Ouro Meu Exclusive Edition 750ml';
+    const variante  = 'Vinho Tinto Seco Portugues Ouro Meu Exclusive Edition 3571';
+    expect(variante.length).toBeLessThan(principal.length);   // a armadilha
+    const r = rank([
+      pedido([{ titulo: principal, preco: 46000, qtd: 1, sku: '25101', id: 'MLB1' }]),
+      pedido([{ titulo: variante,  preco: 388,   qtd: 1, sku: '25101', id: 'MLB2' }]),
+    ]);
+    expect(r.linhas[0].label).toBe(principal);
+  });
+
+  it('soma a receita do MESMO titulo em anuncios diferentes', () => {
+    const a = 'Vinho Curto';
+    const b = 'Vinho Com Nome Bem Mais Longo';
+    const r = rank([
+      pedido([{ titulo: b, preco: 30, qtd: 1, sku: 'S', id: 'MLB1' }]),
+      pedido([{ titulo: b, preco: 30, qtd: 1, sku: 'S', id: 'MLB2' }]),  // b = 60
+      pedido([{ titulo: a, preco: 50, qtd: 1, sku: 'S', id: 'MLB3' }]),  // a = 50
+    ]);
+    expect(r.linhas[0].label).toBe(b);
+  });
+
+  it('empate de receita resolve pelo mais curto, e nao depende da ordem', () => {
+    const curto = 'Vinho A';
+    const longo = 'Vinho A Reserva Especial';
+    const orders = [
+      pedido([{ titulo: longo, preco: 40, qtd: 1, sku: 'S', id: 'MLB1' }]),
+      pedido([{ titulo: curto, preco: 40, qtd: 1, sku: 'S', id: 'MLB2' }]),
+    ];
+    expect(rank(orders).linhas[0].label).toBe(curto);
+    expect(rank([...orders].reverse()).linhas[0].label).toBe(curto);
+  });
+
+  it('titulo vazio nao vira label quando ha alternativa', () => {
+    const r = rank([
+      pedido([{ titulo: '', preco: 100, qtd: 1, sku: 'S', id: 'MLB1' }]),
+      pedido([{ titulo: 'Vinho Real', preco: 10, qtd: 1, sku: 'S', id: 'MLB2' }]),
+    ]);
+    expect(r.linhas[0].label).toBe('Vinho Real');
   });
 });

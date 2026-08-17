@@ -200,7 +200,10 @@ const MESES: Record<string, number> = {
 };
 
 /** Termos que indicam intenção de VENDAS (não são métrica por si sós). */
-const RE_INTENCAO_VENDAS = /\b(vend[ei]|vendas|vendemos|vendeu|vendido|vendidas?|vender\w*|faturamento|faturamos|faturou|faturaram|faturei|receita|arrecad\w*|movimento)\b/;
+// vend\w* cobre toda a conjugação de uma vez: vendi, vende, vendem, vendeu,
+// venderam, vendemos, vendido(s), vendida(s), vender, vendas. Enumerar formas
+// à mão já falhou duas vezes — "faturaram" e "vendem" ficaram de fora.
+const RE_INTENCAO_VENDAS = /\b(vend\w*|fatur\w*|receita|arrecad\w*|movimento)\b/;
 /**
  * Intenção de MARGEM/LUCRO. Separada de RE_INTENCAO_VENDAS porque a pergunta
  * "qual a margem?" não menciona venda nenhuma, mas é uma consulta legítima ao
@@ -231,7 +234,7 @@ const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|estoque|
  * como sales_summary e recebia o faturamento TOTAL do dia, respondendo outra
  * pergunta sem nenhum aviso.
  */
-const RE_RANKING_EXPLICITO = /\b(ranking|rankings|top\s*\d+|mais vendid\w+|menos vendid\w+|campe\w+ de vendas?|best sellers?|que mais (vendeu|venderam|faturou|faturaram|saiu|sairam)|o que mais (vendeu|vende|saiu|sai))\b/;
+const RE_RANKING_EXPLICITO = /\b(ranking|rankings|top\s*\d+|(mais|menos) vend\w+|(mais|menos) sa[ií]\w+|(mais|menos) fatur\w+|campe\w+ de vendas?|best sellers?|vend\w+ mais|fatur\w+ mais)\b/;
 
 /**
  * Dimensão de PRODUTO. Sozinha não basta ("qual produto tem estoque?" não é
@@ -272,7 +275,10 @@ function detectarRankBy(t: string): ChatRankBy {
   if (/\b(faturamento|faturou|faturaram|faturamos|faturei|receita|valor vendido)\b/.test(t)) return 'revenue';
   // "que mais vendeu", "mais vendidos", "por quantidade" — leitura coloquial de
   // VOLUME, não de dinheiro.
-  if (/\b(quantidade|quantidades|unidade|unidades|volume|pecas|mais vendid\w+|menos vendid\w+|vendeu mais|venderam mais|que mais (vendeu|venderam|saiu|sairam)|o que mais (vendeu|vende|saiu|sai))\b/.test(t)) return 'units';
+  // "mais vend\w+" cobre "mais vendidos", "mais venderam", "mais vendeu" e
+  // "mais vendem" de uma vez. A forma sem o "que" ("quais produtos MAIS
+  // VENDERAM") é como se fala e caía no padrão revenue por omissão.
+  if (/\b(quantidade|quantidades|unidade|unidades|volume|pecas|(mais|menos) vend\w+|(mais|menos) sa[ií]\w+|vend\w+ mais|sa[ií]\w+ mais)\b/.test(t)) return 'units';
   return 'revenue';
 }
 
