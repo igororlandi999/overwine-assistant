@@ -112,11 +112,35 @@ describe('allowlist do proxy', () => {
     expect((r.data as any).cause[0].error_message).toBe('duplicado');
   });
 
-  it('cobre todas as 16 operações do inventário da auditoria', () => {
+  it('a allowlist tem EXATAMENTE as operações declaradas', () => {
+    // Inventário fechado de propósito: rota nova no proxy do Mercado Livre é
+    // superfície nova de exposição, e tem que passar por aqui conscientemente.
     expect(Object.keys(OPS).sort()).toEqual([
       'ads-billing', 'items', 'items-search', 'order', 'order-discounts', 'orders',
       'product-items', 'promotion-item-remove', 'promotion-item-set', 'promotion-items',
-      'promotions', 'reputation', 'shipment', 'sites-search', 'visits',
+      'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
     ].sort());
+  });
+
+  it('shipment-costs e somente leitura e nao expoe endereco nem comprador', () => {
+    const op = OPS['shipment-costs'];
+    expect(op.method).toBe('GET');
+    expect(op.path({ id: '123' } as never, '1')).toBe('/shipments/123/costs');
+    const bruto = {
+      gross_amount: 34.99,
+      senders: [{ cost: 10, discounts: [] }],
+      receiver: { cost: 24.99 },
+      discounts: [],
+      currency_id: 'BRL',
+      // Campos que o ML pode devolver e que NAO podem passar:
+      receiver_address: { street_name: 'Rua X', zip_code: '01234-000' },
+      buyer: { nickname: 'FULANO' },
+    };
+    const saida = JSON.stringify(op.shape(bruto as never));
+    expect(saida).toContain('gross_amount');
+    expect(saida).toContain('senders');
+    expect(saida).not.toContain('receiver_address');
+    expect(saida).not.toContain('street_name');
+    expect(saida).not.toContain('nickname');
   });
 });

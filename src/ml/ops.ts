@@ -56,6 +56,18 @@ const SHIPMENT_FIELDS = [
   'last_updated', 'lead_time', 'receiver_address', 'origin', 'destination', 'tags',
 ];
 
+/**
+ * Custos de um envio. `senders[].cost` é o que o VENDEDOR paga; `receiver.cost`
+ * é o que o comprador paga. O objeto de envio sozinho não separa os dois: traz
+ * `base_cost` (tabela) e `shipping_option.cost` (o que o comprador viu), e a
+ * diferença entre eles é subsídio de origem indeterminada.
+ *
+ * Só valores e descontos — nenhum endereço, nome ou dado de comprador.
+ */
+const SHIPMENT_COST_FIELDS = [
+  'gross_amount', 'receiver', 'senders', 'discounts', 'currency_id',
+];
+
 const SEARCH_RESULT_FIELDS = [
   'id', 'title', 'price', 'original_price', 'sold_quantity', 'available_quantity',
   'permalink', 'thumbnail', 'seller', 'shipping', 'official_store_id',
@@ -155,6 +167,17 @@ export const OPS: Record<string, OpDef> = {
     params: z.object({ id: digits }),
     path: p => `/shipments/${p.id}`,
     shape: d => pick(d, SHIPMENT_FIELDS),
+  },
+
+  // 6b) Custos do envio — quanto o VENDEDOR realmente pagou de frete.
+  // Existe para substituir o percentual fixo de 14,4% do taxas.json, que é uma
+  // média de planilha proporcional à receita, quando o frete real depende de
+  // peso e distância.
+  'shipment-costs': {
+    method: 'GET',
+    params: z.object({ id: digits }),
+    path: p => `/shipments/${p.id}/costs`,
+    shape: d => pick(d, SHIPMENT_COST_FIELDS),
   },
 
   // 7) Reputação — loadReputation (só o que o card usa)
