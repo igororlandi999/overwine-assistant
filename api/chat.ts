@@ -41,6 +41,8 @@ import {
   calcularRanking,
   type ResultadoRanking,
 } from '../src/services/product-ranking.service.js';
+import { lerMapaLogistica } from '../src/lib/shipping-store.js';
+import { coberturaLogistica } from '../src/services/shipping-logistics.service.js';
 import {
   type CoberturaSnapshot,
   type ResultadoComparacao,
@@ -152,6 +154,7 @@ const SYSTEM_PROMPT_MARGEM = [
   '- Se noCost.units for maior que zero, avise que os itens sem custo cadastrado ficaram de fora e cite os títulos de noCost.titles.',
   '- Se available for falso com o aviso custo_insuficiente, diga que a margem não pode ser calculada porque falta custo para boa parte da receita, e liste noCost.titles para o usuário cadastrar. NUNCA apresente isso como margem zero.',
   '- Margem negativa é um resultado legítimo: reporte o prejuízo com clareza.',
+  '- Se shippingCoverage.share for menor que 1, parte dos envios está sem logística conhecida e foi tratada como estoque próprio, o que SOMA embalagem e SUBESTIMA a margem. Nesse caso diga que o valor é um piso, não o número exato. Se share for 1, não mencione o assunto.',
 ].join('\n');
 
 /**
@@ -174,6 +177,7 @@ const SYSTEM_PROMPT_RANKING = [
   '- costKnown falso significa custo NÃO CADASTRADO, jamais custo zero. Nunca apresente margem para esses itens nem os trate como sem lucro.',
   '- Se noCost.skus for maior que zero, avise que há produtos sem custo cadastrado e cite noCost.titles.',
   '- Em rankBy "margin", se marginCoverage.skusExcluded for maior que zero, diga quantos produtos ficaram FORA da classificação por falta de custo. Não sugira que o ranking cobre todo o período.',
+  '- Se shippingCoverage.share for menor que 1, parte dos envios está sem logística conhecida e foi tratada como estoque próprio, o que SUBESTIMA a margem. Diga que o valor é um piso. Se share for 1, não mencione o assunto.',
   '- Se items vier vazio com available verdadeiro, não houve venda no período. Isso é zero real, não ausência de dado.',
 ].join('\n');
 
@@ -799,6 +803,29 @@ function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersRead
 }
 
 /**
+ * Acrescenta ao contexto quanto do período tem logística CONHECIDA.
+ *
+ * Envio sem logística conhecida é tratado como estoque próprio, o que soma
+ * embalagem e SUBESTIMA a margem. Declarar a fração permite à resposta dizer
+ * que o número é um piso, em vez de apresentá-lo como exato.
+ */
+function comCoberturaLogistica(
+  ctx: Record<string, unknown>,
+  pedidos: OrderSlim[],
+  mapa: ReadonlyMap<string, string> | null
+): Record<string, unknown> {
+  const c = coberturaLogistica(pedidos, mapa ?? new Map());
+  return {
+    ...ctx,
+    shippingCoverage: {
+      knownShipments: c.resolvidos,
+      totalShipments: c.totalDistintos,
+      share: c.fracao,
+    },
+  };
+}
+
+/**
  * Plano de execução decidido pelo roteador.
  *  - 'respondido': a resposta determinística JÁ foi enviada; o handler retorna.
  *  - 'legado'    : segue o fluxo original (contexto 1.0.0 completo + Gemini).
@@ -884,6 +911,12 @@ async function rotearConsulta(
     lastResult: st.lastResult,
   };
 
+  // Mapa de logística SÓ é lido quando o custo entra na conta. Faturamento,
+  // pedidos, ticket e unidades não dependem dele, e a leitura extra seria
+  // latência paga à toa na maioria das perguntas.
+  const precisaLogistica = q.intent === 'sales_ranking' || q.metric === 'margin';
+  const mapaLogistica = precisaLogistica ? await lerMapaLogistica(cache) : null;
+
   // Ranking ANTES de margem: "ranking por margem" tem metric === 'margin' e
   // cairia no pipeline de margem do período, que devolve UM número agregado em
   // vez da classificação por produto — outra pergunta.
@@ -891,13 +924,21 @@ async function rotearConsulta(
     const r = calcularRanking(pedidos, q.period, cobertura, {
       criterio: q.rankBy ?? 'revenue',
       limite: q.limit,
+      mapaLogistica,
     });
-    return { tipo: 'agregado', contexto: montarContextoRanking(q, r, st), query: q, ranking: true };
+    const ctx = montarContextoRanking(q, r, st);
+    return {
+      tipo: 'agregado',
+      contexto: q.rankBy === 'margin' ? comCoberturaLogistica(ctx, pedidos, mapaLogistica) : ctx,
+      query: q,
+      ranking: true,
+    };
   }
 
   // Margem tem pipeline próprio (custos + tarifas) e sinaliza o prompt extra.
   if (q.metric === 'margin') {
-    const contexto = montarContextoMargem(q, calcularMargem(pedidos, q.period, cobertura), st);
+    const r = calcularMargem(pedidos, q.period, cobertura, undefined, mapaLogistica);
+    const contexto = comCoberturaLogistica(montarContextoMargem(q, r, st), pedidos, mapaLogistica);
     return { tipo: 'agregado', contexto, query: q, margem: true };
   }
 

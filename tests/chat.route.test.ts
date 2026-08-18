@@ -6,6 +6,7 @@ import { createSession } from '../src/lib/session.js';
 import handler from '../api/chat.js';
 // 5g: semeadura de snapshot real (mesmas funcoes usadas pela sync).
 import { writeChunk, publishManifest, type OrdersManifest } from '../src/lib/orders-store.js';
+import { publicarMapaLogistica } from '../src/lib/shipping-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 
 // ── mocks minimos de Vercel req/res (padrao de orders-read.routes.test) ──
@@ -1308,8 +1309,15 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     await semearSnapshot(pedidosRanking());
     await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
     const bruto = fetchCalls[0].init.body as string;
-    for (const proibido of ['buyer', 'nickname', 'shipping', 'paid_amount', 'date_created']) {
+    // Estes NUNCA podem aparecer, nem no prompt nem no contexto.
+    for (const proibido of ['buyer', 'nickname', 'receiver_address', 'order_items']) {
       expect(bruto, proibido).not.toContain(proibido);
+    }
+    // Campos de PEDIDO BRUTO: proibidos no CONTEXTO. O prompt pode citar nomes
+    // de campo agregados (shippingCoverage) sem que isso seja vazamento.
+    const ctx = JSON.stringify(contextoEnviado());
+    for (const proibido of ['paid_amount', 'date_created', 'shipping\":{', 'logistic_type']) {
+      expect(ctx, proibido).not.toContain(proibido);
     }
   });
 
@@ -1369,6 +1377,112 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const sys = JSON.parse(fetchCalls[0].init.body as string).systemInstruction.parts[0].text as string;
     expect(sys).toContain('nunca marque "est." neles');
     expect(sys).toContain('periodTotalsAllProducts');
+  });
+
+
+  // ── Fase 5i: logistica por envio ──
+
+  /** Pedidos de ONTEM com envio identificado, para o mapa poder resolver. */
+  function pedidosComEnvio(): OrderSlim[] {
+    const item = (sku: string, titulo: string, preco: number, qtd: number) => ({
+      quantity: qtd, unit_price: preco,
+      item: { id: 'MLB1', title: titulo, seller_sku: sku, variation_id: null },
+    });
+    return [
+      { id: 201, status: 'paid', date_created: emBRT(ONTEM, '10:00:00.000'), paid_amount: 200,
+        total_amount: null, shipping: { id: 55501, logistic_type: null },
+        order_items: [item('SKU1', 'Vinho Arcos do Convento Tinto 750ml', 40, 10)] },
+    ] as unknown as OrderSlim[];
+  }
+
+  it('REGRESSAO: sem o mapa, venda Full ganha embalagem indevida', async () => {
+    // A API de pedidos do ML nao devolve logistic_type; o snapshot grava null.
+    // Sem o mapa, ehVendaFull(null) e false e o custo soma R$ 3,00 por unidade.
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const semMapa = contextoEnviado().result.margin as number;
+
+    fetchCalls.length = 0;
+    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const comMapa = contextoEnviado().result.margin as number;
+
+    // 10 unidades x R$ 3,00 de embalagem que o Mercado Livre paga, nao voce.
+    expect(comMapa - semMapa).toBeCloseTo(30, 2);
+  });
+
+  it('xd_drop_off NAO e Full: a margem nao muda', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const semMapa = contextoEnviado().result.margin as number;
+
+    fetchCalls.length = 0;
+    await publicarMapaLogistica(cache, new Map([['55501', 'xd_drop_off']]));
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    expect(contextoEnviado().result.margin).toBeCloseTo(semMapa, 6);
+  });
+
+  it('o contexto declara a cobertura de logistica', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    expect(contextoEnviado().shippingCoverage).toEqual({
+      knownShipments: 0, totalShipments: 1, share: 0,
+    });
+
+    fetchCalls.length = 0;
+    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    expect(contextoEnviado().shippingCoverage.share).toBe(1);
+  });
+
+  it('ranking por margem tambem recebe mapa e cobertura', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await chamar(bodyValido5g('qual foi o produto com maior margem ontem?'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.query.rankBy).toBe('margin');
+    expect(ctx.shippingCoverage.share).toBe(1);
+  });
+
+  it('ranking por RECEITA nao carrega cobertura de logistica', async () => {
+    // Faturamento nao depende de custo; declarar cobertura ali seria ruido.
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
+    expect(contextoEnviado().shippingCoverage).toBeUndefined();
+  });
+
+  it('consulta simples NAO le o mapa de logistica', async () => {
+    // Faturamento, pedidos, ticket e unidades nao dependem do mapa; a leitura
+    // extra seria latencia paga a toa na maioria das perguntas.
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    const lidas = espiarLeituras();
+    await chamar(bodyValido5g('quanto vendemos ontem?'), t);
+    expect(lidas.filter(k => k.startsWith('ship:logi:'))).toEqual([]);
+  });
+
+  it('mapa ausente NAO derruba a consulta de margem', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    const res = await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    expect(res.statusCode).toBe(200);
+    expect(contextoEnviado().result.margin).toBeTypeOf('number');
+  });
+
+  it('o prompt instrui a tratar margem como piso quando a cobertura e parcial', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const sys = JSON.parse(fetchCalls[0].init.body as string).systemInstruction.parts[0].text as string;
+    expect(sys).toContain('shippingCoverage.share');
+    expect(sys).toContain('piso');
   });
 
   // ── o que a Gemini recebe no caminho novo ──

@@ -55,6 +55,7 @@ import {
 } from './sales-metrics.service.js';
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
+import { logisticaDoPedido } from './shipping-logistics.service.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /**
@@ -179,7 +180,12 @@ export function calcularMargem(
   orders: OrderSlim[],
   periodo: PeriodoYmd,
   cobertura: CoberturaSnapshot,
-  taxas: { taxaML: number; taxaEnv: number } = taxasConfig
+  taxas: { taxaML: number; taxaEnv: number } = taxasConfig,
+  /**
+   * shipmentId → logistic_type. Ausente = toda venda vira estoque próprio
+   * (lado conservador: soma embalagem, nunca infla a margem).
+   */
+  mapaLogistica: ReadonlyMap<string, string> | null = null
 ): ResultadoMargem {
   if (!periodoValido(periodo)) {
     return indisponivel(periodo, 'indisponivel', ['periodo_invalido']);
@@ -203,7 +209,12 @@ export function calcularMargem(
     if (!o || !contaComoVenda(o.status)) continue;
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
 
-    const logisticType = o.shipping?.logistic_type ?? null;
+    // A API de pedidos do ML NÃO devolve logistic_type: o snapshot grava null
+    // em 100% dos registros. Sem o mapa, `ehVendaFull(null)` é false e o custo
+    // soma R$ 3,00 de embalagem em TODA venda, inclusive nas do Full, onde o
+    // Mercado Livre é quem embala — com ~82% da operação em Full, a margem
+    // saía sistematicamente subestimada. Ver lib/shipping-store.ts.
+    const logisticType = logisticaDoPedido(o, mapaLogistica);
 
     for (const oi of o.order_items ?? []) {
       const qtd = oi?.quantity ?? 1;

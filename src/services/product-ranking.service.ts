@@ -77,6 +77,7 @@ import {
 } from './sales-metrics.service.js';
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
+import { logisticaDoPedido } from './shipping-logistics.service.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /** Critério de ordenação do ranking. */
@@ -274,6 +275,11 @@ export interface RankingOpcoes {
   criterio?: RankingCriterio;
   limite?: number;
   taxas?: { taxaML: number; taxaEnv: number };
+  /**
+   * shipmentId → logistic_type. Ausente = toda venda vira estoque próprio
+   * (lado conservador: soma embalagem, nunca infla a margem).
+   */
+  mapaLogistica?: ReadonlyMap<string, string> | null;
 }
 
 /**
@@ -310,7 +316,9 @@ export function calcularRanking(
     if (!o || !contaComoVenda(o.status)) continue;
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
 
-    const logisticType = o.shipping?.logistic_type ?? null;
+    // Sem o mapa de logística, todo pedido é tratado como estoque próprio e
+    // ganha embalagem indevida. Ver lib/shipping-store.ts.
+    const logisticType = logisticaDoPedido(o, opcoes.mapaLogistica ?? null);
     const pedidoId = String(o.id);
 
     for (const oi of o.order_items ?? []) {
