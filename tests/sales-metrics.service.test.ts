@@ -41,7 +41,10 @@ const item = (quantity: number, unit_price = 50) => ({
 const P = (fromYmd: string, toYmd: string) => ({ fromYmd, toYmd });
 
 describe('sales-metrics — calcularMetricas (status e valores)', () => {
-  it('considera SOMENTE status paid: exclui cancelados e pendentes', () => {
+  it('conta paid e partially_refunded; todo o resto fica fora', () => {
+    // Lista de PERMISSAO (lib/status-venda): 'partially_refunded' e venda cujo
+    // dinheiro entrou — o paid_amount desses pedidos ja vem liquido do estorno.
+    // Status desconhecido NAO vira receita por omissao.
     const orders = [
       ped({ id: 1, status: 'paid', paid_amount: 100 }),
       ped({ id: 2, status: 'cancelled', paid_amount: 999 }),
@@ -49,10 +52,11 @@ describe('sales-metrics — calcularMetricas (status e valores)', () => {
       ped({ id: 4, status: 'payment_in_process', paid_amount: 777 }),
       ped({ id: 5, status: 'partially_refunded', paid_amount: 666 }),
       ped({ id: 6, status: null, paid_amount: 555 }),
+      ped({ id: 7, status: 'status_que_o_ml_ainda_nao_inventou', paid_amount: 444 }),
     ];
     const m = calcularMetricas(orders, P('2026-07-10', '2026-07-10'));
-    expect(m.pedidos).toBe(1);
-    expect(m.receita).toBe(100);
+    expect(m.pedidos).toBe(2);
+    expect(m.receita).toBe(766);
   });
 
   it('receita usa paid_amount || 0 e NAO cai para total_amount', () => {

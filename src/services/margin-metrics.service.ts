@@ -8,8 +8,9 @@
  * ─────────────────────────────────────────────────────────────────────────
  * CONVENÇÕES (decididas explicitamente com o proprietário):
  *
- * 1. STATUS: somente `status === 'paid'`, idêntico a sales-metrics. Cancelados
- *    e pendentes ficam de fora.
+ * 1. STATUS: `contaComoVenda` (lib/status-venda) — fonte ÚNICA do sistema.
+ *    Cancelados e status desconhecidos ficam de fora; reembolso parcial conta,
+ *    porque o dinheiro entrou e o paid_amount já vem líquido do estorno.
  *
  * 2. BASE DE RECEITA: `unit_price * quantity` de cada order_item — NÃO
  *    `paid_amount`. Decisão consciente (opção A): a margem precisa da receita
@@ -53,6 +54,7 @@ import {
   type CoberturaTipo,
 } from './sales-metrics.service.js';
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
+import { contaComoVenda } from '../lib/status-venda.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /**
@@ -198,7 +200,7 @@ export function calcularMargem(
   const semCustoTitulos = new Set<string>();
 
   for (const o of orders) {
-    if (!o || o.status !== 'paid') continue;
+    if (!o || !contaComoVenda(o.status)) continue;
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
 
     const logisticType = o.shipping?.logistic_type ?? null;

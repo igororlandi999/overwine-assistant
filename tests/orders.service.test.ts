@@ -181,13 +181,17 @@ describe('DIVERGÊNCIA legada: vendasPorItem (primeiro order_item) vs vendasPorS
 });
 
 describe('vendasPorItem — filtros e defaults', () => {
-  it('exclui cancelled; pendente CONTA', () => {
+  it('conta paid e partially_refunded; cancelado e pendente ficam fora', () => {
+    // Antes valia `!== cancelled`, que contava pendente. A lista de permissao
+    // (lib/status-venda) unificou as duas convencoes do sistema; nos dados
+    // reais isto NAO muda numero nenhum, porque pendente nao existe na base.
     const m = vendasPorItem([
       order({ id: 1, paid_amount: 100 }),
       order({ id: 2, paid_amount: 100, status: 'cancelled' }),
       order({ id: 3, paid_amount: 100, status: 'payment_required' }),
+      order({ id: 4, paid_amount: 100, status: 'partially_refunded' }),
     ]);
-    expect(m.get('MLB1')!.pedidos).toBe(2); // paid + pendente
+    expect(m.get('MLB1')!.pedidos).toBe(2); // paid + partially_refunded
   });
   it('quantity ausente → 1', () => {
     const m = vendasPorItem([order({ id: 1, order_items: [{ item: { id: 'MLB1' } }] })]);
@@ -387,13 +391,14 @@ describe('unidadesPorItem', () => {
     expect(m.get('MLB2')).toBe(3);
   });
 
-  it('exclui cancelled e CONTA pendentes (regra !== cancelled)', () => {
+  it('conta paid e partially_refunded (lista de permissao)', () => {
     const m = unidadesPorItem([
       order({ id: 1, status: 'paid' }),
       order({ id: 2, status: 'payment_required' }),
       order({ id: 3, status: 'cancelled' }),
+      order({ id: 4, status: 'partially_refunded' }),
     ]);
-    expect(m.get('MLB1')).toBe(2); // paid + pendente; cancelado fora
+    expect(m.get('MLB1')).toBe(2); // paid + partially_refunded
   });
 
   it('quantity ausente ou 0 cai para 1 (fallback do legado)', () => {

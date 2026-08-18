@@ -8,8 +8,8 @@
  * ─────────────────────────────────────────────────────────────────────────
  * CONVENÇÕES
  *
- * 1. STATUS: somente `status === 'paid'`, idêntico a sales-metrics e
- *    margin-metrics. Cancelados e pendentes ficam de fora.
+ * 1. STATUS: `contaComoVenda` (lib/status-venda) — fonte ÚNICA do sistema,
+ *    a mesma de sales-metrics e margin-metrics.
  *
  * 2. BASE DE RECEITA: `unit_price × quantity` de cada order_item — NÃO
  *    `paid_amount`. Mesma decisão de margin-metrics (convenção 2): o ranking
@@ -76,6 +76,7 @@ import {
   type CoberturaTipo,
 } from './sales-metrics.service.js';
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
+import { contaComoVenda } from '../lib/status-venda.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /** Critério de ordenação do ranking. */
@@ -306,7 +307,7 @@ export function calcularRanking(
   const titulosSemCusto = new Set<string>();
 
   for (const o of orders) {
-    if (!o || o.status !== 'paid') continue;
+    if (!o || !contaComoVenda(o.status)) continue;
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
 
     const logisticType = o.shipping?.logistic_type ?? null;

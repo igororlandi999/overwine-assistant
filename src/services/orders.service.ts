@@ -20,6 +20,7 @@
  * uma inconsistência do dashboard, mantida por paridade. NÃO reconciliada.
  */
 import { dentroDoPeriodo, ymdBRT } from '../lib/datas-brt.js';
+import { contaComoVenda } from '../lib/status-venda.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 // ── Contratos de entrada (só os campos realmente lidos — slim map li. 3631) ─
@@ -144,7 +145,8 @@ export interface FaturamentoPeriodo {
 
 /**
  * Faturamento bruto/líquido do período — porte de calcLiquidoPeriodo (li. 4748).
- * SOMENTE status === 'paid' ∩ período BRT. bruto usa `paid_amount || total_amount
+ * Somente vendas (`contaComoVenda`, lib/status-venda) ∩ período BRT.
+ * bruto usa `paid_amount || total_amount
  * || 0` (operador || do legado: paid_amount 0 cai para total_amount). As tarifas
  * são percentuais fixos de planilha (config/taxas.json), NÃO fees reais da API —
  * por isso o retorno é marcado estimado:true (R4). Limites de período nulos
@@ -158,7 +160,7 @@ export function faturamentoPeriodo(
 ): FaturamentoPeriodo {
   let bruto = 0;
   for (const o of orders) {
-    if (o.status !== 'paid') continue;
+    if (!contaComoVenda(o.status)) continue;
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     bruto += o.paid_amount || o.total_amount || 0;
   }
@@ -200,7 +202,7 @@ export function vendasPorItem(
 ): Map<string, VendasItem> {
   const mapa = new Map<string, VendasItem>();
   for (const o of orders) {
-    if (o.status === 'cancelled') continue;
+    if (!contaComoVenda(o.status)) continue;
     if ((inicio || fim) && !dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     const oi = o.order_items?.[0];
     const id = oi?.item?.id;
@@ -250,7 +252,7 @@ export function vendasPorSkuDetalhado(
   const vendas: VendaSku[] = [];
   const vistos = new Set<string>();
   for (const o of orders) {
-    if (o.status !== 'paid') continue;
+    if (!contaComoVenda(o.status)) continue;
     if ((inicio || fim) && !dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     (o.order_items ?? []).forEach((oi, idx) => {
       const itemId = oi.item?.id;
@@ -310,7 +312,7 @@ export function vendasPorSkuAgregado(
 ): Map<string, VendaSkuAgregada> {
   const out = new Map<string, VendaSkuAgregada>();
   for (const o of orders) {
-    if (o.status !== 'paid') continue;
+    if (!contaComoVenda(o.status)) continue;
     if ((inicio || fim) && !dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     const semana = semanaDe(o.date_created || '');
     for (const oi of o.order_items ?? []) {
@@ -349,7 +351,7 @@ export interface SerieMensal {
 export function faturamentoMensal(orders: OrderInput[]): SerieMensal[] {
   const byMonth: Record<string, number> = {};
   for (const o of orders) {
-    if (o.status !== 'paid') continue;
+    if (!contaComoVenda(o.status)) continue;
     const m = (o.date_created || '').slice(0, 7);
     if (m) byMonth[m] = (byMonth[m] || 0) + (o.paid_amount || 0);
   }
@@ -372,7 +374,7 @@ export function faturamentoPorDia(
 ): Record<number, number> {
   const porDia: Record<number, number> = {};
   for (const o of orders) {
-    if (o.status !== 'paid') continue;
+    if (!contaComoVenda(o.status)) continue;
     const ymd = ymdBRT(o.date_created);
     if (!ymd) continue;
     const [y, m, d] = ymd.split('-').map(Number);
@@ -442,7 +444,7 @@ export function unidadesPorItem(
 ): Map<string, number> {
   const mapa = new Map<string, number>();
   for (const o of orders) {
-    if (o.status === 'cancelled') continue;
+    if (!contaComoVenda(o.status)) continue;
     if ((inicio || fim) && !dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     for (const oi of o.order_items ?? []) {
       const id = oi.item?.id;

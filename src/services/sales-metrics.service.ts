@@ -8,11 +8,11 @@
  * ─────────────────────────────────────────────────────────────────────────
  * CONVENÇÕES (Fase 5g, decididas explicitamente):
  *
- * 1. STATUS: todas as métricas consideram SOMENTE `status === 'paid'`.
- *    Cancelados E pendentes ficam de fora. Isto difere de `vendasPorItem`
- *    (orders.service), que usa `!== 'cancelled'` e portanto conta pendentes —
- *    misturar as duas convenções faria faturamento e contagem divergirem por
- *    construção, então aqui a regra é única e explícita.
+ * 1. STATUS: `contaComoVenda` (lib/status-venda) — fonte ÚNICA do sistema.
+ *    Até 18/08/2026 conviviam DUAS convenções: esta usava `=== 'paid'` e
+ *    `vendasPorItem` usava `!== 'cancelled'`, então o mesmo número divergia
+ *    conforme o caminho de cálculo. Agora há uma só, em lista de PERMISSÃO:
+ *    status novo do Mercado Livre não vira receita por omissão.
  *
  * 2. RECEITA: `paid_amount || 0`, SEM cair para total_amount.
  *    Paridade com o card do dashboard (renderPedidos), que é a referência que
@@ -44,6 +44,7 @@
  */
 import { brtStartOfDay, brtEndOfDay, ymdBRT, ymdValido, dentroDoPeriodo } from '../lib/datas-brt.js';
 import type { OrderSlim } from './orders.service.js';
+import { contaComoVenda } from '../lib/status-venda.js';
 
 /** Período resolvido: dias civis BRT, bordas inclusivas. */
 export interface PeriodoYmd {
@@ -263,7 +264,7 @@ export function calcularMetricas(orders: OrderSlim[], periodo: PeriodoYmd): Metr
   let unidades = 0;
 
   for (const o of orders) {
-    if (!o || o.status !== 'paid') continue;              // cancelados e pendentes fora
+    if (!o || !contaComoVenda(o.status)) continue;         // ver lib/status-venda
     if (!dentroDoPeriodo(o.date_created, inicio, fim)) continue;
     pedidos += 1;
     receita += o.paid_amount || 0;                        // paridade com o card

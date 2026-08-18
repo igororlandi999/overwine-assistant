@@ -23,6 +23,7 @@
  */
 import { z } from 'zod';
 import custosConfig from '../config/custos.json' with { type: 'json' };
+import { contaComoVenda } from '../lib/status-venda.js';
 
 // ── Contratos de entrada (somente os campos realmente usados) ─────────────
 
@@ -450,7 +451,7 @@ export function buildConsolidado(
     const vendasTotal = g.items.reduce((s, i) => s + (i.sold_quantity ?? 0), 0);
 
     const allOrd = g.items.flatMap(i => ordersByItem.get(i.id) ?? []);
-    const pedidosCnt = allOrd.filter(o => o.status !== 'cancelled').length;
+    const pedidosCnt = allOrd.filter(o => contaComoVenda(o.status)).length;
 
     const precosAtivos = g.items
       .filter(i => i.status === 'active' && (i.price ?? 0) > 0)
@@ -462,7 +463,7 @@ export function buildConsolidado(
     let valorVendido = 0;
     let qtdVendida = 0;
     for (const o of allOrd) {
-      if (o.status === 'cancelled') continue;
+      if (!contaComoVenda(o.status)) continue;
       // Paridade legada: operador || (paid_amount 0/null cai para total_amount).
       valorVendido += o.paid_amount || o.total_amount || 0;
       qtdVendida += o.order_items?.[0]?.quantity || 1;

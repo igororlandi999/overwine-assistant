@@ -149,10 +149,13 @@ describe('orders-metrics — paridade com as funcoes existentes', () => {
     }
   });
 
-  it('periodo.porItem conta o pendente (regra !== cancelled), diferente das janelas', () => {
+  it('periodo.porItem segue a lista de permissao, igual as janelas', () => {
+    // Antes este agregado usava `!== cancelled` e contava pendente, enquanto as
+    // janelas usavam `=== paid`. Eram duas convencoes vivas ao mesmo tempo, e o
+    // mesmo numero divergia conforme o caminho. Agora ha uma so.
     const ids = m.periodo.porItem.map(i => i.itemId);
-    expect(ids).toContain('MLB4');           // pedido payment_required
-    expect(ids).not.toContain('MLB9');       // pedido cancelled
+    expect(ids).not.toContain('MLB4');       // payment_required fica fora
+    expect(ids).not.toContain('MLB9');       // cancelled fica fora
   });
 
   it('periodo.porItem vem ordenado por receita desc, deterministico', () => {
@@ -176,7 +179,7 @@ describe('orders-metrics — paridade com as funcoes existentes', () => {
     expect(obtido).toEqual(esperado);
     expect(obtido.get('MLB1')).toBe(2);   // hoje 1 + ontem 1
     expect(obtido.get('MLB2')).toBe(3);   // 2 + 1 — segundo order_item CONTA
-    expect(obtido.get('MLB4')).toBe(3);   // pendente conta
+    expect(obtido.has('MLB4')).toBe(false); // pendente NAO conta mais
     expect(obtido.has('MLB9')).toBe(false); // cancelado nao conta
     expect(obtido.has('MLB3')).toBe(false); // D-40 esta fora dos 30 dias
   });

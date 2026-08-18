@@ -447,14 +447,22 @@ describe('buildConsolidado', () => {
     expect(linhas[0].precoMedioVendido).toBe(60);
   });
 
-  it('pedido não pago (não cancelado) CONTA — paridade com o legado', () => {
-    const linhas = buildConsolidado(
+  it('pedido pendente NAO conta; partially_refunded conta', () => {
+    // Mudanca de contrato: buildConsolidado usava `!== cancelled` e contava
+    // pendente. Agora usa a lista de permissao de lib/status-venda.
+    const pendente = buildConsolidado(
       [item({ id: 'MLB1', seller_custom_field: '21002' })],
       [pedido({ id: 1, status: 'payment_required', paid_amount: 0, total_amount: 80, order_items: [{ quantity: 1, item: { id: 'MLB1' } }] })]
     );
-    expect(linhas[0].pedidosCnt).toBe(1);
+    expect(pendente[0].pedidosCnt).toBe(0);
+
+    const parcial = buildConsolidado(
+      [item({ id: 'MLB1', seller_custom_field: '21002' })],
+      [pedido({ id: 1, status: 'partially_refunded', paid_amount: 0, total_amount: 80, order_items: [{ quantity: 1, item: { id: 'MLB1' } }] })]
+    );
+    expect(parcial[0].pedidosCnt).toBe(1);
     // paid_amount 0 → fallback total_amount (comportamento legado: || )
-    expect(linhas[0].precoMedioVendido).toBe(80);
+    expect(parcial[0].precoMedioVendido).toBe(80);
   });
 
   it('pedido com vários itens é atribuído SOMENTE ao grupo do primeiro item (quirk legado)', () => {
