@@ -174,21 +174,24 @@ describe('calcularMargem — custo desconhecido', () => {
 
 describe('calcularMargem — por SKU e rankings', () => {
   const orders = [
-    pedido([{ titulo: ARCOS, preco: 40, qtd: 5, sku: '21003', id: 'MLB1' }]),
+    // SKUs REAIS e coerentes com o titulo: desde a v3 do custos.json o
+    // seller_sku resolve a regra de custo, entao parear '21003' (Bag in Box,
+    // R$ 51,88) com um titulo de 750ml passou a ser uma fixture contraditoria.
+    pedido([{ titulo: ARCOS, preco: 40, qtd: 5, sku: '21002', id: 'MLB1' }]),
     pedido([{ titulo: OURO, preco: 30, qtd: 1, sku: '21010', id: 'MLB2' }]),
   ];
 
   it('agrupa por SKU e ordena por margem desc', () => {
     const r = calcularMargem(orders, PERIODO, COBERTURA, TAXAS);
-    expect(r.porSku.map(l => l.sku)).toEqual(['21003', '21010']);
+    expect(r.porSku.map(l => l.sku)).toEqual(['21002', '21010']);
     expect(r.porSku[0].unidades).toBe(5);
   });
 
   it('anuncios distintos com o MESMO SKU caem na mesma linha', () => {
     const r = calcularMargem(
       [
-        pedido([{ titulo: ARCOS, preco: 40, qtd: 2, sku: '21003', id: 'MLB1' }]),
-        pedido([{ titulo: ARCOS + ' Premium', preco: 45, qtd: 1, sku: '21003', id: 'MLB9' }]),
+        pedido([{ titulo: ARCOS, preco: 40, qtd: 2, sku: '21002', id: 'MLB1' }]),
+        pedido([{ titulo: ARCOS + ' Premium', preco: 45, qtd: 1, sku: '21002', id: 'MLB9' }]),
       ],
       PERIODO, COBERTURA, TAXAS
     );
@@ -216,7 +219,7 @@ describe('calcularMargem — por SKU e rankings', () => {
 
   it('melhores e piores sao pontas opostas da mesma lista', () => {
     const r = calcularMargem(orders, PERIODO, COBERTURA, TAXAS);
-    expect(melhoresMargens(r, 1)[0].sku).toBe('21003');
+    expect(melhoresMargens(r, 1)[0].sku).toBe('21002');
     expect(pioresMargens(r, 1)[0].sku).toBe('21010');
     expect(melhoresMargens(r, 99)).toHaveLength(2);
     expect(melhoresMargens(r, 0)).toHaveLength(0);

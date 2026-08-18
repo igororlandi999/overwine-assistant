@@ -118,6 +118,7 @@ describe('getCustoProduto', () => {
       custoProduto: 18.68,
       fonte: 'proprietario_2026_08',
       regraId: 'carrascal',
+      via: 'titulo',
       garrafasPorVenda: 1,   // anuncio avulso
     });
   });
@@ -166,7 +167,8 @@ describe('getCustoProduto', () => {
     ];
     const zero = getCustoProduto('Brinde Overwine Saca-rolhas', null, regras, 'teste');
     expect(zero).toEqual({
-      encontrado: true, custoProduto: 0, fonte: 'teste', regraId: 'brinde', garrafasPorVenda: 1,
+      encontrado: true, custoProduto: 0, fonte: 'teste', regraId: 'brinde',
+      via: 'titulo', garrafasPorVenda: 1,
     });
     const ausente = getCustoProduto('Outro produto', null, regras, 'teste');
     expect(ausente.encontrado).toBe(false);
@@ -179,10 +181,43 @@ describe('getCustoProduto', () => {
     expect(getCustoProduto(undefined).encontrado).toBe(false);
   });
 
-  it('o parâmetro sku é aceito mas não altera o matching (paridade legado)', () => {
-    const semSku = getCustoProduto('Vinho Carrascal');
-    const comSku = getCustoProduto('Vinho Carrascal', '21002');
-    expect(comSku).toEqual(semSku);
+  it('o SKU VENCE o titulo quando os dois apontam para regras diferentes', () => {
+    // Mudanca de contrato da v3. Antes o sku era ignorado e o titulo mandava.
+    // '21002' e o Arcos 750ml; o titulo diz Carrascal. Identidade exata do
+    // anuncio vence texto livre — foi o texto livre que escondeu o HFC.
+    const porTitulo = getCustoProduto('Vinho Carrascal');
+    expect(porTitulo.regraId).toBe('carrascal');
+    expect(porTitulo.via).toBe('titulo');
+
+    const porSku = getCustoProduto('Vinho Carrascal', '21002');
+    expect(porSku.regraId).toBe('arcos_750');
+    expect(porSku.via).toBe('sku');
+  });
+
+  it('SKU desconhecido cai no titulo em vez de perder o custo', () => {
+    const r = getCustoProduto('Vinho Carrascal', 'SKU-QUE-NAO-EXISTE');
+    expect(r.encontrado).toBe(true);
+    expect(r.regraId).toBe('carrascal');
+    expect(r.via).toBe('titulo');
+  });
+
+  it('sku vazio, nulo ou so espacos nao atrapalha o fallback', () => {
+    for (const sku of ['', '   ', null, undefined]) {
+      const r = getCustoProduto('Vinho Carrascal', sku as string | null);
+      expect(r.regraId, String(sku)).toBe('carrascal');
+      expect(r.via, String(sku)).toBe('titulo');
+    }
+  });
+
+  it('sku com espaco em volta e normalizado', () => {
+    expect(getCustoProduto('Qualquer coisa', '  21003  ').regraId).toBe('arcos_bib');
+  });
+
+  it('titulo vazio NAO impede a resolucao por SKU', () => {
+    // Pelo caminho antigo, titulo vazio devolvia NAO_ENCONTRADO de imediato.
+    const r = getCustoProduto('', '21003');
+    expect(r.encontrado).toBe(true);
+    expect(r.regraId).toBe('arcos_bib');
   });
 
   // ── Custos vigentes: TODAS as regras de custos.json v2 ──────────────────
@@ -653,5 +688,115 @@ describe('custoUnitarioVendido — kits', () => {
     const umaGarrafa = custoUnitarioVendido(13.78, 'drop_off', LOGK, 1) as number;
     const kitDeSeis = custoUnitarioVendido(13.78, 'drop_off', LOGK, 6) as number;
     expect(kitDeSeis).toBeGreaterThan(umaGarrafa * 5);
+  });
+});
+
+// ── Mapa SKU -> regra, derivado dos 3.665 pedidos pagos reais ──────────────
+// Cada par abaixo saiu do catalogo em producao (17/08/2026): 36 SKUs, zero
+// conflito entre os titulos de um mesmo SKU. Este bloco e a rede que impede
+// alguem editar custos.json e trocar o custo de um produto sem perceber.
+describe('custos — mapa de SKU', () => {
+  const MAPA: Array<[string, string, number]> = [
+    ['20321',  'allgodao',             30.88],
+    ['21002',  'arcos_750',            12.80],
+    ['210024', 'arcos_750',            12.80],   // kit de 4
+    ['210026', 'arcos_750',            12.80],   // kit de 6
+    ['21003',  'arcos_bib',            51.88],   // Bag in Box 5 L
+    ['21004',  'arcos_branco',         14.75],
+    ['21101',  'carrascal',            18.68],
+    ['21301',  'vitoria_regia',        18.08],
+    ['21501',  'alem_do_rio',          13.40],
+    ['21504',  'alem_do_rio',          13.40],   // kit de 4
+    ['21506',  'alem_do_rio',          13.40],   // kit de 6
+    ['21601',  'alem_do_rio',          13.40],
+    ['21606',  'alem_do_rio',          13.40],   // kit de 6
+    ['21701',  'djoao_reserva',        47.18],
+    ['22501',  'estremoz_reserva',     31.98],
+    ['23401',  'beiral',               42.99],
+    ['25001',  'ouro_meu_base',        13.78],
+    ['25004',  'ouro_meu_base',        13.78],   // kit de 4
+    ['25006',  'ouro_meu_base',        13.78],   // kit de 6
+    ['25101',  'ouro_meu_exclusive',   14.93],
+    ['25201',  'bolota_dourada',       38.47],
+    ['25301',  'ouro_meu_base',        13.78],   // branco
+    ['25401',  'ouro_meu_base',        13.78],   // rose
+    ['26101',  'ouro_obidos',          40.72],
+    ['26201',  'cajado_real',          40.72],
+    ['26401',  'djoao_gran_reserva',   66.12],
+    ['26701',  'quinta_sao_cristovao', 25.17],
+    ['27101',  'morabitino',           33.82],
+    ['30101',  'hfc',                  48.79],
+    ['30201',  'hfc',                  48.79],
+    ['30301',  'hfc',                  48.79],   // "Herdade Da Fonte Coberta"
+    ['31101',  'coro_maestro',         40.09],
+    ['31301',  'coro_private',        172.57],
+    ['31501',  'capricho_marselan',    56.28],
+    ['AL100G', 'acai_overberry',       40.00],
+  ];
+
+  it('cada SKU do catalogo resolve para a regra e o custo certos', () => {
+    for (const [sku, regraId, custo] of MAPA) {
+      // Titulo deliberadamente inutil: aqui quem responde e o SKU.
+      const r = getCustoProduto('titulo irrelevante', sku);
+      expect(r.encontrado, sku).toBe(true);
+      expect(r.regraId, sku).toBe(regraId);
+      expect(r.custoProduto, sku).toBe(custo);
+      expect(r.via, sku).toBe('sku');
+    }
+  });
+
+  it('nenhum SKU aparece em duas regras', () => {
+    const { regrasOrdenadas } = carregarCustos();
+    const vistos = new Map<string, string>();
+    for (const regra of regrasOrdenadas) {
+      for (const sku of regra.sku ?? []) {
+        expect(vistos.has(sku), `${sku} duplicado em ${vistos.get(sku)} e ${regra.id}`).toBe(false);
+        vistos.set(sku, regra.id);
+      }
+    }
+    expect(vistos.size).toBe(MAPA.length);
+  });
+
+  it('SKU e titulo concordam nos anuncios reais', () => {
+    // Se um dia divergirem, ou o custos.json esta errado ou o anuncio foi
+    // recadastrado. Os dois caminhos tem que dar o mesmo custo.
+    const reais: Array<[string, string]> = [
+      ['21003',  'Vinho Tinto Português Arcos Do Convento Bag In Box 5 Litros'],
+      ['21002',  'Vinho Tinto Meio Seco Português Lisboa Arcos Do Convento Blend 750ml'],
+      ['21004',  'Vinho Branco Seco Português Lisboa Arcos Do Convento 750ml'],
+      ['25101',  'Vinho Tinto Seco Português Ouro Meu Exclusive Edition 750ml'],
+      ['25001',  'Vinho Tinto Seco Português - Ouro Meu 750ml - Overwine'],
+      ['21601',  'Vinho Rosé Português Regional Lisboa Além Do Rio 750ml'],
+      ['26401',  'Vinho Tinto Português O Magnânimo D. João V Grande Reserva'],
+      ['21701',  'Vinho Tinto Português O Magnânimo D. João V Reserva 750ml'],
+      ['26101',  'Vinho Tinto Seco Português Doc Óbidos Ouro De Óbidos 750ml'],
+      ['31101',  'Vinho Tinto Seco Português Maestro Do Côro Blend 750ml'],
+      ['31301',  'Vinho Tinto Seco Quinta Do Côro Private Collection 750ml'],
+      ['30301',  'Vinho Tinto Seco Alentejo Herdade Da Fonte Coberta Reserva'],
+      ['AL100G', 'Açaí Liofilizado Em Pó 100% Natural 100g Overberry Açaí'],
+    ];
+    for (const [sku, titulo] of reais) {
+      const porSku = getCustoProduto(titulo, sku);
+      const porTitulo = getCustoProduto(titulo);
+      expect(porSku.regraId, titulo).toBe(porTitulo.regraId);
+      expect(porSku.custoProduto, titulo).toBe(porTitulo.custoProduto);
+    }
+  });
+
+  it('kits mantem o multiplicador do titulo mesmo resolvendo por SKU', () => {
+    const r = getCustoProduto('Kit Com 6 Un Vinho Tinto Seco Português Ouro Meu 750ml', '25006');
+    expect(r.via).toBe('sku');
+    expect(r.regraId).toBe('ouro_meu_base');
+    expect(r.custoProduto).toBe(13.78);       // custo de UMA garrafa
+    expect(r.garrafasPorVenda).toBe(6);       // multiplicador vem do titulo
+  });
+
+  it('SKU 25001 abriga garrafa avulsa e um kit; o titulo separa os dois', () => {
+    // Erro de cadastro real no ML: o kit de 6 reusou o SKU das avulsas.
+    const avulsa = getCustoProduto('Vinho Tinto Seco Português - Ouro Meu 750ml', '25001');
+    const kit = getCustoProduto('Kit Com 6 Un Vinho Tinto Seco Português Ouro Meu 750ml', '25001');
+    expect(avulsa.regraId).toBe(kit.regraId);
+    expect(avulsa.garrafasPorVenda).toBe(1);
+    expect(kit.garrafasPorVenda).toBe(6);
   });
 });

@@ -63,6 +63,12 @@ const custoRegraSchema = z.object({
   ordem: z.number().int().positive(),
   id: z.string().min(1),
   custoProduto: z.number().min(0),
+  /**
+   * seller_sku dos anúncios desta regra. Identidade EXATA, não heurística —
+   * por isso vence `match`. Opcional: regras de produtos que nunca venderam
+   * ainda não têm SKU conhecido e seguem só por título.
+   */
+  sku: z.array(z.string().min(1)).optional(),
   match: z.array(z.string().min(1)).min(1),
   tipo: z.array(z.string().min(1)).optional(),
   exclui: z.array(z.string().min(1)).optional(),
@@ -184,6 +190,12 @@ export type CustoProdutoResultado =
       fonte: string;
       regraId: string;
       /**
+       * Como a regra foi encontrada. 'sku' é identidade exata; 'titulo' é
+       * heurística de texto e merece desconfiança — foi por 'titulo' que o HFC
+       * passou meses aparecendo como sem custo.
+       */
+      via: 'sku' | 'titulo';
+      /**
        * Garrafas embutidas em uma unidade vendida. 1 para anúncio avulso, N
        * para "Kit Com N Un". Fica explícito no retorno para ser auditável: a
        * detecção vem do TÍTULO, e título é fonte frágil (foi o que escondeu o
@@ -191,13 +203,14 @@ export type CustoProdutoResultado =
        */
       garrafasPorVenda: number;
     }
-  | { encontrado: false; custoProduto: null; fonte: null; regraId: null; garrafasPorVenda: 1 };
+  | { encontrado: false; custoProduto: null; fonte: null; regraId: null; via: null; garrafasPorVenda: 1 };
 
 const NAO_ENCONTRADO: CustoProdutoResultado = {
   encontrado: false,
   custoProduto: null,
   fonte: null,
   regraId: null,
+  via: null,
   garrafasPorVenda: 1,
 };
 
@@ -235,16 +248,41 @@ function normalizarParaMatch(s: string): string {
  * - termos de `tipo` e `exclui` são comparados COMO ESTÃO contra o título já
  *   normalizado (quirk herdado: 'rosé' em exclui nunca casa; 'rose' casa);
  * - precedência: primeira regra em `ordem` crescente com match ∧ tipo ∧ ¬exclui.
- * O parâmetro `sku` é aceito para compatibilidade de assinatura e estratégia
- * futura por SKU, mas — como no legado — NÃO participa do matching hoje.
+ *
+ * RESOLUÇÃO POR SKU (v3) VEM PRIMEIRO. `seller_sku` é identidade exata do
+ * anúncio; título é texto que muda ao sabor de quem cadastra. A regra 'hfc'
+ * existia com o custo certo e mesmo assim o produto figurava como sem custo,
+ * porque o anúncio se chama 'Herdade Da Fonte Coberta' e a regra só conhecia a
+ * sigla — falha silenciosa, sem nada no sistema apontando para ela.
+ *
+ * O caminho por título PERMANECE como fallback: cobre o anúncio sem seller_sku
+ * e o SKU ainda não mapeado. Um SKU novo, portanto, degrada para o
+ * comportamento antigo em vez de perder o custo.
+ *
  * Custo desconhecido retorna encontrado: false (nunca zero, nunca estimado).
  */
 export function getCustoProduto(
   titulo: string | null | undefined,
-  _sku?: string | null,
+  sku?: string | null,
   regras: CustoRegra[] = carregarCustos().regrasOrdenadas,
   fonte: string = carregarCustos().config.fonte
 ): CustoProdutoResultado {
+  const s = skuLimpo(sku);
+  if (s !== null) {
+    for (const regra of regras) {
+      if (regra.sku?.includes(s)) {
+        return {
+          encontrado: true,
+          custoProduto: regra.custoProduto,
+          fonte,
+          regraId: regra.id,
+          via: 'sku',
+          garrafasPorVenda: garrafasPorVenda(titulo),
+        };
+      }
+    }
+  }
+
   const t = normalizarParaMatch(titulo ?? '');
   if (t === '') return NAO_ENCONTRADO;
 
@@ -259,6 +297,7 @@ export function getCustoProduto(
         custoProduto: regra.custoProduto,
         fonte,
         regraId: regra.id,
+        via: 'titulo',
         garrafasPorVenda: garrafasPorVenda(titulo),
       };
     }
