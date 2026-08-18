@@ -159,3 +159,103 @@ export function coberturaLogistica(
     fracao: totalDistintos > 0 ? jaResolvidos / totalDistintos : 1,
   };
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// PASSO DE SINCRONIZAÇÃO
+//
+// A busca no Mercado Livre é INJETADA. O serviço não conhece rede, igual ao
+// orders-sync: quem fala com o mundo é o endpoint admin, e o teste roda sem
+// mock de fetch.
+// ══════════════════════════════════════════════════════════════════════════
+
+/** Busca a logística de UM envio. `null` = não deu para resolver agora. */
+export type BuscarLogistica = (shipmentId: string) => Promise<string | null>;
+
+export interface PassoResultado {
+  ok: true;
+  /** false = ainda há envios pendentes; chame de novo. */
+  concluido: boolean;
+  buscados: number;
+  resolvidos: number;
+  /** Buscados que voltaram sem logística utilizável. Continuam pendentes. */
+  falhas: number;
+  restantes: number;
+  totalDistintos: number;
+  /** Envios conhecidos DEPOIS deste passo. */
+  totalMapa: number;
+  /** 0..1 — fração dos envios distintos já resolvidos. */
+  cobertura: number;
+}
+
+/**
+ * Concorrência por passo. Em produção cada GET /shipments/{id} leva ~240 ms;
+ * com 8 em paralelo, um lote de 300 leva ~9 s, folgado dentro do limite de
+ * execução da função. Subir demais arrisca 429 no Mercado Livre — e um 429
+ * atrasa MAIS que a espera economizada.
+ */
+export const CONCORRENCIA = 8;
+
+/**
+ * Executa UM passo: descobre os pendentes, busca em paralelo limitado e
+ * devolve o mapa novo. Não grava nada — quem persiste é o chamador, depois de
+ * decidir que o resultado vale.
+ *
+ * Uma falha isolada NÃO derruba o passo: o id simplesmente continua pendente.
+ * Envio arquivado ou instabilidade momentânea não podem travar o backfill
+ * inteiro, e nada se perde porque o id volta na próxima rodada.
+ */
+export async function executarPasso(
+  pedidos: OrderSlim[],
+  mapa: ReadonlyMap<string, string>,
+  buscar: BuscarLogistica,
+  opcoes: { limite?: number; concorrencia?: number } = {}
+): Promise<{ mapa: Map<string, string>; resultado: PassoResultado }> {
+  const limite = opcoes.limite ?? LOTE_PADRAO;
+  const conc = Math.max(1, Math.min(opcoes.concorrencia ?? CONCORRENCIA, 32));
+
+  const pendentes = idsPendentes(pedidos, mapa, limite);
+  const resolvidos: EnvioResolvido[] = [];
+  let falhas = 0;
+
+  // Fila com N trabalhadores: mantém `conc` requisições em voo do início ao
+  // fim, em vez de esperar o lote mais lento a cada rodada.
+  let proximo = 0;
+  async function trabalhador(): Promise<void> {
+    for (;;) {
+      const i = proximo++;
+      if (i >= pendentes.ids.length) return;
+      const id = pendentes.ids[i];
+      try {
+        const tipo = await buscar(id);
+        if (typeof tipo === 'string' && tipo.trim() !== '') {
+          resolvidos.push({ shipmentId: id, logisticType: tipo });
+        } else {
+          falhas++;
+        }
+      } catch {
+        falhas++;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(conc, pendentes.ids.length) }, trabalhador));
+
+  const novoMapa = mesclarResolvidos(mapa, resolvidos);
+  const restantes = pendentes.restantes + falhas;
+
+  return {
+    mapa: novoMapa,
+    resultado: {
+      ok: true,
+      concluido: restantes === 0,
+      buscados: pendentes.ids.length,
+      resolvidos: resolvidos.length,
+      falhas,
+      restantes,
+      totalDistintos: pendentes.totalDistintos,
+      totalMapa: novoMapa.size,
+      cobertura: pendentes.totalDistintos > 0
+        ? (pendentes.jaResolvidos + resolvidos.length) / pendentes.totalDistintos
+        : 1,
+    },
+  };
+}

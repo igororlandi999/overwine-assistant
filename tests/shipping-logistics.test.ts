@@ -12,8 +12,11 @@ import {
   mesclarResolvidos,
   logisticaDoPedido,
   coberturaLogistica,
+  executarPasso,
   LOTE_PADRAO,
   LOTE_MAX,
+  CONCORRENCIA,
+  type BuscarLogistica,
 } from '../src/services/shipping-logistics.service.js';
 import { custoUnitarioVendido } from '../src/services/products.service.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
@@ -311,5 +314,135 @@ describe('coberturaLogistica', () => {
     );
     expect(c.totalDistintos).toBe(1);
     expect(c.fracao).toBe(1);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+describe('executarPasso', () => {
+  const pedidos = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      ped({ id: i, shipId: 1000 + i, date_created: `2026-08-${String((i % 28) + 1).padStart(2, '0')}T12:00:00.000Z` }));
+
+  const sempre = (tipo: string): BuscarLogistica => async () => tipo;
+
+  it('resolve tudo e marca concluido quando cabe no lote', async () => {
+    const { mapa, resultado } = await executarPasso(pedidos(5), new Map(), sempre('fulfillment'));
+    expect(resultado.concluido).toBe(true);
+    expect(resultado.buscados).toBe(5);
+    expect(resultado.resolvidos).toBe(5);
+    expect(resultado.restantes).toBe(0);
+    expect(resultado.cobertura).toBe(1);
+    expect(mapa.size).toBe(5);
+  });
+
+  it('nao concluido quando sobra: chamadas sucessivas terminam o backfill', async () => {
+    // Reproduz o backfill real: 3.521 envios em lotes, uma chamada por vez.
+    const todos = pedidos(25);
+    let mapa = new Map<string, string>();
+    let voltas = 0;
+    let r;
+    do {
+      const passo = await executarPasso(todos, mapa, sempre('fulfillment'), { limite: 10 });
+      mapa = passo.mapa;
+      r = passo.resultado;
+      voltas++;
+      expect(voltas, 'laco infinito').toBeLessThan(10);
+    } while (!r.concluido);
+    expect(voltas).toBe(3);
+    expect(mapa.size).toBe(25);
+  });
+
+  it('falha isolada NAO derruba o passo; o id continua pendente', async () => {
+    const buscar: BuscarLogistica = async id => (id === '1002' ? null : 'fulfillment');
+    const { mapa, resultado } = await executarPasso(pedidos(5), new Map(), buscar);
+    expect(resultado.resolvidos).toBe(4);
+    expect(resultado.falhas).toBe(1);
+    expect(resultado.concluido).toBe(false);
+    expect(resultado.restantes).toBe(1);
+    expect(mapa.has('1002')).toBe(false);
+    // A rodada seguinte tenta de novo — e agora funciona.
+    const dois = await executarPasso(pedidos(5), mapa, sempre('xd_drop_off'));
+    expect(dois.resultado.concluido).toBe(true);
+    expect(dois.mapa.get('1002')).toBe('xd_drop_off');
+  });
+
+  it('excecao na busca e tratada como falha, nao propaga', async () => {
+    const buscar: BuscarLogistica = async id => {
+      if (id === '1001') throw new Error('ML fora do ar');
+      return 'fulfillment';
+    };
+    const { resultado } = await executarPasso(pedidos(3), new Map(), buscar);
+    expect(resultado.falhas).toBe(1);
+    expect(resultado.resolvidos).toBe(2);
+  });
+
+  it('passo em que TUDO falha nao resolve nada e nao conclui', async () => {
+    const { mapa, resultado } = await executarPasso(pedidos(4), new Map(), async () => null);
+    expect(resultado.resolvidos).toBe(0);
+    expect(resultado.falhas).toBe(4);
+    expect(resultado.concluido).toBe(false);
+    expect(mapa.size).toBe(0);
+  });
+
+  it('nunca passa de `concorrencia` requisicoes em voo', async () => {
+    let emVoo = 0, pico = 0;
+    const buscar: BuscarLogistica = async () => {
+      emVoo++; pico = Math.max(pico, emVoo);
+      await new Promise(r => setTimeout(r, 1));
+      emVoo--;
+      return 'fulfillment';
+    };
+    await executarPasso(pedidos(40), new Map(), buscar, { concorrencia: 5 });
+    expect(pico).toBeLessThanOrEqual(5);
+    expect(pico).toBeGreaterThan(1);   // paralelo de verdade, nao sequencial
+  });
+
+  it('concorrencia e limitada mesmo com valor absurdo', async () => {
+    let emVoo = 0, pico = 0;
+    const buscar: BuscarLogistica = async () => {
+      emVoo++; pico = Math.max(pico, emVoo);
+      await new Promise(r => setTimeout(r, 1));
+      emVoo--; return 'fulfillment';
+    };
+    await executarPasso(pedidos(60), new Map(), buscar, { concorrencia: 9999 });
+    expect(pico).toBeLessThanOrEqual(32);
+    expect(CONCORRENCIA).toBeLessThanOrEqual(32);
+  });
+
+  it('nao busca envio que ja esta no mapa', async () => {
+    const buscados: string[] = [];
+    const buscar: BuscarLogistica = async id => { buscados.push(id); return 'fulfillment'; };
+    await executarPasso(pedidos(3), new Map([['1001', 'fulfillment']]), buscar);
+    expect(buscados).not.toContain('1001');
+    expect(buscados.length).toBe(2);
+  });
+
+  it('nada a fazer: concluido, sem buscar', async () => {
+    const buscar: BuscarLogistica = async () => { throw new Error('nao deveria buscar'); };
+    const { resultado } = await executarPasso([], new Map(), buscar);
+    expect(resultado.concluido).toBe(true);
+    expect(resultado.buscados).toBe(0);
+    expect(resultado.cobertura).toBe(1);
+  });
+
+  it('cobertura reflete o acumulado, nao so o passo', async () => {
+    const todos = pedidos(10);
+    const { resultado } = await executarPasso(todos, new Map([['1001', 'fulfillment']]), sempre('fulfillment'), { limite: 4 });
+    // 1 ja conhecido + 4 deste passo = 5 de 10.
+    expect(resultado.cobertura).toBeCloseTo(0.5, 10);
+    expect(resultado.totalDistintos).toBe(10);
+  });
+
+  it('mistura de tipos e preservada por envio', async () => {
+    const buscar: BuscarLogistica = async id => (id === '1000' ? 'fulfillment' : 'xd_drop_off');
+    const { mapa } = await executarPasso(pedidos(3), new Map(), buscar);
+    expect(mapa.get('1000')).toBe('fulfillment');
+    expect(mapa.get('1001')).toBe('xd_drop_off');
+  });
+
+  it('nao muta o mapa de entrada', async () => {
+    const antes = new Map([['1001', 'fulfillment']]);
+    await executarPasso(pedidos(3), antes, sempre('xd_drop_off'));
+    expect(antes.size).toBe(1);
   });
 });

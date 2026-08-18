@@ -169,3 +169,120 @@ jobs:
           done
 
           echo "::warning::Ainda parcial após $MAX_PASSOS passos. O offset confirmado está salvo; a próxima execução continua daqui."
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Logística por envio. Job SEPARADO de propósito: depende do snapshot de
+  # pedidos, mas uma falha aqui não pode sujar a sincronização de vendas, que
+  # é a fonte de verdade.
+  #
+  # A API de pedidos do ML devolve shipping.id mas NÃO shipping.logistic_type.
+  # Sem esse campo o cálculo de custo soma embalagem em toda venda, inclusive
+  # nas do Full, onde o Mercado Livre é quem embala. Este job resolve cada
+  # envio UMA VEZ — envio despachado não muda de logística.
+  #
+  # Só o backend de preview: o oficial não tem este endpoint.
+  # ──────────────────────────────────────────────────────────────────────
+  logistica:
+    name: Resolver logistica de envios (preview)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: sync
+    # Roda mesmo se a sincronização de pedidos falhar: o snapshot anterior
+    # continua válido e ainda há envios antigos a resolver.
+    if: always()
+
+    steps:
+      - name: Executar passo de logistica
+        shell: bash
+        env:
+          ADMIN_KEY: ${{ secrets.OVERWINE_PREVIEW_ADMIN_KEY }}
+          SYNC_URL: https://overwine-assistant-preview.vercel.app/api/admin/shipping-sync
+          # 4 passos x 300 envios = 1.200 por hora. O backfill inicial de ~3.500
+          # termina em 3 horas. Depois só entram envios novos, poucos por hora.
+          MAX_PASSOS: '4'
+          LOTE: '300'
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::O secret OVERWINE_PREVIEW_ADMIN_KEY nao esta configurado."
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          passo=1
+          while [ "$passo" -le "$MAX_PASSOS" ]; do
+            echo "-- Passo $passo de $MAX_PASSOS --"
+
+            http_code="$(
+              curl --silent --show-error --location --request POST \
+                --url "$SYNC_URL" \
+                --header "Content-Type: application/json" \
+                --header "x-admin-key: $ADMIN_KEY" \
+                --data "{\"limite\":$LOTE}" \
+                --connect-timeout 15 --max-time 180 \
+                --output "$response_file" --write-out "%{http_code}"
+            )"
+
+            echo "HTTP: $http_code"
+            cat "$response_file"
+            echo
+
+            # 409 = outro passo em andamento; 429 = rate limit. Nenhum e erro:
+            # o mapa e aditivo e a proxima execucao continua de onde parou.
+            if [ "$http_code" = "409" ] || [ "$http_code" = "429" ]; then
+              echo "::warning::Passo $passo nao executou (HTTP $http_code). A proxima execucao continua."
+              exit 0
+            fi
+
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "::error::O endpoint respondeu HTTP $http_code."
+              exit 1
+            fi
+
+            set +e
+            python3 - "$response_file" <<'PY'
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1], "r", encoding="utf-8") as arquivo:
+                  resposta = json.load(arquivo)
+          except Exception as erro:
+              print(f"::error::Resposta nao e um JSON valido: {erro}")
+              raise SystemExit(1)
+
+          cobertura = resposta.get("cobertura")
+          pct = f"{cobertura:.1%}" if isinstance(cobertura, (int, float)) else "?"
+
+          print(
+              "Resultado: "
+              f"buscados={resposta.get('buscados')}, "
+              f"resolvidos={resposta.get('resolvidos')}, "
+              f"falhas={resposta.get('falhas')}, "
+              f"restantes={resposta.get('restantes')}, "
+              f"cobertura={pct}"
+          )
+
+          if resposta.get("ok") is not True:
+              print("::error::A resolucao de logistica respondeu ok=false.")
+              raise SystemExit(1)
+
+          raise SystemExit(0 if resposta.get("concluido") is True else 10)
+          PY
+            status=$?
+            set -e
+
+            if [ "$status" -eq 0 ]; then
+              echo "Logistica completa em $passo passo(s)."
+              exit 0
+            fi
+            if [ "$status" -ne 10 ]; then exit "$status"; fi
+
+            passo=$((passo + 1))
+            sleep 3
+          done
+
+          echo "::warning::Ainda faltam envios apos $MAX_PASSOS passos. A proxima execucao continua daqui."
