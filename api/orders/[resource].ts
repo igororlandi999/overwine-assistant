@@ -2,10 +2,19 @@
  * GET /api/orders/status?alvo=ativos|cancelados
  * GET /api/orders/list?alvo=...&cursor=...&pageSize=...
  * GET /api/orders/metrics?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * GET /api/orders/logistics
  *
  * Rota de LEITURA dos snapshots de pedidos (Fase 4c.1). Uma única função
  * serverless com `resource ∈ {status, list, metrics}` (padrão de
  * api/auth/[action].ts).
+ *
+ * `logistics` devolve o mapa shipmentId → logistic_type, AGRUPADO por tipo
+ * para caber em poucos KB. Existe porque a API de pedidos do Mercado Livre não
+ * devolve `logistic_type`: sem este mapa, o dashboard precisa adivinhar a
+ * logística pelo ANÚNCIO, o que erra duas vezes — perde o pedido cujo anúncio
+ * saiu do catálogo, e responde pela configuração de HOJE em vez da do dia da
+ * venda. Contém só ids de envio e nomes de logística: nenhum id de pedido,
+ * valor, data, comprador ou endereço.
  *
  * `metrics` devolve SOMENTE agregados do snapshot `ativos`: nenhum pedido
  * bruto, nenhum id de pedido, nenhuma data individual, nenhum buyer, nickname,
@@ -24,6 +33,7 @@ import type { Alvo } from '../../src/lib/orders-store.js';
 import { getReadStatus, getPage } from '../../src/services/orders-read.service.js';
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
+import { lerManifesto, lerMapaLogistica } from '../../src/lib/shipping-store.js';
 
 function parseAlvo(v: unknown): Alvo {
   return v === 'cancelados' ? 'cancelados' : 'ativos'; // default ativos
@@ -33,7 +43,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
 
   const resource = String(req.query.resource || '');
-  if (resource !== 'status' && resource !== 'list' && resource !== 'metrics') {
+  if (resource !== 'status' && resource !== 'list' && resource !== 'metrics' && resource !== 'logistics') {
     return json(res, 404, { error: `Recurso desconhecido: ${resource}` });
   }
   if (req.method !== 'GET') {
@@ -57,6 +67,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (resource === 'status') {
       const status = await getReadStatus(cache, alvo);
       return json(res, 200, status);
+    }
+
+    if (resource === 'logistics') {
+      // Agrupado por TIPO: os ~3.500 ids repetiriam a string do tipo em cada
+      // entrada, triplicando o payload sem acrescentar informação.
+      const mapa = await lerMapaLogistica(cache);
+      const manifesto = await lerManifesto(cache);
+      const porTipo: Record<string, string[]> = {};
+      for (const [shipmentId, tipo] of mapa) {
+        (porTipo[tipo] ??= []).push(shipmentId);
+      }
+      for (const ids of Object.values(porTipo)) ids.sort();
+      return json(res, 200, {
+        ok: true,
+        versao: manifesto?.versao ?? null,
+        updatedAt: manifesto?.updatedAt ?? null,
+        total: mapa.size,
+        porTipo,
+      });
     }
 
     if (resource === 'metrics') {

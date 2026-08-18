@@ -9,6 +9,7 @@ import {
 } from '../src/lib/orders-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import handler from '../api/orders/[resource].js';
+import { publicarMapaLogistica } from '../src/lib/shipping-store.js';
 
 // ── mocks mínimos de Vercel req/res ──
 function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown> }> = {}) {
@@ -333,5 +334,76 @@ describe('29. GET /api/orders/metrics', () => {
       .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(src).not.toMatch(/mercadolibre/);
     expect(src).not.toMatch(/mlFetch\s*\(/);
+  });
+});
+
+// ── GET /api/orders/logistics — mapa de logistica por envio ────────────────
+describe('rota /api/orders/logistics', () => {
+  it('exige sessao, igual aos demais recursos', async () => {
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'logistics' } }), res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('so aceita GET', async () => {
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({ method: 'POST', query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
+    expect(res.statusCode).toBe(405);
+  });
+
+  it('mapa ausente devolve 200 com total zero — nunca 500', async () => {
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
+    expect(res.statusCode).toBe(200);
+    const b = res.json();
+    expect(b.ok).toBe(true);
+    expect(b.total).toBe(0);
+    expect(b.porTipo).toEqual({});
+    expect(b.versao).toBeNull();
+  });
+
+  it('agrupa por tipo, com ids ordenados', async () => {
+    await publicarMapaLogistica(cache, new Map([
+      ['300', 'fulfillment'], ['100', 'fulfillment'], ['200', 'xd_drop_off'],
+    ]));
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
+    const b = res.json();
+    expect(b.total).toBe(3);
+    expect(b.porTipo.fulfillment).toEqual(['100', '300']);
+    expect(b.porTipo.xd_drop_off).toEqual(['200']);
+    expect(b.versao).toBe(1);
+    expect(typeof b.updatedAt).toBe('string');
+  });
+
+  it('NAO vaza id de pedido, valor, data, comprador nem endereco', async () => {
+    await publicar(cache, 'ativos', 5, 10);
+    await publicarMapaLogistica(cache, new Map([['100', 'fulfillment']]));
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
+    const bruto = JSON.stringify(res.json());
+    for (const proibido of ['buyer', 'nickname', 'paid_amount', 'date_created', 'order_items', 'receiver_address']) {
+      expect(bruto, proibido).not.toContain(proibido);
+    }
+  });
+
+  it('agrupar por tipo encolhe o payload de verdade', async () => {
+    // Racional do formato: com ~3.500 envios, repetir a string do tipo em cada
+    // entrada triplicaria o corpo sem acrescentar informacao nenhuma.
+    const mapa = new Map<string, string>();
+    for (let i = 0; i < 3500; i++) mapa.set(`5550${i}`, i % 5 === 0 ? 'xd_drop_off' : 'fulfillment');
+    await publicarMapaLogistica(cache, mapa);
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
+    const b = res.json();
+    expect(b.total).toBe(3500);
+    const agrupado = JSON.stringify(b).length;
+    const plano = JSON.stringify(Object.fromEntries(mapa)).length;
+    expect(agrupado).toBeLessThan(plano * 0.6);
   });
 });
