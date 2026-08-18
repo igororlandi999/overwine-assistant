@@ -3,10 +3,21 @@
  * GET /api/orders/list?alvo=...&cursor=...&pageSize=...
  * GET /api/orders/metrics?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
  * GET /api/orders/logistics
+ * GET /api/orders/margin?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
  *
  * Rota de LEITURA dos snapshots de pedidos (Fase 4c.1). Uma única função
  * serverless com `resource ∈ {status, list, metrics}` (padrão de
  * api/auth/[action].ts).
+ *
+ * `margin` devolve a margem do período, total e por SKU, com a MESMA conta que
+ * o chatbot usa — é o ponto todo do recurso. O dashboard tinha uma segunda
+ * implementação que ignorava frete, embalagem e kits, e por isso reportava
+ * margem 6 pontos percentuais acima da real (R$ 17.489 contra R$ 14.492 em
+ * agosto/2026). Duas respostas para a mesma pergunta é pior que nenhuma.
+ *
+ * NÃO inclui publicidade: esse dado vem da API de anúncios do Mercado Livre,
+ * que o backend não consulta, e pode ser informado à mão na tela. O consumidor
+ * subtrai por cima — por isso o corpo declara `antesDePublicidade: true`.
  *
  * `logistics` devolve o mapa shipmentId → logistic_type, AGRUPADO por tipo
  * para caber em poucos KB. Existe porque a API de pedidos do Mercado Livre não
@@ -34,6 +45,8 @@ import { getReadStatus, getPage } from '../../src/services/orders-read.service.j
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
 import { lerManifesto, lerMapaLogistica } from '../../src/lib/shipping-store.js';
+import { calcularRanking } from '../../src/services/product-ranking.service.js';
+import { coberturaLogistica } from '../../src/services/shipping-logistics.service.js';
 
 function parseAlvo(v: unknown): Alvo {
   return v === 'cancelados' ? 'cancelados' : 'ativos'; // default ativos
@@ -43,7 +56,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
 
   const resource = String(req.query.resource || '');
-  if (resource !== 'status' && resource !== 'list' && resource !== 'metrics' && resource !== 'logistics') {
+  const RECURSOS = new Set(['status', 'list', 'metrics', 'logistics', 'margin']);
+  if (!RECURSOS.has(resource)) {
     return json(res, 404, { error: `Recurso desconhecido: ${resource}` });
   }
   if (req.method !== 'GET') {
@@ -85,6 +99,98 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         updatedAt: manifesto?.updatedAt ?? null,
         total: mapa.size,
         porTipo,
+      });
+    }
+
+    if (resource === 'margin') {
+      const p = resolverPeriodo(req.query as Record<string, unknown>);
+      if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
+
+      const status = await getReadStatus(cache, 'ativos');
+      if (status.versao === null || status.totalRegistros <= 0 || !status.oldestDate || !status.newestDate) {
+        return json(res, 409, { error: 'not_ready' });
+      }
+
+      let pedidos;
+      try {
+        pedidos = await readSnapshot(cache, 'ativos');   // UMA leitura por chamada
+      } catch {
+        return json(res, 409, { error: 'not_ready' });
+      }
+      if (pedidos.length === 0) return json(res, 409, { error: 'not_ready' });
+
+      const mapa = await lerMapaLogistica(cache);
+      const r = calcularRanking(
+        pedidos,
+        { fromYmd: p.periodo.fromYmd, toYmd: p.periodo.toYmd },
+        {
+          oldestDate: status.oldestDate,
+          newestDate: status.newestDate,
+          partial: status.partial,
+          lastSyncAt: status.lastSyncAt,
+          lastResult: status.lastResult,
+        },
+        { criterio: 'revenue', todos: true, mapaLogistica: mapa }
+      );
+
+      const somar = (f: (l: typeof r.linhas[number]) => number) => r.linhas.reduce((s, l) => s + f(l), 0);
+      const tarifaML = somar(l => l.tarifaML ?? 0);
+      const tarifaEnvio = somar(l => l.tarifaEnvio ?? 0);
+      const custoTotal = somar(l => l.custoTotal ?? 0);
+      // Margem só das linhas com custo INTEGRALMENTE conhecido: somar as demais
+      // como se custassem zero inflaria o resultado, que é o erro que este
+      // recurso existe para não repetir.
+      const margem = r.linhas.reduce((s, l) => s + (l.margem ?? 0), 0);
+      const receitaComCusto = somar(l => l.receitaComCusto);
+      const cobLog = coberturaLogistica(pedidos, mapa);
+
+      return json(res, 200, {
+        ok: true,
+        periodo: { fromYmd: p.periodo.fromYmd, toYmd: p.periodo.toYmd },
+        cobertura: {
+          disponivel: r.disponivel,
+          tipo: r.cobertura,
+          fromYmd: r.periodoCalculado?.fromYmd ?? null,
+          toYmd: r.periodoCalculado?.toYmd ?? null,
+        },
+        totais: {
+          receitaProdutos: r.totais.receitaProdutos,
+          unidades: r.totais.unidades,
+          skusDistintos: r.totais.skusDistintos,
+          tarifaML,
+          tarifaEnvio,
+          receitaLiquida: receitaComCusto - tarifaML - tarifaEnvio,
+          custoTotal,
+          margem,
+          margemPct: receitaComCusto > 0 ? margem / receitaComCusto : null,
+          receitaComCusto,
+        },
+        porSku: r.linhas.map(l => ({
+          sku: l.sku,
+          semSku: l.semSku,
+          label: l.label,
+          itemIds: l.itemIds,
+          unidades: l.unidades,
+          pedidos: l.pedidos,
+          receitaProdutos: l.receitaProdutos,
+          receitaComCusto: l.receitaComCusto,
+          custoCobertura: l.custoCobertura,
+          custoTotal: l.custoTotal,
+          tarifaML: l.tarifaML,
+          tarifaEnvio: l.tarifaEnvio,
+          margem: l.margem,
+          margemPct: l.margemPct,
+        })),
+        semCusto: r.semCusto,
+        logistica: {
+          enviosConhecidos: cobLog.resolvidos,
+          enviosTotal: cobLog.totalDistintos,
+          fracao: cobLog.fracao,
+        },
+        // A tela subtrai publicidade por cima: o backend não a conhece.
+        antesDePublicidade: true,
+        estimado: true,
+        warnings: r.warnings,
       });
     }
 

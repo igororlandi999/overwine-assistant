@@ -10,6 +10,10 @@ import {
 import type { OrderSlim } from '../src/services/orders.service.js';
 import handler from '../api/orders/[resource].js';
 import { publicarMapaLogistica } from '../src/lib/shipping-store.js';
+import { calcularRanking } from '../src/services/product-ranking.service.js';
+import { readSnapshot } from '../src/lib/orders-store.js';
+import { getReadStatus } from '../src/services/orders-read.service.js';
+import { lerMapaLogistica } from '../src/lib/shipping-store.js';
 
 // ── mocks mínimos de Vercel req/res ──
 function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown> }> = {}) {
@@ -405,5 +409,175 @@ describe('rota /api/orders/logistics', () => {
     const agrupado = JSON.stringify(b).length;
     const plano = JSON.stringify(Object.fromEntries(mapa)).length;
     expect(agrupado).toBeLessThan(plano * 0.6);
+  });
+});
+
+// ── GET /api/orders/margin — MESMA conta do chatbot ────────────────────────
+describe('rota /api/orders/margin', () => {
+  /** Pedidos reais o suficiente para a margem ter o que calcular. */
+  async function publicarVendas(): Promise<void> {
+    const item = (sku: string, titulo: string, preco: number, qtd: number) => ({
+      quantity: qtd, unit_price: preco,
+      item: { id: 'MLB1', title: titulo, seller_sku: sku, variation_id: null },
+    });
+    const pedidos = [
+      { id: 1, status: 'paid', date_created: '2026-07-05T12:00:00.000-03:00', paid_amount: 400,
+        total_amount: 400, shipping: { id: 900, logistic_type: null },
+        order_items: [item('21002', 'Vinho Arcos do Convento Tinto 750ml', 40, 10)] },
+      { id: 2, status: 'paid', date_created: '2026-07-06T12:00:00.000-03:00', paid_amount: 300,
+        total_amount: 300, shipping: { id: 901, logistic_type: null },
+        order_items: [item('25001', 'Vinho Ouro Meu Tinto Seco 750ml', 30, 10)] },
+      { id: 3, status: 'cancelled', date_created: '2026-07-07T12:00:00.000-03:00', paid_amount: 9999,
+        total_amount: 9999, shipping: { id: 902, logistic_type: null },
+        order_items: [item('21002', 'Vinho Arcos do Convento Tinto 750ml', 9999, 99)] },
+    ] as unknown as OrderSlim[];
+    const chunk = await writeChunk(cache, 'ativos', 1, 0, pedidos);
+    await publishManifest(cache, 'ativos', {
+      versao: 1, chunks: [chunk], totalRegistros: pedidos.length,
+      oldestDate: '2026-07-05T12:00:00.000-03:00', newestDate: '2026-07-07T12:00:00.000-03:00',
+      chunkSize: 50, updatedAt: '2026-07-20T12:00:00.000Z', origem: 'full',
+    });
+  }
+
+  async function pedirMargem(query: Record<string, string> = {}) {
+    const tok = await comSessao();
+    const res = mockRes();
+    await handler(mockReq({
+      query: { resource: 'margin', from: '2026-07-01', to: '2026-07-31', ...query },
+      headers: { authorization: `Bearer ${tok}` },
+    }), res);
+    return res;
+  }
+
+  it('exige sessao', async () => {
+    const res = mockRes();
+    await handler(mockReq({ query: { resource: 'margin', dias: '7' } }), res);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('sem snapshot devolve 409 not_ready, nunca zeros', async () => {
+    const res = await pedirMargem();
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('not_ready');
+  });
+
+  it('parametro desconhecido devolve 400', async () => {
+    await publicarVendas();
+    const res = await pedirMargem({ inventado: '1' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().code).toBe('parametro_desconhecido');
+  });
+
+  it('intervalo invertido devolve 400', async () => {
+    await publicarVendas();
+    const res = await pedirMargem({ from: '2026-07-31', to: '2026-07-01' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('devolve totais e uma linha por SKU', async () => {
+    await publicarVendas();
+    const b = (await pedirMargem()).json();
+    expect(b.ok).toBe(true);
+    expect(b.totais.receitaProdutos).toBe(700);       // 400 + 300; cancelado fora
+    expect(b.totais.unidades).toBe(20);
+    expect(b.totais.skusDistintos).toBe(2);
+    expect(b.porSku.map((l: any) => l.sku).sort()).toEqual(['21002', '25001']);
+    expect(b.antesDePublicidade).toBe(true);
+    expect(b.estimado).toBe(true);
+  });
+
+  it('CONTRATO: bate exatamente com o calculo que o chatbot usa', async () => {
+    // Este teste e a razao de ser do recurso. O dashboard tinha uma segunda
+    // implementacao de margem que ignorava frete, embalagem e kits, e reportava
+    // 6 pontos percentuais a mais. Se as duas divergirem de novo, quebra aqui.
+    await publicarVendas();
+    await publicarMapaLogistica(cache, new Map([['900', 'fulfillment']]));
+
+    const b = (await pedirMargem()).json();
+
+    const pedidos = await readSnapshot(cache, 'ativos');
+    const status = await getReadStatus(cache, 'ativos');
+    const esperado = calcularRanking(
+      pedidos,
+      { fromYmd: '2026-07-01', toYmd: '2026-07-31' },
+      {
+        oldestDate: status.oldestDate, newestDate: status.newestDate, partial: status.partial,
+        lastSyncAt: status.lastSyncAt, lastResult: status.lastResult,
+      },
+      { criterio: 'revenue', todos: true, mapaLogistica: await lerMapaLogistica(cache) }
+    );
+    const margemEsperada = esperado.linhas.reduce((s, l) => s + (l.margem ?? 0), 0);
+    expect(b.totais.margem).toBeCloseTo(margemEsperada, 8);
+  });
+
+  it('a logistica muda a margem: Full nao paga embalagem', async () => {
+    await publicarVendas();
+    const semMapa = (await pedirMargem()).json().totais.margem;
+
+    await publicarMapaLogistica(cache, new Map([['900', 'fulfillment'], ['901', 'fulfillment']]));
+    const comMapa = (await pedirMargem()).json().totais.margem;
+
+    // 20 unidades x R$ 3,00 de embalagem que o Mercado Livre paga.
+    expect(comMapa - semMapa).toBeCloseTo(60, 2);
+  });
+
+  it('declara a cobertura de logistica para a tela poder avisar', async () => {
+    await publicarVendas();
+    const b1 = (await pedirMargem()).json();
+    expect(b1.logistica).toEqual({ enviosConhecidos: 0, enviosTotal: 2, fracao: 0 });
+
+    await publicarMapaLogistica(cache, new Map([['900', 'x'], ['901', 'y']]));
+    expect((await pedirMargem()).json().logistica.fracao).toBe(1);
+  });
+
+  it('devolve TODAS as linhas, sem o teto de 20 do ranking de chat', async () => {
+    const item = (sku: string) => ({
+      quantity: 1, unit_price: 10,
+      item: { id: 'MLB' + sku, title: 'Vinho Carrascal 750ml', seller_sku: sku, variation_id: null },
+    });
+    const pedidos = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1, status: 'paid', date_created: '2026-07-05T12:00:00.000-03:00',
+      paid_amount: 10, total_amount: 10, shipping: { id: 900 + i, logistic_type: null },
+      order_items: [item('SKU' + String(i).padStart(2, '0'))],
+    })) as unknown as OrderSlim[];
+    const chunk = await writeChunk(cache, 'ativos', 1, 0, pedidos);
+    await publishManifest(cache, 'ativos', {
+      versao: 1, chunks: [chunk], totalRegistros: 30,
+      oldestDate: '2026-07-05T12:00:00.000-03:00', newestDate: '2026-07-05T12:00:00.000-03:00',
+      chunkSize: 50, updatedAt: '2026-07-20T12:00:00.000Z', origem: 'full',
+    });
+    const b = (await pedirMargem()).json();
+    expect(b.porSku.length).toBe(30);
+  });
+
+  it('produto sem custo aparece na lista, com margem null', async () => {
+    const pedidos = [{
+      id: 1, status: 'paid', date_created: '2026-07-05T12:00:00.000-03:00',
+      paid_amount: 500, total_amount: 500, shipping: { id: 900, logistic_type: null },
+      order_items: [{ quantity: 1, unit_price: 500,
+        item: { id: 'MLB9', title: 'Vinho Fantasma da Serra Reserva', seller_sku: 'FAN', variation_id: null } }],
+    }] as unknown as OrderSlim[];
+    const chunk = await writeChunk(cache, 'ativos', 1, 0, pedidos);
+    await publishManifest(cache, 'ativos', {
+      versao: 1, chunks: [chunk], totalRegistros: 1,
+      oldestDate: '2026-07-05T12:00:00.000-03:00', newestDate: '2026-07-05T12:00:00.000-03:00',
+      chunkSize: 50, updatedAt: '2026-07-20T12:00:00.000Z', origem: 'full',
+    });
+    const b = (await pedirMargem()).json();
+    const linha = b.porSku.find((l: any) => l.sku === 'FAN');
+    expect(linha.receitaProdutos).toBe(500);
+    expect(linha.custoCobertura).toBe('ausente');
+    expect(linha.margem).toBeNull();
+    expect(b.totais.margem).toBe(0);          // nao conta como lucro
+    expect(b.semCusto.skus).toBe(1);
+    expect(b.semCusto.titulos).toContain('Vinho Fantasma da Serra Reserva');
+  });
+
+  it('NAO vaza comprador, id de pedido nem dado bruto', async () => {
+    await publicarVendas();
+    const bruto = JSON.stringify((await pedirMargem()).json());
+    for (const proibido of ['buyer', 'nickname', 'paid_amount', 'date_created', 'order_items']) {
+      expect(bruto, proibido).not.toContain(proibido);
+    }
   });
 });

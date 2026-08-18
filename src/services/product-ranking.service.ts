@@ -280,6 +280,13 @@ export interface RankingOpcoes {
    * (lado conservador: soma embalagem, nunca infla a margem).
    */
   mapaLogistica?: ReadonlyMap<string, string> | null;
+  /**
+   * Ignora `limite` e devolve TODAS as linhas. Existe para a tabela de margem
+   * do dashboard, que precisa do catálogo inteiro — o teto de RANKING_LIMITE_MAX
+   * é uma restrição de RESPOSTA DE CHAT (lista longa demais deixa de ser
+   * ranking), não do cálculo.
+   */
+  todos?: boolean;
 }
 
 /**
@@ -437,7 +444,8 @@ export function calcularRanking(
     return chave || a.sku.localeCompare(b.sku, 'pt-BR');
   });
 
-  const top = ordenadas.slice(0, limite).map((l, i) => ({ ...l, posicao: i + 1 }));
+  const selecionadas = opcoes.todos === true ? ordenadas : ordenadas.slice(0, limite);
+  const top = selecionadas.map((l, i) => ({ ...l, posicao: i + 1 }));
 
   // ── Warnings ──
   const warnings = [...cob.warnings, WARN_ANTES_DE_PUBLICIDADE];
