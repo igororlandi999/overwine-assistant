@@ -118,7 +118,7 @@ describe('allowlist do proxy', () => {
     expect(Object.keys(OPS).sort()).toEqual([
       'ads-billing', 'items', 'items-search', 'order', 'order-discounts', 'orders',
       'product-items', 'promotion-item-remove', 'promotion-item-set', 'promotion-items',
-      'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
+      'ads-advertisers', 'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
     ].sort());
   });
 
@@ -142,5 +142,33 @@ describe('allowlist do proxy', () => {
     expect(saida).not.toContain('receiver_address');
     expect(saida).not.toContain('street_name');
     expect(saida).not.toContain('nickname');
+  });
+
+  it('ads-advertisers manda api-version e nao vaza nome de conta alheio', () => {
+    const op = OPS['ads-advertisers'];
+    expect(op.method).toBe('GET');
+    expect(op.headers).toEqual({ 'api-version': '2' });
+    expect(op.path({} as never, '1')).toBe('/advertising/advertisers?product_id=PADS');
+    const saida = op.shape({
+      advertisers: [{ advertiser_id: 7, site_id: 'MLB', advertiser_name: 'X', account_name: 'Y', segredo: 'z' }],
+    }) as { advertisers: Array<Record<string, unknown>> };
+    expect(saida.advertisers[0].advertiser_id).toBe(7);
+    expect(JSON.stringify(saida)).not.toContain('segredo');
+  });
+
+  it('resposta sem advertisers nao quebra', () => {
+    expect(OPS['ads-advertisers'].shape({})).toEqual({ advertisers: [] });
+    expect(OPS['ads-advertisers'].shape({ advertisers: null })).toEqual({ advertisers: [] });
+  });
+
+  it('nenhuma op declara cabecalho de autenticacao', () => {
+    // O Bearer e posto pelo mlFetch. Se uma op pudesse declarar Authorization,
+    // a allowlist viraria caminho para vazar ou sobrescrever credencial.
+    for (const [nome, op] of Object.entries(OPS)) {
+      for (const h of Object.keys(op.headers ?? {})) {
+        expect(h.toLowerCase(), nome).not.toBe('authorization');
+        expect(h.toLowerCase(), nome).not.toBe('x-admin-key');
+      }
+    }
   });
 });

@@ -92,6 +92,14 @@ export interface OpDef {
   path: (p: any, uid: string) => string;
   /** Corpo (só ops de escrita). */
   body?: (p: any) => Obj;
+  /**
+   * Cabeçalhos EXTRA exigidos pelo endpoint. Nunca de autenticação — o Bearer
+   * é posto pelo mlFetch e jamais vem daqui.
+   *
+   * Existe por causa da API de publicidade: a geração antiga de Product Ads foi
+   * descontinuada em 27/05/2026 e responde 404, e a atual exige `api-version`.
+   */
+  headers?: Record<string, string>;
   /** Filtra a resposta do ML para o mínimo necessário. */
   shape: (data: any) => unknown;
 }
@@ -178,6 +186,22 @@ export const OPS: Record<string, OpDef> = {
     params: z.object({ id: digits }),
     path: p => `/shipments/${p.id}/costs`,
     shape: d => pick(d, SHIPMENT_COST_FIELDS),
+  },
+
+  // 6c) Publicidade — descobre o advertiser_id da conta.
+  // Primeira etapa OBRIGATÓRIA da API atual de Product Ads: todo o resto é
+  // consultado por advertiser, não por user_id. Um 404 aqui costuma significar
+  // que a conta não tem o produto habilitado, não que o endpoint sumiu.
+  'ads-advertisers': {
+    method: 'GET',
+    params: z.object({}),
+    path: () => '/advertising/advertisers?product_id=PADS',
+    headers: { 'api-version': '2' },
+    shape: d => ({
+      advertisers: Array.isArray(d?.advertisers)
+        ? d.advertisers.map((a: Obj) => pick(a, ['advertiser_id', 'site_id', 'advertiser_name', 'account_name']))
+        : [],
+    }),
   },
 
   // 7) Reputação — loadReputation (só o que o card usa)
@@ -310,10 +334,12 @@ export async function runOp(cache: Cache, opName: string, rawParams: unknown): P
   const path = op.path(parsed.data, env.ML_USER_ID);
 
   const init: RequestInit = { method: op.method };
+  const headers: Record<string, string> = { ...(op.headers ?? {}) };
   if (op.body) {
-    init.headers = { 'Content-Type': 'application/json' };
+    headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(op.body(parsed.data));
   }
+  if (Object.keys(headers).length > 0) init.headers = headers;
 
   const res = await mlFetch(cache, path, init);
   let data: unknown = null;
