@@ -192,7 +192,7 @@ export const OPS: Record<string, OpDef> = {
   // Primeira etapa OBRIGATÓRIA da API atual de Product Ads: todo o resto é
   // consultado por advertiser, não por user_id. Um 404 aqui costuma significar
   // que a conta não tem o produto habilitado, não que o endpoint sumiu.
-  'ads-advertisers': {
+  'pub-anunciantes': {
     method: 'GET',
     params: z.object({}),
     path: () => '/advertising/advertisers?product_id=PADS',
@@ -212,7 +212,7 @@ export const OPS: Record<string, OpDef> = {
   // LIMITE DO ML: no máximo 90 dias para trás, e as métricas do dia só
   // consolidam às 10h (GMT-3). Consultar hoje de manhã devolve número parcial —
   // quem usar isto precisa saber que o dia corrente não é definitivo.
-  'ads-campaigns': {
+  'pub-campanhas': {
     method: 'GET',
     params: z.object({
       advertiser_id: z.coerce.number().int().positive(),
@@ -235,6 +235,26 @@ export const OPS: Record<string, OpDef> = {
       results: Array.isArray(d?.results) ? d.results : [],
       paging: pick(d?.paging, ['total', 'offset', 'limit']),
     }),
+  },
+
+  // 6e) Publicidade — MÉTRICAS de uma campanha no período.
+  // A rota de campanhas devolve só configuração (orçamento, ACOS alvo). O
+  // gasto real vem daqui, campanha por campanha.
+  'pub-metricas': {
+    method: 'GET',
+    params: z.object({
+      advertiser_id: z.coerce.number().int().positive(),
+      campaign_id: z.coerce.number().int().positive(),
+      site_id: z.enum(['MLB']).default('MLB'),
+      date_from: isoDate,
+      date_to: isoDate,
+    }),
+    path: p =>
+      `/marketplace/advertising/${p.site_id}/advertisers/${p.advertiser_id}` +
+      `/product_ads/campaigns/${p.campaign_id}/metrics` +
+      `?date_from=${p.date_from}&date_to=${p.date_to}`,
+    headers: { 'api-version': '2' },
+    shape: d => d,
   },
 
   // 7) Reputação — loadReputation (só o que o card usa)

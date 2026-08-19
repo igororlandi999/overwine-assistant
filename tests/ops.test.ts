@@ -118,7 +118,7 @@ describe('allowlist do proxy', () => {
     expect(Object.keys(OPS).sort()).toEqual([
       'ads-billing', 'items', 'items-search', 'order', 'order-discounts', 'orders',
       'product-items', 'promotion-item-remove', 'promotion-item-set', 'promotion-items',
-      'ads-advertisers', 'ads-campaigns', 'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
+      'promotions', 'pub-anunciantes', 'pub-campanhas', 'pub-metricas', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
     ].sort());
   });
 
@@ -144,8 +144,8 @@ describe('allowlist do proxy', () => {
     expect(saida).not.toContain('nickname');
   });
 
-  it('ads-advertisers manda api-version e nao vaza nome de conta alheio', () => {
-    const op = OPS['ads-advertisers'];
+  it('pub-anunciantes manda api-version e nao vaza nome de conta alheio', () => {
+    const op = OPS['pub-anunciantes'];
     expect(op.method).toBe('GET');
     expect(op.headers).toEqual({ 'api-version': '2' });
     expect(op.path({} as never, '1')).toBe('/advertising/advertisers?product_id=PADS');
@@ -157,8 +157,8 @@ describe('allowlist do proxy', () => {
   });
 
   it('resposta sem advertisers nao quebra', () => {
-    expect(OPS['ads-advertisers'].shape({})).toEqual({ advertisers: [] });
-    expect(OPS['ads-advertisers'].shape({ advertisers: null })).toEqual({ advertisers: [] });
+    expect(OPS['pub-anunciantes'].shape({})).toEqual({ advertisers: [] });
+    expect(OPS['pub-anunciantes'].shape({ advertisers: null })).toEqual({ advertisers: [] });
   });
 
   it('nenhuma op declara cabecalho de autenticacao', () => {
@@ -172,8 +172,8 @@ describe('allowlist do proxy', () => {
     }
   });
 
-  it('ads-campaigns monta a rota atual, com /search obrigatorio', () => {
-    const op = OPS['ads-campaigns'];
+  it('pub-campanhas monta a rota atual, com /search obrigatorio', () => {
+    const op = OPS['pub-campanhas'];
     const p = op.params.parse({ advertiser_id: '671874', date_from: '2026-07-01', date_to: '2026-07-31' });
     const url = op.path(p as never, '2329718196');
     expect(url).toBe(
@@ -185,15 +185,35 @@ describe('allowlist do proxy', () => {
     expect(url).not.toContain('2329718196');
   });
 
-  it('ads-campaigns valida os parametros', async () => {
-    expect((await runOp(cache, 'ads-campaigns', { date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
-    expect((await runOp(cache, 'ads-campaigns', { advertiser_id: 'abc', date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
-    expect((await runOp(cache, 'ads-campaigns', { advertiser_id: 671874, date_from: 'ontem', date_to: '2026-07-31' })).status).toBe(400);
+  it('pub-campanhas valida os parametros', async () => {
+    expect((await runOp(cache, 'pub-campanhas', { date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
+    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 'abc', date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
+    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 671874, date_from: 'ontem', date_to: '2026-07-31' })).status).toBe(400);
   });
 
-  it('ads-campaigns: resposta inesperada vira lista vazia, nao quebra', () => {
-    const op = OPS['ads-campaigns'];
+  it('pub-campanhas: resposta inesperada vira lista vazia, nao quebra', () => {
+    const op = OPS['pub-campanhas'];
     expect(op.shape({})).toEqual({ results: [], paging: null });
     expect(op.shape({ results: 'nao e array' })).toEqual({ results: [], paging: null });
+  });
+
+  it('nenhuma op de publicidade tem "ads" no NOME', () => {
+    // Bloqueadores de anuncio barram qualquer URL contendo "ads": a chamada
+    // morria com ERR_BLOCKED_BY_CLIENT, sem resposta do servidor e sem erro
+    // util. O caminho do ML nos e imposto, mas o nome da nossa op nao.
+    for (const nome of Object.keys(OPS)) {
+      if (nome === 'ads-billing') continue;   // legado, sai quando for removido
+      expect(/(^|-)ads(-|$)/.test(nome), nome).toBe(false);
+    }
+  });
+
+  it('pub-metricas monta a rota de metricas da campanha', () => {
+    const op = OPS['pub-metricas'];
+    const p = op.params.parse({ advertiser_id: 671874, campaign_id: 356202593, date_from: '2026-07-01', date_to: '2026-07-31' });
+    expect(op.path(p as never, '1')).toBe(
+      '/marketplace/advertising/MLB/advertisers/671874/product_ads/campaigns/356202593/metrics' +
+      '?date_from=2026-07-01&date_to=2026-07-31'
+    );
+    expect(op.headers).toEqual({ 'api-version': '2' });
   });
 });
