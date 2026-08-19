@@ -204,6 +204,39 @@ export const OPS: Record<string, OpDef> = {
     }),
   },
 
+  // 6d) Publicidade — campanhas e métricas do período.
+  // Rota da API ATUAL. O `/search` no fim é obrigatório desde a migração; sem
+  // ele o Mercado Livre responde erro. Tudo é escopado por advertiser_id, que
+  // vem da operação `ads-advertisers`.
+  //
+  // LIMITE DO ML: no máximo 90 dias para trás, e as métricas do dia só
+  // consolidam às 10h (GMT-3). Consultar hoje de manhã devolve número parcial —
+  // quem usar isto precisa saber que o dia corrente não é definitivo.
+  'ads-campaigns': {
+    method: 'GET',
+    params: z.object({
+      advertiser_id: z.coerce.number().int().positive(),
+      site_id: z.enum(['MLB']).default('MLB'),
+      date_from: isoDate,
+      date_to: isoDate,
+      limit: z.coerce.number().int().min(1).max(50).default(50),
+      offset: z.coerce.number().int().min(0).max(1000).default(0),
+    }),
+    path: p =>
+      `/marketplace/advertising/${p.site_id}/advertisers/${p.advertiser_id}` +
+      `/product_ads/campaigns/search?limit=${p.limit}&offset=${p.offset}` +
+      `&date_from=${p.date_from}&date_to=${p.date_to}`,
+    headers: { 'api-version': '2' },
+    // Campanha não carrega dado de comprador: são nomes, orçamentos e métricas.
+    // Passa `results` inteiro, como `promotions` já faz, porque os nomes de
+    // campo de métrica variam por versão e uma allowlist estreita demais
+    // devolveria objeto vazio sem ninguém perceber.
+    shape: d => ({
+      results: Array.isArray(d?.results) ? d.results : [],
+      paging: pick(d?.paging, ['total', 'offset', 'limit']),
+    }),
+  },
+
   // 7) Reputação — loadReputation (só o que o card usa)
   reputation: {
     method: 'GET',

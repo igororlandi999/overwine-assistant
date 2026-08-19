@@ -118,7 +118,7 @@ describe('allowlist do proxy', () => {
     expect(Object.keys(OPS).sort()).toEqual([
       'ads-billing', 'items', 'items-search', 'order', 'order-discounts', 'orders',
       'product-items', 'promotion-item-remove', 'promotion-item-set', 'promotion-items',
-      'ads-advertisers', 'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
+      'ads-advertisers', 'ads-campaigns', 'promotions', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
     ].sort());
   });
 
@@ -170,5 +170,30 @@ describe('allowlist do proxy', () => {
         expect(h.toLowerCase(), nome).not.toBe('x-admin-key');
       }
     }
+  });
+
+  it('ads-campaigns monta a rota atual, com /search obrigatorio', () => {
+    const op = OPS['ads-campaigns'];
+    const p = op.params.parse({ advertiser_id: '671874', date_from: '2026-07-01', date_to: '2026-07-31' });
+    const url = op.path(p as never, '2329718196');
+    expect(url).toBe(
+      '/marketplace/advertising/MLB/advertisers/671874/product_ads/campaigns/search' +
+      '?limit=50&offset=0&date_from=2026-07-01&date_to=2026-07-31'
+    );
+    expect(op.headers).toEqual({ 'api-version': '2' });
+    // Escopado por advertiser, NAO por user_id: era esse o erro da rota antiga.
+    expect(url).not.toContain('2329718196');
+  });
+
+  it('ads-campaigns valida os parametros', async () => {
+    expect((await runOp(cache, 'ads-campaigns', { date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
+    expect((await runOp(cache, 'ads-campaigns', { advertiser_id: 'abc', date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
+    expect((await runOp(cache, 'ads-campaigns', { advertiser_id: 671874, date_from: 'ontem', date_to: '2026-07-31' })).status).toBe(400);
+  });
+
+  it('ads-campaigns: resposta inesperada vira lista vazia, nao quebra', () => {
+    const op = OPS['ads-campaigns'];
+    expect(op.shape({})).toEqual({ results: [], paging: null });
+    expect(op.shape({ results: 'nao e array' })).toEqual({ results: [], paging: null });
   });
 });
