@@ -207,13 +207,32 @@ describe('allowlist do proxy', () => {
     }
   });
 
-  it('pub-metricas monta a rota de metricas da campanha', () => {
+  it('pub-metricas cobre as cinco variantes candidatas', () => {
     const op = OPS['pub-metricas'];
-    const p = op.params.parse({ advertiser_id: 671874, campaign_id: 356202593, date_from: '2026-07-01', date_to: '2026-07-31' });
-    expect(op.path(p as never, '1')).toBe(
-      '/marketplace/advertising/MLB/advertisers/671874/product_ads/campaigns/356202593/metrics' +
-      '?date_from=2026-07-01&date_to=2026-07-31'
-    );
+    const base = '/marketplace/advertising/MLB/advertisers/671874/product_ads';
+    const datas = 'date_from=2026-07-01&date_to=2026-07-31';
+    const esperado: Record<string, string> = {
+      'detalhe':     `${base}/campaigns/356202593?${datas}`,
+      'ads-metrics': `${base}/campaigns/356202593/ads/metrics?${datas}`,
+      'agregado':    `${base}/campaigns/metrics?${datas}&filters[campaign_id]=356202593`,
+      'ads-search':  `${base}/campaigns/356202593/ads/search?${datas}`,
+      'itens':       `${base}/items?${datas}&filters[campaign_id]=356202593`,
+    };
+    for (const [variante, url] of Object.entries(esperado)) {
+      const p = op.params.parse({
+        advertiser_id: 671874, campaign_id: 356202593,
+        date_from: '2026-07-01', date_to: '2026-07-31', variante,
+      });
+      expect(op.path(p as never, '1'), variante).toBe(url);
+    }
     expect(op.headers).toEqual({ 'api-version': '2' });
+  });
+
+  it('pub-metricas: variante fora do enum e recusada (allowlist, nao texto livre)', async () => {
+    const r = await runOp(cache, 'pub-metricas', {
+      advertiser_id: 671874, campaign_id: 1, date_from: '2026-07-01', date_to: '2026-07-31',
+      variante: '../../../qualquer-coisa',
+    });
+    expect(r.status).toBe(400);
   });
 });

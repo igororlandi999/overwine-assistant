@@ -237,9 +237,16 @@ export const OPS: Record<string, OpDef> = {
     }),
   },
 
-  // 6e) Publicidade — MÉTRICAS de uma campanha no período.
-  // A rota de campanhas devolve só configuração (orçamento, ACOS alvo). O
-  // gasto real vem daqui, campanha por campanha.
+  // 6e) Publicidade — MÉTRICAS. SONDA TEMPORÁRIA.
+  //
+  // A rota que eu inferi (`/campaigns/{id}/metrics`) responde 404. A doc do ML
+  // mudou de forma na migração de 2026 e não deixa claro o caminho novo, então
+  // em vez de adivinhar um por vez — cada tentativa custa um deploy — esta op
+  // testa um conjunto FECHADO de candidatos.
+  //
+  // `variante` é um enum, não texto livre: continua sendo allowlist, e o
+  // frontend segue sem escolher URL. Quando soubermos qual funciona, esta op
+  // é substituída pela definitiva e sai daqui.
   'pub-metricas': {
     method: 'GET',
     params: z.object({
@@ -248,11 +255,23 @@ export const OPS: Record<string, OpDef> = {
       site_id: z.enum(['MLB']).default('MLB'),
       date_from: isoDate,
       date_to: isoDate,
+      variante: z.enum(['detalhe', 'ads-metrics', 'agregado', 'ads-search', 'itens']).default('detalhe'),
     }),
-    path: p =>
-      `/marketplace/advertising/${p.site_id}/advertisers/${p.advertiser_id}` +
-      `/product_ads/campaigns/${p.campaign_id}/metrics` +
-      `?date_from=${p.date_from}&date_to=${p.date_to}`,
+    path: p => {
+      const base = `/marketplace/advertising/${p.site_id}/advertisers/${p.advertiser_id}/product_ads`;
+      const datas = `date_from=${p.date_from}&date_to=${p.date_to}`;
+      switch (p.variante) {
+        // Campanha com métricas embutidas quando o período é informado.
+        case 'detalhe':     return `${base}/campaigns/${p.campaign_id}?${datas}`;
+        // Espelha a rota legada, agora escopada por anunciante.
+        case 'ads-metrics': return `${base}/campaigns/${p.campaign_id}/ads/metrics?${datas}`;
+        // Agregado de todas as campanhas, filtrado pela estrutura filters[...].
+        case 'agregado':    return `${base}/campaigns/metrics?${datas}&filters[campaign_id]=${p.campaign_id}`;
+        // Anúncios da campanha; a doc menciona métricas junto dos anúncios.
+        case 'ads-search':  return `${base}/campaigns/${p.campaign_id}/ads/search?${datas}`;
+        default:            return `${base}/items?${datas}&filters[campaign_id]=${p.campaign_id}`;
+      }
+    },
     headers: { 'api-version': '2' },
     shape: d => d,
   },
