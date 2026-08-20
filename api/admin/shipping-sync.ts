@@ -21,7 +21,7 @@ import { getCache } from '../../src/lib/cache/cache.js';
 import { mlFetch } from '../../src/lib/ml-auth.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
 import { readSnapshot } from '../../src/lib/orders-store.js';
-import { lerMapaLogistica, publicarMapaLogistica, CHAVE_LOCK } from '../../src/lib/shipping-store.js';
+import { lerMapaEnvios, publicarMapaEnvios, CHAVE_LOCK } from '../../src/lib/shipping-store.js';
 import { executarPasso, type BuscarLogistica } from '../../src/services/shipping-logistics.service.js';
 
 /** TTL do lock. Um passo cabe folgado nisso; se estourar, o lock expira só. */
@@ -60,18 +60,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = (req.body ?? {}) as { limite?: number; concorrencia?: number };
 
     const pedidos = await readSnapshot(cache, 'ativos');
-    const mapaAtual = await lerMapaLogistica(cache);
+    const mapaAtual = await lerMapaEnvios(cache);
 
     // Busca REAL, injetada. Erro de um envio não derruba o passo: devolver null
     // mantém o id pendente para a próxima rodada. Envio arquivado (404) ou
     // instabilidade momentânea não podem travar o backfill inteiro.
     const buscar: BuscarLogistica = async (shipmentId) => {
-      const r = await mlFetch(cache, `/shipments/${encodeURIComponent(shipmentId)}`);
-      if (!r.ok) return null;
-      const data = (await r.json()) as { logistic_type?: unknown };
-      return typeof data.logistic_type === 'string' && data.logistic_type !== ''
-        ? data.logistic_type
-        : null;
+      const id = encodeURIComponent(shipmentId);
+      // DUAS chamadas: o objeto de envio traz a logística, e /costs traz o que
+      // o VENDEDOR pagou — o objeto de envio só expõe preço de tabela e o que o
+      // comprador viu, e a diferença entre eles é subsídio do Mercado Livre.
+      const [rEnvio, rCusto] = await Promise.all([
+        mlFetch(cache, `/shipments/${id}`),
+        mlFetch(cache, `/shipments/${id}/costs`),
+      ]);
+      if (!rEnvio.ok || !rCusto.ok) return null;
+
+      const envio = (await rEnvio.json()) as { logistic_type?: unknown };
+      const custos = (await rCusto.json()) as { senders?: unknown };
+      if (typeof envio.logistic_type !== 'string' || envio.logistic_type === '') return null;
+
+      // senders[] é o lado do vendedor; pode vir com mais de uma entrada.
+      const senders = Array.isArray(custos.senders) ? custos.senders : [];
+      let custoFrete = 0;
+      for (const s of senders) {
+        const c = (s as { cost?: unknown }).cost;
+        if (typeof c === 'number' && Number.isFinite(c)) custoFrete += c;
+      }
+      return { shipmentId, logisticType: envio.logistic_type, custoFrete };
     };
 
     console.info(`[shipping-sync] passo ip=${maskIp(ip)} pedidos=${pedidos.length} mapa=${mapaAtual.size}`);
@@ -83,7 +99,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Só publica se algo mudou. Um passo em que todas as buscas falharam não
     // deve criar versão nova do mapa nem reescrever os chunks.
-    if (resultado.resolvidos > 0) await publicarMapaLogistica(cache, mapa);
+    if (resultado.resolvidos > 0) await publicarMapaEnvios(cache, mapa);
 
     console.info(
       `[shipping-sync] fim buscados=${resultado.buscados} resolvidos=${resultado.resolvidos} ` +
