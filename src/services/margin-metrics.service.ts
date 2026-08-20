@@ -56,6 +56,7 @@ import {
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
 import { logisticaDoPedido } from './shipping-logistics.service.js';
+import type { EnvioInfo } from '../lib/shipping-store.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /**
@@ -185,7 +186,7 @@ export function calcularMargem(
    * shipmentId → logistic_type. Ausente = toda venda vira estoque próprio
    * (lado conservador: soma embalagem, nunca infla a margem).
    */
-  mapaLogistica: ReadonlyMap<string, string> | null = null
+  mapaLogistica: ReadonlyMap<string, EnvioInfo> | null = null
 ): ResultadoMargem {
   if (!periodoValido(periodo)) {
     return indisponivel(periodo, 'indisponivel', ['periodo_invalido']);

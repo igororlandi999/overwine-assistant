@@ -6,8 +6,13 @@ import { createSession } from '../src/lib/session.js';
 import handler from '../api/chat.js';
 // 5g: semeadura de snapshot real (mesmas funcoes usadas pela sync).
 import { writeChunk, publishManifest, type OrdersManifest } from '../src/lib/orders-store.js';
-import { publicarMapaLogistica } from '../src/lib/shipping-store.js';
+import { publicarMapaEnvios } from '../src/lib/shipping-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
+
+/** Mapa de envios a partir de pares [id, logistica] ou [id, logistica, custo]. */
+function envios(...pares: Array<[string, string] | [string, string, number]>) {
+  return new Map(pares.map(([id, lt, c]) => [id, { logisticType: lt, custoFrete: c ?? 0 }]));
+}
 
 // ── mocks minimos de Vercel req/res (padrao de orders-read.routes.test) ──
 function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; body: unknown }> = {}) {
@@ -1404,7 +1409,7 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const semMapa = contextoEnviado().result.margin as number;
 
     fetchCalls.length = 0;
-    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment']));
     await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     const comMapa = contextoEnviado().result.margin as number;
 
@@ -1419,7 +1424,7 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const semMapa = contextoEnviado().result.margin as number;
 
     fetchCalls.length = 0;
-    await publicarMapaLogistica(cache, new Map([['55501', 'xd_drop_off']]));
+    await publicarMapaEnvios(cache, envios(['55501', 'xd_drop_off']));
     await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     expect(contextoEnviado().result.margin).toBeCloseTo(semMapa, 6);
   });
@@ -1434,7 +1439,7 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     });
 
     fetchCalls.length = 0;
-    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment']));
     await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     expect(contextoEnviado().shippingCoverage.share).toBe(1);
   });
@@ -1442,7 +1447,7 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
   it('ranking por margem tambem recebe mapa e cobertura', async () => {
     const t = await comSessao();
     await semearSnapshot(pedidosComEnvio());
-    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment']));
     await chamar(bodyValido5g('qual foi o produto com maior margem ontem?'), t);
     const ctx = contextoEnviado();
     expect(ctx.query.rankBy).toBe('margin');
@@ -1453,7 +1458,7 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     // Faturamento nao depende de custo; declarar cobertura ali seria ruido.
     const t = await comSessao();
     await semearSnapshot(pedidosComEnvio());
-    await publicarMapaLogistica(cache, new Map([['55501', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment']));
     await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
     expect(contextoEnviado().shippingCoverage).toBeUndefined();
   });

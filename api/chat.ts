@@ -41,8 +41,9 @@ import {
   calcularRanking,
   type ResultadoRanking,
 } from '../src/services/product-ranking.service.js';
-import { lerMapaLogistica } from '../src/lib/shipping-store.js';
+import { lerMapaEnvios } from '../src/lib/shipping-store.js';
 import { coberturaLogistica } from '../src/services/shipping-logistics.service.js';
+import type { EnvioInfo } from '../src/lib/shipping-store.js';
 import {
   type CoberturaSnapshot,
   type ResultadoComparacao,
@@ -812,7 +813,7 @@ function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersRead
 function comCoberturaLogistica(
   ctx: Record<string, unknown>,
   pedidos: OrderSlim[],
-  mapa: ReadonlyMap<string, string> | null
+  mapa: ReadonlyMap<string, EnvioInfo> | null
 ): Record<string, unknown> {
   const c = coberturaLogistica(pedidos, mapa ?? new Map());
   return {
@@ -915,7 +916,7 @@ async function rotearConsulta(
   // pedidos, ticket e unidades não dependem dele, e a leitura extra seria
   // latência paga à toa na maioria das perguntas.
   const precisaLogistica = q.intent === 'sales_ranking' || q.metric === 'margin';
-  const mapaLogistica = precisaLogistica ? await lerMapaLogistica(cache) : null;
+  const mapaLogistica = precisaLogistica ? await lerMapaEnvios(cache) : null;
 
   // Ranking ANTES de margem: "ranking por margem" tem metric === 'margin' e
   // cairia no pipeline de margem do período, que devolve UM número agregado em

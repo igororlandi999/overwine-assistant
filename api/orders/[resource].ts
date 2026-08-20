@@ -44,7 +44,7 @@ import type { Alvo } from '../../src/lib/orders-store.js';
 import { getReadStatus, getPage } from '../../src/services/orders-read.service.js';
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
-import { lerManifesto, lerMapaLogistica } from '../../src/lib/shipping-store.js';
+import { lerManifesto, lerMapaEnvios } from '../../src/lib/shipping-store.js';
 import { calcularRanking } from '../../src/services/product-ranking.service.js';
 import { coberturaLogistica } from '../../src/services/shipping-logistics.service.js';
 
@@ -86,11 +86,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (resource === 'logistics') {
       // Agrupado por TIPO: os ~3.500 ids repetiriam a string do tipo em cada
       // entrada, triplicando o payload sem acrescentar informação.
-      const mapa = await lerMapaLogistica(cache);
+      const mapa = await lerMapaEnvios(cache);
       const manifesto = await lerManifesto(cache);
       const porTipo: Record<string, string[]> = {};
-      for (const [shipmentId, tipo] of mapa) {
-        (porTipo[tipo] ??= []).push(shipmentId);
+      for (const [shipmentId, info] of mapa) {
+        (porTipo[info.logisticType] ??= []).push(shipmentId);
       }
       for (const ids of Object.values(porTipo)) ids.sort();
       return json(res, 200, {
@@ -119,7 +119,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       if (pedidos.length === 0) return json(res, 409, { error: 'not_ready' });
 
-      const mapa = await lerMapaLogistica(cache);
+      const mapa = await lerMapaEnvios(cache);
       const r = calcularRanking(
         pedidos,
         { fromYmd: p.periodo.fromYmd, toYmd: p.periodo.toYmd },

@@ -48,8 +48,31 @@
  */
 import type { Cache } from './cache/cache.js';
 
-/** Entrada do mapa: [shipmentId, logisticType]. Tupla para economizar bytes. */
-export type EntradaLogistica = [string, string];
+/**
+ * O que sabemos de um envio.
+ *
+ * `custoFrete` é o que o VENDEDOR pagou (soma de `senders[].cost`), NÃO o preço
+ * de tabela nem o que o comprador pagou. Medido em 12 envios reais: varia por
+ * um fator de 8x dentro do próprio Full, porque depende de peso e distância e
+ * não do preço do produto. Percentual sobre a receita — que é o que o
+ * taxas.json faz — pune o produto barato e subsidia o caro.
+ *
+ * `null` = ainda não buscado. Distinto de 0, que é frete grátis para você.
+ */
+export interface EnvioInfo {
+  logisticType: string;
+  custoFrete: number | null;
+}
+
+/**
+ * Entrada serializada. Duas formas aceitas na LEITURA:
+ *   'fulfillment'            → legado, só logística (as 3.530 já gravadas)
+ *   ['fulfillment', 7.5]     → atual, com custo
+ *
+ * A escrita usa sempre a forma nova. Assim o backfill de custo acontece sem
+ * perder o que já foi resolvido e sem janela em que a margem fique sem dado.
+ */
+export type EntradaLogistica = [string, string] | [string, [string, number | null]];
 
 export interface ManifestoLogistica {
   versao: number;
@@ -102,8 +125,8 @@ export async function lerManifesto(cache: Cache): Promise<ManifestoLogistica | n
  * degrada a margem de alguns pedidos, enquanto lançar derrubaria a consulta
  * inteira.
  */
-export async function lerMapaLogistica(cache: Cache): Promise<Map<string, string>> {
-  const mapa = new Map<string, string>();
+export async function lerMapaEnvios(cache: Cache): Promise<Map<string, EnvioInfo>> {
+  const mapa = new Map<string, EnvioInfo>();
   const manifesto = await lerManifesto(cache);
   if (manifesto === null) return mapa;
 
@@ -115,9 +138,20 @@ export async function lerMapaLogistica(cache: Cache): Promise<Map<string, string
       if (!Array.isArray(entradas)) continue;
       for (const e of entradas) {
         if (!Array.isArray(e) || e.length !== 2) continue;
-        const [id, tipo] = e as [unknown, unknown];
-        if (typeof id === 'string' && id !== '' && typeof tipo === 'string' && tipo !== '') {
-          mapa.set(id, tipo);
+        const [id, valor] = e as [unknown, unknown];
+        if (typeof id !== 'string' || id === '') continue;
+        // Forma legado: só a logística.
+        if (typeof valor === 'string' && valor !== '') {
+          mapa.set(id, { logisticType: valor, custoFrete: null });
+          continue;
+        }
+        // Forma atual: [logisticType, custoFrete].
+        if (Array.isArray(valor) && typeof valor[0] === 'string' && valor[0] !== '') {
+          const c = valor[1];
+          mapa.set(id, {
+            logisticType: valor[0],
+            custoFrete: typeof c === 'number' && Number.isFinite(c) && c >= 0 ? c : null,
+          });
         }
       }
     } catch {
@@ -132,18 +166,27 @@ export async function lerMapaLogistica(cache: Cache): Promise<Map<string, string
  * chunks antigos ficam órfãos de propósito: uma leitura concorrente que já
  * pegou o manifesto anterior continua encontrando os chunks dela.
  */
-export async function publicarMapaLogistica(
+/** Só a logística, para quem não precisa do custo. */
+export async function lerMapaLogistica(cache: Cache): Promise<Map<string, string>> {
+  const cheio = await lerMapaEnvios(cache);
+  const so = new Map<string, string>();
+  for (const [id, info] of cheio) so.set(id, info.logisticType);
+  return so;
+}
+
+export async function publicarMapaEnvios(
   cache: Cache,
-  mapa: Map<string, string>,
+  mapa: Map<string, EnvioInfo>,
   agora: Date = new Date()
 ): Promise<ManifestoLogistica> {
   const anterior = await lerManifesto(cache);
   const versao = (anterior?.versao ?? 0) + 1;
 
   const entradas: EntradaLogistica[] = [...mapa.entries()]
-    .filter(([id, tipo]) => id !== '' && tipo !== '')
+    .filter(([id, info]) => id !== '' && info && info.logisticType !== '')
     // Ordem estável: o mesmo mapa produz sempre os mesmos chunks.
-    .sort((a, b) => a[0].localeCompare(b[0]));
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([id, info]) => [id, [info.logisticType, info.custoFrete]] as EntradaLogistica);
 
   const chunks: string[] = [];
   for (let i = 0; i * CHUNK_SIZE < entradas.length; i++) {

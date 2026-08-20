@@ -9,11 +9,15 @@ import {
 } from '../src/lib/orders-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import handler from '../api/orders/[resource].js';
-import { publicarMapaLogistica } from '../src/lib/shipping-store.js';
+import { publicarMapaEnvios, lerMapaEnvios, type EnvioInfo } from '../src/lib/shipping-store.js';
 import { calcularRanking } from '../src/services/product-ranking.service.js';
 import { readSnapshot } from '../src/lib/orders-store.js';
 import { getReadStatus } from '../src/services/orders-read.service.js';
-import { lerMapaLogistica } from '../src/lib/shipping-store.js';
+
+/** Mapa de envios a partir de pares [id, logistica] ou [id, logistica, custo]. */
+function envios(...pares: Array<[string, string] | [string, string, number]>) {
+  return new Map(pares.map(([id, lt, c]) => [id, { logisticType: lt, custoFrete: c ?? 0 }]));
+}
 
 // ── mocks mínimos de Vercel req/res ──
 function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown> }> = {}) {
@@ -369,9 +373,7 @@ describe('rota /api/orders/logistics', () => {
   });
 
   it('agrupa por tipo, com ids ordenados', async () => {
-    await publicarMapaLogistica(cache, new Map([
-      ['300', 'fulfillment'], ['100', 'fulfillment'], ['200', 'xd_drop_off'],
-    ]));
+    await publicarMapaEnvios(cache, envios(['300', 'fulfillment'], ['100', 'fulfillment'], ['200', 'xd_drop_off']));
     const tok = await comSessao();
     const res = mockRes();
     await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
@@ -385,7 +387,7 @@ describe('rota /api/orders/logistics', () => {
 
   it('NAO vaza id de pedido, valor, data, comprador nem endereco', async () => {
     await publicar(cache, 'ativos', 5, 10);
-    await publicarMapaLogistica(cache, new Map([['100', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['100', 'fulfillment']));
     const tok = await comSessao();
     const res = mockRes();
     await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
@@ -398,9 +400,11 @@ describe('rota /api/orders/logistics', () => {
   it('agrupar por tipo encolhe o payload de verdade', async () => {
     // Racional do formato: com ~3.500 envios, repetir a string do tipo em cada
     // entrada triplicaria o corpo sem acrescentar informacao nenhuma.
-    const mapa = new Map<string, string>();
-    for (let i = 0; i < 3500; i++) mapa.set(`5550${i}`, i % 5 === 0 ? 'xd_drop_off' : 'fulfillment');
-    await publicarMapaLogistica(cache, mapa);
+    const mapa = new Map<string, EnvioInfo>();
+    for (let i = 0; i < 3500; i++) {
+      mapa.set(`5550${i}`, { logisticType: i % 5 === 0 ? 'xd_drop_off' : 'fulfillment', custoFrete: 7.5 });
+    }
+    await publicarMapaEnvios(cache, mapa);
     const tok = await comSessao();
     const res = mockRes();
     await handler(mockReq({ query: { resource: 'logistics' }, headers: { authorization: `Bearer ${tok}` } }), res);
@@ -491,7 +495,7 @@ describe('rota /api/orders/margin', () => {
     // implementacao de margem que ignorava frete, embalagem e kits, e reportava
     // 6 pontos percentuais a mais. Se as duas divergirem de novo, quebra aqui.
     await publicarVendas();
-    await publicarMapaLogistica(cache, new Map([['900', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['900', 'fulfillment']));
 
     const b = (await pedirMargem()).json();
 
@@ -504,7 +508,7 @@ describe('rota /api/orders/margin', () => {
         oldestDate: status.oldestDate, newestDate: status.newestDate, partial: status.partial,
         lastSyncAt: status.lastSyncAt, lastResult: status.lastResult,
       },
-      { criterio: 'revenue', todos: true, mapaLogistica: await lerMapaLogistica(cache) }
+      { criterio: 'revenue', todos: true, mapaLogistica: await lerMapaEnvios(cache) }
     );
     const margemEsperada = esperado.linhas.reduce((s, l) => s + (l.margem ?? 0), 0);
     expect(b.totais.margem).toBeCloseTo(margemEsperada, 8);
@@ -514,7 +518,7 @@ describe('rota /api/orders/margin', () => {
     await publicarVendas();
     const semMapa = (await pedirMargem()).json().totais.margem;
 
-    await publicarMapaLogistica(cache, new Map([['900', 'fulfillment'], ['901', 'fulfillment']]));
+    await publicarMapaEnvios(cache, envios(['900', 'fulfillment'], ['901', 'fulfillment']));
     const comMapa = (await pedirMargem()).json().totais.margem;
 
     // 20 unidades x R$ 3,00 de embalagem que o Mercado Livre paga.
@@ -526,7 +530,7 @@ describe('rota /api/orders/margin', () => {
     const b1 = (await pedirMargem()).json();
     expect(b1.logistica).toEqual({ enviosConhecidos: 0, enviosTotal: 2, fracao: 0 });
 
-    await publicarMapaLogistica(cache, new Map([['900', 'x'], ['901', 'y']]));
+    await publicarMapaEnvios(cache, envios(['900', 'x'], ['901', 'y']));
     expect((await pedirMargem()).json().logistica.fracao).toBe(1);
   });
 

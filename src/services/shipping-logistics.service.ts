@@ -12,6 +12,7 @@
  */
 import type { OrderSlim } from './orders.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
+import type { EnvioInfo } from '../lib/shipping-store.js';
 
 /** Envios buscados por invocação. Ver `LOTE_PADRAO` para o racional. */
 export const LOTE_PADRAO = 300;
@@ -20,6 +21,8 @@ export const LOTE_MAX = 1000;
 export interface EnvioResolvido {
   shipmentId: string;
   logisticType: string;
+  /** O que o VENDEDOR pagou. null quando não deu para apurar. */
+  custoFrete: number | null;
 }
 
 export interface PendentesResultado {
@@ -50,9 +53,20 @@ function shipmentIdDoPedido(o: OrderSlim | null | undefined): string | null {
  * recentes, que são os que aparecem nas consultas do dia a dia. Assim a margem
  * melhora desde a primeira invocação, em vez de só no fim do processo.
  */
+/**
+ * Um envio é PENDENTE quando não está no mapa OU quando está sem custo.
+ *
+ * Os 3.530 envios resolvidos antes de o custo existir entram como pendentes de
+ * propósito: eles já respondem a logística, então a margem não regride enquanto
+ * o custo é preenchido, mas precisam ser revisitados uma vez.
+ */
+function precisaBuscar(info: EnvioInfo | undefined): boolean {
+  return info === undefined || info.custoFrete === null;
+}
+
 export function idsPendentes(
   pedidos: OrderSlim[],
-  mapa: ReadonlyMap<string, string>,
+  mapa: ReadonlyMap<string, EnvioInfo>,
   limite: number = LOTE_PADRAO
 ): PendentesResultado {
   const lim = Number.isFinite(limite) && limite > 0
@@ -78,8 +92,8 @@ export function idsPendentes(
     const sid = shipmentIdDoPedido(o);
     if (sid === null || vistos.has(sid)) continue;
     vistos.add(sid);
-    if (mapa.has(sid)) jaResolvidos++;
-    else pendentes.push(sid);
+    if (precisaBuscar(mapa.get(sid))) pendentes.push(sid);
+    else jaResolvidos++;
   }
 
   return {
@@ -99,16 +113,20 @@ export function idsPendentes(
  * Descartar mantém o id pendente, e a próxima rodada tenta de novo.
  */
 export function mesclarResolvidos(
-  mapa: ReadonlyMap<string, string>,
+  mapa: ReadonlyMap<string, EnvioInfo>,
   resolvidos: readonly EnvioResolvido[]
-): Map<string, string> {
+): Map<string, EnvioInfo> {
   const novo = new Map(mapa);
   for (const r of resolvidos) {
     if (!r) continue;
-    const { shipmentId, logisticType } = r;
+    const { shipmentId, logisticType, custoFrete } = r;
     if (typeof shipmentId !== 'string' || shipmentId.trim() === '') continue;
     if (typeof logisticType !== 'string' || logisticType.trim() === '') continue;
-    novo.set(shipmentId.trim(), logisticType.trim());
+    // Custo inválido vira null, e null mantém o envio pendente para a próxima
+    // rodada. Gravar 0 por engano diria "frete grátis" para sempre.
+    const c = typeof custoFrete === 'number' && Number.isFinite(custoFrete) && custoFrete >= 0
+      ? custoFrete : null;
+    novo.set(shipmentId.trim(), { logisticType: logisticType.trim(), custoFrete: c });
   }
   return novo;
 }
@@ -123,14 +141,30 @@ export function mesclarResolvidos(
  */
 export function logisticaDoPedido(
   o: OrderSlim | null | undefined,
-  mapa: ReadonlyMap<string, string> | null | undefined
+  mapa: ReadonlyMap<string, EnvioInfo> | null | undefined
 ): string | null {
   const doPedido = o?.shipping?.logistic_type;
   if (typeof doPedido === 'string' && doPedido.trim() !== '') return doPedido.trim();
   if (!mapa) return null;
   const sid = shipmentIdDoPedido(o);
   if (sid === null) return null;
-  return mapa.get(sid) ?? null;
+  return mapa.get(sid)?.logisticType ?? null;
+}
+
+/**
+ * Custo de frete REAL do pedido, ou null quando desconhecido.
+ *
+ * É por ENVIO, não por unidade: um pedido com seis garrafas paga um frete só.
+ * Quem consome precisa somar por pedido, nunca multiplicar por quantidade.
+ */
+export function freteDoPedido(
+  o: OrderSlim | null | undefined,
+  mapa: ReadonlyMap<string, EnvioInfo> | null | undefined
+): number | null {
+  if (!mapa) return null;
+  const sid = shipmentIdDoPedido(o);
+  if (sid === null) return null;
+  return mapa.get(sid)?.custoFrete ?? null;
 }
 
 export interface CoberturaLogistica {
@@ -149,7 +183,7 @@ export interface CoberturaLogistica {
  */
 export function coberturaLogistica(
   pedidos: OrderSlim[],
-  mapa: ReadonlyMap<string, string>
+  mapa: ReadonlyMap<string, EnvioInfo>
 ): CoberturaLogistica {
   const { totalDistintos, jaResolvidos } = idsPendentes(pedidos, mapa, LOTE_MAX);
   return {
@@ -169,7 +203,7 @@ export function coberturaLogistica(
 // ══════════════════════════════════════════════════════════════════════════
 
 /** Busca a logística de UM envio. `null` = não deu para resolver agora. */
-export type BuscarLogistica = (shipmentId: string) => Promise<string | null>;
+export type BuscarLogistica = (shipmentId: string) => Promise<EnvioResolvido | null>;
 
 export interface PassoResultado {
   ok: true;
@@ -206,10 +240,10 @@ export const CONCORRENCIA = 8;
  */
 export async function executarPasso(
   pedidos: OrderSlim[],
-  mapa: ReadonlyMap<string, string>,
+  mapa: ReadonlyMap<string, EnvioInfo>,
   buscar: BuscarLogistica,
   opcoes: { limite?: number; concorrencia?: number } = {}
-): Promise<{ mapa: Map<string, string>; resultado: PassoResultado }> {
+): Promise<{ mapa: Map<string, EnvioInfo>; resultado: PassoResultado }> {
   const limite = opcoes.limite ?? LOTE_PADRAO;
   const conc = Math.max(1, Math.min(opcoes.concorrencia ?? CONCORRENCIA, 32));
 
@@ -226,9 +260,12 @@ export async function executarPasso(
       if (i >= pendentes.ids.length) return;
       const id = pendentes.ids[i];
       try {
-        const tipo = await buscar(id);
-        if (typeof tipo === 'string' && tipo.trim() !== '') {
-          resolvidos.push({ shipmentId: id, logisticType: tipo });
+        const info = await buscar(id);
+        // Só conta como resolvido com logística E custo: sem o custo o envio
+        // continua pendente, e a próxima rodada tenta de novo.
+        if (info && typeof info.logisticType === 'string' && info.logisticType.trim() !== ''
+            && typeof info.custoFrete === 'number' && Number.isFinite(info.custoFrete)) {
+          resolvidos.push({ shipmentId: id, logisticType: info.logisticType, custoFrete: info.custoFrete });
         } else {
           falhas++;
         }

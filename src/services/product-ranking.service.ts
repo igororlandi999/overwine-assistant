@@ -78,6 +78,7 @@ import {
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
 import { logisticaDoPedido } from './shipping-logistics.service.js';
+import type { EnvioInfo } from '../lib/shipping-store.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
 /** Critério de ordenação do ranking. */
@@ -279,7 +280,7 @@ export interface RankingOpcoes {
    * shipmentId → logistic_type. Ausente = toda venda vira estoque próprio
    * (lado conservador: soma embalagem, nunca infla a margem).
    */
-  mapaLogistica?: ReadonlyMap<string, string> | null;
+  mapaLogistica?: ReadonlyMap<string, EnvioInfo> | null;
   /**
    * Ignora `limite` e devolve TODAS as linhas. Existe para a tabela de margem
    * do dashboard, que precisa do catálogo inteiro — o teto de RANKING_LIMITE_MAX
