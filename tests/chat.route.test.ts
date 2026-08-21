@@ -1409,7 +1409,9 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const semMapa = contextoEnviado().result.margin as number;
 
     fetchCalls.length = 0;
-    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment']));
+    // Frete real igual ao que o percentual estimava (14,4% x R$ 400 = 57,60)
+    // para ISOLAR a embalagem: sem isso o delta misturaria os dois efeitos.
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment', 57.60]));
     await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     const comMapa = contextoEnviado().result.margin as number;
 
@@ -1424,7 +1426,8 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const semMapa = contextoEnviado().result.margin as number;
 
     fetchCalls.length = 0;
-    await publicarMapaEnvios(cache, envios(['55501', 'xd_drop_off']));
+    // Frete real igual ao estimado (57,60): o que se testa aqui e a embalagem.
+    await publicarMapaEnvios(cache, envios(['55501', 'xd_drop_off', 57.60]));
     await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     expect(contextoEnviado().result.margin).toBeCloseTo(semMapa, 6);
   });
@@ -1479,6 +1482,69 @@ describe('POST /api/chat — Fase 5g (consultas historicas)', () => {
     const res = await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
     expect(res.statusCode).toBe(200);
     expect(contextoEnviado().result.margin).toBeTypeOf('number');
+  });
+
+  // ── Patch O3: cobertura de FRETE no contexto ──
+
+  it('o contexto de margem declara de onde veio o frete', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment', 18.40]));
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.shippingCost).toEqual({
+      actual: 18.40, estimatedByPercent: 0, revenueShareActual: 1,
+    });
+    // E o custo de envio da linha e o valor real, nao 14,4% de R$ 400.
+    expect(ctx.result.shippingFee).toBeCloseTo(18.40, 10);
+  });
+
+  it('sem custo de envio apurado, o contexto declara a estimativa', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.shippingCost.revenueShareActual).toBe(0);
+    expect(ctx.shippingCost.estimatedByPercent).toBeCloseTo(57.60, 2);  // 14,4% de 400
+    expect(ctx.warnings).toContain('frete_estimado');
+  });
+
+  it('ranking por margem tambem declara a cobertura de frete', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await publicarMapaEnvios(cache, envios(['55501', 'fulfillment', 18.40]));
+    await chamar(bodyValido5g('qual foi o produto com maior margem ontem?'), t);
+    expect(contextoEnviado().shippingCost.revenueShareActual).toBe(1);
+  });
+
+  it('ranking por RECEITA nao carrega cobertura de frete nem o aviso', async () => {
+    // Faturamento nao depende de frete; o bloco e o aviso seriam ruido com
+    // numero dentro, que e convite para o modelo citar o numero errado.
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('top 5 produtos por faturamento ontem'), t);
+    const ctx = contextoEnviado();
+    expect(ctx.shippingCost).toBeUndefined();
+    expect(ctx.warnings).not.toContain('frete_estimado');
+  });
+
+  it('o prompt de margem explica shippingCost', async () => {
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const sys = JSON.parse(fetchCalls[0].init.body as string).systemInstruction.parts[0].text as string;
+    expect(sys).toContain('shippingCost.revenueShareActual');
+    expect(sys).toContain('NÃO chame o frete de estimativa');
+  });
+
+  it('o prompt de margem NAO chama mais a tarifa de envio de percentual medio', async () => {
+    // Regressao: a regra antiga mandava marcar "est." no frete sempre. Com o
+    // frete real apurado, isso viraria uma ressalva falsa.
+    const t = await comSessao();
+    await semearSnapshot(pedidosComEnvio());
+    await chamar(bodyValido5g('qual foi a margem de ontem?'), t);
+    const sys = JSON.parse(fetchCalls[0].init.body as string).systemInstruction.parts[0].text as string;
+    expect(sys).not.toContain('as tarifas de ML e envio são percentuais médios');
   });
 
   it('o prompt instrui a tratar margem como piso quando a cobertura e parcial', async () => {

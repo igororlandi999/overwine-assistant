@@ -311,6 +311,15 @@ describe('getCustoProduto', () => {
 describe('custoUnitarioVendido', () => {
   const LOG = { frete: 1.49, embalagem: 3 };
 
+  it('TRAVA: o frete do custos.json e ZERO — ele vem do custo real do envio', () => {
+    // Patch O3. Enquanto valia 1,49, o frete era cobrado DUAS vezes: uma por
+    // garrafa aqui dentro e outra como 14,4% da receita no taxas.json. Hoje o
+    // frete e o valor real do envio (mapa ship:logi), rateado por receita em
+    // margin-metrics e product-ranking. Qualquer valor diferente de zero neste
+    // campo volta a somar frete por cima do frete real.
+    expect(carregarCustos().config.logistica.frete).toBe(0);
+  });
+
   it('venda propria soma frete E embalagem', () => {
     expect(custoUnitarioVendido(12.8, 'drop_off', LOG)).toBeCloseTo(17.29, 2);
   });

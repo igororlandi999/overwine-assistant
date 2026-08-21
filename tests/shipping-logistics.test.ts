@@ -16,6 +16,8 @@ import {
   coberturaLogistica,
   executarPasso,
   freteDoPedido,
+  montarBaseRateioFrete,
+  freteDoItem,
   LOTE_PADRAO,
   LOTE_MAX,
   CONCORRENCIA,
@@ -565,5 +567,126 @@ describe('custo de frete por envio', () => {
     // O frete NAO acompanha o valor do pedido: o de R$ 263,88 paga MENOS que o
     // de R$ 45,43, em reais absolutos e em percentual.
     expect(15.00).toBeLessThan(16.65);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+describe('rateio do frete real entre os itens do envio', () => {
+  /** Pedido com itens de verdade, para o rateio ter denominador. */
+  function pedItens(
+    shipId: number | string | null,
+    itens: Array<[number, number]>,          // [preco, qtd]
+    over: Partial<OrderSlim> = {}
+  ): OrderSlim {
+    return ped({
+      shipId,
+      order_items: itens.map(([preco, qtd], i) => ({
+        quantity: qtd,
+        unit_price: preco,
+        item: { id: 'MLB' + i, title: 'Vinho ' + i, seller_sku: 'S' + i, variation_id: null },
+      })),
+      ...over,
+    } as Partial<OrderSlim> & { shipId?: number | string | null });
+  }
+
+  it('base soma receita e unidades por envio', () => {
+    const base = montarBaseRateioFrete([pedItens(700, [[40, 2], [10, 1]])]);
+    expect(base.get('700')).toEqual({ receita: 90, unidades: 3 });
+  });
+
+  it('base IGNORA pedido cancelado: o frete dele nao entra em conta nenhuma', () => {
+    const base = montarBaseRateioFrete([pedItens(700, [[40, 2]], { status: 'cancelled' })]);
+    expect(base.size).toBe(0);
+  });
+
+  it('base ignora pedido sem envio identificado', () => {
+    const base = montarBaseRateioFrete([pedItens(null, [[40, 2]])]);
+    expect(base.size).toBe(0);
+  });
+
+  it('rateia por RECEITA entre os itens do mesmo envio', () => {
+    const o = pedItens(700, [[80, 1], [20, 1]]);          // 80 e 20 de 100
+    const mapa = envios(['700', 'fulfillment', 30]);
+    const base = montarBaseRateioFrete([o]);
+    expect(freteDoItem(o, mapa, base, 80, 1)).toBeCloseTo(24, 10);
+    expect(freteDoItem(o, mapa, base, 20, 1)).toBeCloseTo(6, 10);
+  });
+
+  it('a soma das fatias de um envio da EXATAMENTE o frete pago', () => {
+    const o = pedItens(700, [[33.33, 3], [12.5, 1], [7, 2]]);
+    const mapa = envios(['700', 'drop_off', 27.41]);
+    const base = montarBaseRateioFrete([o]);
+    const soma = (o.order_items ?? []).reduce(
+      (s, oi) => s + (freteDoItem(o, mapa, base, (oi.unit_price ?? 0) * (oi.quantity ?? 1), oi.quantity ?? 1) ?? 0),
+      0
+    );
+    expect(soma).toBeCloseTo(27.41, 10);
+  });
+
+  it('PACK: dois pedidos no mesmo envio dividem UM frete, nao pagam dois', () => {
+    // No Mercado Livre pedidos do mesmo carrinho compartilham shipping.id. Se o
+    // rateio fosse por pedido, o frete apareceria duas vezes na margem.
+    const a = pedItens(700, [[60, 1]], { id: 1 } as Partial<OrderSlim>);
+    const b = pedItens(700, [[40, 1]], { id: 2 } as Partial<OrderSlim>);
+    const mapa = envios(['700', 'fulfillment', 20]);
+    const base = montarBaseRateioFrete([a, b]);
+    expect(base.get('700')).toEqual({ receita: 100, unidades: 2 });
+    const total = (freteDoItem(a, mapa, base, 60, 1) ?? 0) + (freteDoItem(b, mapa, base, 40, 1) ?? 0);
+    expect(total).toBeCloseTo(20, 10);
+  });
+
+  it('receita zero no envio: rateia por UNIDADES', () => {
+    const o = pedItens(700, [[0, 3], [0, 1]]);
+    const mapa = envios(['700', 'drop_off', 8]);
+    const base = montarBaseRateioFrete([o]);
+    expect(freteDoItem(o, mapa, base, 0, 3)).toBeCloseTo(6, 10);
+    expect(freteDoItem(o, mapa, base, 0, 1)).toBeCloseTo(2, 10);
+  });
+
+  it('sem receita e sem unidades: zero, nunca divisao por zero', () => {
+    const o = pedItens(700, [[0, 0]]);
+    const mapa = envios(['700', 'drop_off', 8]);
+    expect(freteDoItem(o, mapa, montarBaseRateioFrete([o]), 0, 0)).toBe(0);
+  });
+
+  it('envio sem custo apurado devolve null — que NAO e zero', () => {
+    // null manda o chamador cair no percentual medio e DECLARAR a estimativa.
+    // Zero diria "frete gratis" e inflaria a margem.
+    const o = pedItens(700, [[40, 1]]);
+    const mapa = envios(['700', 'fulfillment', null]);
+    expect(freteDoItem(o, mapa, montarBaseRateioFrete([o]), 40, 1)).toBeNull();
+  });
+
+  it('frete gratis APURADO e zero, nao null', () => {
+    const o = pedItens(700, [[40, 1]]);
+    const mapa = envios(['700', 'fulfillment', 0]);
+    expect(freteDoItem(o, mapa, montarBaseRateioFrete([o]), 40, 1)).toBe(0);
+  });
+
+  it('envio ausente do mapa devolve null', () => {
+    const o = pedItens(700, [[40, 1]]);
+    expect(freteDoItem(o, envios(['999', 'fulfillment', 10]), montarBaseRateioFrete([o]), 40, 1)).toBeNull();
+  });
+
+  it('sem mapa devolve null', () => {
+    const o = pedItens(700, [[40, 1]]);
+    expect(freteDoItem(o, null, montarBaseRateioFrete([o]), 40, 1)).toBeNull();
+  });
+
+  it('envio fora da base devolve null em vez do frete inteiro', () => {
+    // Base montada com outro conjunto de pedidos. Atribuir o frete inteiro a
+    // este item multiplicaria o custo pelo numero de itens do envio.
+    const o = pedItens(700, [[40, 1]]);
+    const mapa = envios(['700', 'fulfillment', 10]);
+    expect(freteDoItem(o, mapa, new Map(), 40, 1)).toBeNull();
+  });
+
+  it('preco negativo nao vira peso negativo', () => {
+    const o = pedItens(700, [[-5, 1], [50, 1]]);
+    const mapa = envios(['700', 'drop_off', 10]);
+    const base = montarBaseRateioFrete([o]);
+    expect(base.get('700')!.receita).toBe(50);
+    expect(freteDoItem(o, mapa, base, -5, 1)).toBe(0);
+    expect(freteDoItem(o, mapa, base, 50, 1)).toBeCloseTo(10, 10);
   });
 });

@@ -518,11 +518,27 @@ describe('rota /api/orders/margin', () => {
     await publicarVendas();
     const semMapa = (await pedirMargem()).json().totais.margem;
 
-    await publicarMapaEnvios(cache, envios(['900', 'fulfillment'], ['901', 'fulfillment']));
+    // Frete real igual ao que o percentual estimava (14,4% de R$ 400 e de
+    // R$ 300) para ISOLAR a embalagem no delta.
+    await publicarMapaEnvios(cache, envios(['900', 'fulfillment', 57.60], ['901', 'fulfillment', 43.20]));
     const comMapa = (await pedirMargem()).json().totais.margem;
 
     // 20 unidades x R$ 3,00 de embalagem que o Mercado Livre paga.
     expect(comMapa - semMapa).toBeCloseTo(60, 2);
+  });
+
+  it('declara de onde veio o frete, para a tela nao rotular apuracao como estimativa', async () => {
+    await publicarVendas();
+    const semMapa = (await pedirMargem()).json();
+    expect(semMapa.frete.fracaoReceitaReal).toBe(0);
+    expect(semMapa.frete.real).toBe(0);
+    expect(semMapa.frete.estimado).toBeCloseTo(100.80, 2);   // 14,4% de 700
+
+    await publicarMapaEnvios(cache, envios(['900', 'fulfillment', 15], ['901', 'fulfillment', 9]));
+    const comMapa = (await pedirMargem()).json();
+    expect(comMapa.frete.fracaoReceitaReal).toBe(1);
+    expect(comMapa.frete.real).toBeCloseTo(24, 2);
+    expect(comMapa.totais.tarifaEnvio).toBeCloseTo(24, 2);
   });
 
   it('declara a cobertura de logistica para a tela poder avisar', async () => {

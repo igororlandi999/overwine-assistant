@@ -135,6 +135,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       const somar = (f: (l: typeof r.linhas[number]) => number) => r.linhas.reduce((s, l) => s + f(l), 0);
       const tarifaML = somar(l => l.tarifaML ?? 0);
+      // Desde o Patch O3 isto NÃO é mais um percentual: é o frete real do envio
+      // rateado por receita, com o percentual médio só onde o envio ainda não
+      // teve custo apurado. A divisão entre os dois vai em `frete`, para a tela
+      // não rotular como estimativa um número que foi apurado.
       const tarifaEnvio = somar(l => l.tarifaEnvio ?? 0);
       const custoTotal = somar(l => l.custoTotal ?? 0);
       // Margem só das linhas com custo INTEGRALMENTE conhecido: somar as demais
@@ -186,6 +190,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           enviosConhecidos: cobLog.resolvidos,
           enviosTotal: cobLog.totalDistintos,
           fracao: cobLog.fracao,
+        },
+        frete: {
+          real: r.frete.real,
+          estimado: r.frete.estimado,
+          fracaoReceitaReal: r.frete.fracaoReceitaReal,
         },
         // A tela subtrai publicidade por cima: o backend não a conhece.
         antesDePublicidade: true,

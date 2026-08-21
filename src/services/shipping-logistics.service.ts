@@ -167,6 +167,99 @@ export function freteDoPedido(
   return mapa.get(sid)?.custoFrete ?? null;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// RATEIO DO FRETE REAL ENTRE OS ITENS DO ENVIO
+//
+// O frete é pago por ENVIO, e a margem é apurada por ITEM. Um pedido com três
+// produtos diferentes paga um frete só, e esse frete precisa ser dividido entre
+// os três — senão cada item carregaria o frete inteiro e a margem do pedido
+// sairia com o frete contado três vezes.
+//
+// O critério é RECEITA (unit_price × quantity), não quantidade: o rateio por
+// receita mantém o percentual de frete comparável entre linhas de preço muito
+// diferente, e é o mesmo critério que o dashboard já usa para ratear
+// publicidade. Quando a receita do envio é zero (brinde, item a R$ 0), o rateio
+// cai para UNIDADES; quando nem isso existe, o item recebe zero.
+//
+// A base é montada sobre TODOS os pedidos que contam como venda, sem filtro de
+// período. Isso importa quando um envio atravessa a borda do período: cada lado
+// recebe a fatia proporcional do frete, em vez de um lado pagar o frete inteiro.
+//
+// Vale também para PACK: no Mercado Livre dois pedidos do mesmo carrinho
+// compartilham shipping.id. Como a base é por shipmentId e não por pedido, a
+// soma das fatias de todos os itens de todos os pedidos daquele envio dá
+// exatamente o frete pago — nunca o dobro.
+// ══════════════════════════════════════════════════════════════════════════
+
+/** Denominador do rateio de um envio. */
+export interface BaseEnvio {
+  /** Σ unit_price × quantity dos itens que contam como venda. */
+  receita: number;
+  /** Σ quantity dos mesmos itens. Só usado quando a receita é 0. */
+  unidades: number;
+}
+
+/**
+ * Denominador por envio. Percorre os pedidos UMA vez; o chamador monta a base
+ * antes do laço de cálculo e a reaproveita para todos os itens.
+ */
+export function montarBaseRateioFrete(
+  pedidos: readonly OrderSlim[]
+): Map<string, BaseEnvio> {
+  const base = new Map<string, BaseEnvio>();
+  for (const o of pedidos) {
+    if (!o || !contaComoVenda(o.status)) continue;
+    const sid = shipmentIdDoPedido(o);
+    if (sid === null) continue;
+    let b = base.get(sid);
+    if (!b) { b = { receita: 0, unidades: 0 }; base.set(sid, b); }
+    for (const oi of o.order_items ?? []) {
+      const qtd = oi?.quantity ?? 1;
+      // Preço negativo não existe em pedido do ML; se aparecer, é ruído e não
+      // pode virar peso negativo — o item ganharia frete NEGATIVO e inflaria a
+      // margem, exatamente o erro que este módulo existe para não cometer.
+      b.receita += Math.max(0, (oi?.unit_price ?? 0) * qtd);
+      b.unidades += Math.max(0, qtd);
+    }
+  }
+  return base;
+}
+
+/**
+ * Fatia do frete REAL que cabe a um item, ou `null` quando não dá para apurar.
+ *
+ * `null` NÃO é zero: significa "o custo real deste envio ainda não é conhecido",
+ * e o chamador deve cair no percentual médio do taxas.json e DECLARAR que
+ * estimou. Devolver zero diria "frete grátis" e inflaria a margem.
+ */
+export function freteDoItem(
+  o: OrderSlim | null | undefined,
+  mapa: ReadonlyMap<string, EnvioInfo> | null | undefined,
+  base: ReadonlyMap<string, BaseEnvio> | null | undefined,
+  receitaItem: number,
+  unidadesItem: number
+): number | null {
+  const custo = freteDoPedido(o, mapa);
+  if (custo === null) return null;
+  if (custo === 0) return 0;              // frete grátis apurado, não ausência
+
+  const sid = shipmentIdDoPedido(o);
+  if (sid === null) return null;
+  const b = base?.get(sid);
+  // Envio fora da base = o chamador montou a base com outro conjunto de
+  // pedidos. Estimar pelo percentual é melhor que atribuir o frete inteiro a
+  // este item, e a estimativa fica declarada no resultado.
+  if (!b) return null;
+
+  const rItem = Math.max(0, receitaItem);
+  if (b.receita > 0) return custo * (rItem / b.receita);
+
+  const uItem = Math.max(0, unidadesItem);
+  if (b.unidades > 0) return custo * (uItem / b.unidades);
+
+  return 0;
+}
+
 export interface CoberturaLogistica {
   /** Envios distintos em pedidos que contam como venda. */
   totalDistintos: number;

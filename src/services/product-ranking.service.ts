@@ -61,9 +61,17 @@
  *    janela devolve `disponivel: false` com `linhas: []` — nunca zeros que
  *    possam ser lidos como "não vendemos nada".
  *
- * 9. TARIFAS: percentuais fixos de config/taxas.json, médias de planilha e não
- *    fees reais da API do ML. Por isso todo resultado sai com `estimado: true`
- *    e `antesDePublicidade: true`.
+ * 9. TARIFA ML: percentual fixo de config/taxas.json, média de planilha e não
+ *    fee real da API. Por isso todo resultado sai com `estimado: true` e
+ *    `antesDePublicidade: true`.
+ *
+ * 10. FRETE: custo REAL do envio (mapa ship:logi), rateado por receita entre os
+ *    itens do envio — o mesmo critério de margin-metrics, para as duas contas
+ *    não divergirem. O percentual taxaEnv só entra como FALLBACK no envio ainda
+ *    sem custo apurado, e a fatia estimada é declarada em `frete`. Isso IMPORTA
+ *    para o ranking por margem: o frete real varia por peso e distância, não
+ *    por preço, então o percentual subsidiava o produto caro e punia o barato —
+ *    e era exatamente a ordenação que saía errada.
  */
 import { brtStartOfDay, brtEndOfDay, dentroDoPeriodo } from '../lib/datas-brt.js';
 import type { OrderSlim } from './orders.service.js';
@@ -77,7 +85,11 @@ import {
 } from './sales-metrics.service.js';
 import { getCustoProduto, custoUnitarioVendido, itemSKU } from './products.service.js';
 import { contaComoVenda } from '../lib/status-venda.js';
-import { logisticaDoPedido } from './shipping-logistics.service.js';
+import {
+  logisticaDoPedido,
+  montarBaseRateioFrete,
+  freteDoItem,
+} from './shipping-logistics.service.js';
 import type { EnvioInfo } from '../lib/shipping-store.js';
 import taxasConfig from '../config/taxas.json' with { type: 'json' };
 
@@ -93,6 +105,8 @@ export const RANKING_LIMITE_MAX = 20;
 export const WARN_MARGEM_COBERTURA_PARCIAL = 'ranking_margem_cobertura_parcial';
 export const WARN_CUSTO_PARCIAL = 'custo_parcial';
 export const WARN_ANTES_DE_PUBLICIDADE = 'antes_de_publicidade';
+/** Parte do frete veio do percentual médio, não do custo real do envio. */
+export const WARN_FRETE_ESTIMADO = 'frete_estimado';
 
 /** Quanto do custo da linha é conhecido. */
 export type CustoCobertura = 'total' | 'parcial' | 'ausente';
@@ -122,6 +136,10 @@ export interface RankingLinha {
   /** null quando custoCobertura === 'ausente'. */
   custoTotal: number | null;
   tarifaML: number | null;
+  /**
+   * Custo de envio da parcela com custo conhecido: frete REAL rateado onde ele
+   * é conhecido, percentual médio onde ainda não é (convenção 10).
+   */
   tarifaEnvio: number | null;
   /** receitaComCusto − tarifaML − tarifaEnvio − custoTotal. null se ausente. */
   margem: number | null;
@@ -139,6 +157,20 @@ export interface RankingSemCusto {
   fracaoReceita: number;
   /** Títulos distintos sem regra de custo, para o usuário cadastrá-los. */
   titulos: string[];
+}
+
+/**
+ * Quanto do custo de envio veio do valor REAL e quanto veio do percentual.
+ * Mesma forma de margin-metrics — duas definições diferentes de "cobertura de
+ * frete" no mesmo sistema seria repetir o erro de `!== 'cancelled'`.
+ */
+export interface CoberturaFrete {
+  real: number;
+  estimado: number;
+  receitaReal: number;
+  receitaEstimada: number;
+  /** 0..1 — fração da receita com frete real. 1 = nada estimado. */
+  fracaoReceitaReal: number;
 }
 
 export interface ResultadoRanking {
@@ -160,6 +192,8 @@ export interface ResultadoRanking {
     skusDistintos: number;
   };
   semCusto: RankingSemCusto;
+  /** Divisão do custo de envio entre frete real e percentual médio. */
+  frete: CoberturaFrete;
   /**
    * Preenchido SOMENTE quando criterio === 'margin'. Diz quanto do período
    * ficou de fora da classificação por falta de custo (ver convenção 6).
@@ -178,6 +212,14 @@ export interface ResultadoRanking {
 }
 
 const PREFIXO_SEM_SKU = 'sem-sku-';
+
+const FRETE_VAZIO: CoberturaFrete = {
+  real: 0,
+  estimado: 0,
+  receitaReal: 0,
+  receitaEstimada: 0,
+  fracaoReceitaReal: 1,
+};
 
 const SEM_CUSTO_VAZIO: RankingSemCusto = {
   skus: 0,
@@ -209,6 +251,12 @@ interface Acc {
   unidadesComCusto: number;
   receitaComCusto: number;
   custoTotal: number;
+  /** Frete real rateado dos itens com custo conhecido. */
+  freteReal: number;
+  /** Frete estimado pelo percentual, idem. */
+  freteEstimado: number;
+  /** Receita com custo conhecido cujo frete saiu do valor real. */
+  receitaFreteReal: number;
   unidadesSemCusto: number;
   receitaSemCusto: number;
 }
@@ -225,6 +273,9 @@ function novoAcc(sku: string, semSku: boolean): Acc {
     unidadesComCusto: 0,
     receitaComCusto: 0,
     custoTotal: 0,
+    freteReal: 0,
+    freteEstimado: 0,
+    receitaFreteReal: 0,
     unidadesSemCusto: 0,
     receitaSemCusto: 0,
   };
@@ -265,6 +316,7 @@ function indisponivel(
     linhas: [],
     totais: { receitaProdutos: 0, unidades: 0, skusDistintos: 0 },
     semCusto: SEM_CUSTO_VAZIO,
+    frete: FRETE_VAZIO,
     margemCobertura: null,
     antesDePublicidade: true,
     estimado: true,
@@ -319,6 +371,10 @@ export function calcularRanking(
 
   const grupos = new Map<string, Acc>();
   const titulosSemCusto = new Set<string>();
+
+  // Denominador do rateio de frete: montado UMA vez, sobre o array inteiro
+  // (ver a nota de RATEIO em shipping-logistics.service).
+  const baseFrete = montarBaseRateioFrete(orders);
 
   for (const o of orders) {
     if (!o || !contaComoVenda(o.status)) continue;
@@ -375,6 +431,17 @@ export function calcularRanking(
       g.unidadesComCusto += qtd;
       g.receitaComCusto += receita;
       g.custoTotal += custoUn * qtd;
+
+      // Frete REAL do envio rateado por receita (convenção 10). null = envio
+      // sem custo apurado: cai no percentual médio, e a fatia estimada é
+      // declarada em `frete` para a resposta não vender média como apuração.
+      const freteItem = freteDoItem(o, opcoes.mapaLogistica ?? null, baseFrete, receita, qtd);
+      if (freteItem !== null) {
+        g.freteReal += freteItem;
+        g.receitaFreteReal += receita;
+      } else {
+        g.freteEstimado += receita * taxas.taxaEnv;
+      }
     }
   }
 
@@ -386,6 +453,7 @@ export function calcularRanking(
   let semCustoReceita = 0;
   let semCustoUnidades = 0;
   let receitaComCustoTotal = 0;
+  const frete: CoberturaFrete = { real: 0, estimado: 0, receitaReal: 0, receitaEstimada: 0, fracaoReceitaReal: 1 };
 
   for (const g of grupos.values()) {
     totalReceita += g.receitaProdutos;
@@ -404,9 +472,16 @@ export function calcularRanking(
       receitaComCustoTotal += g.receitaComCusto;
     }
 
+    frete.real += g.freteReal;
+    frete.estimado += g.freteEstimado;
+    frete.receitaReal += g.receitaFreteReal;
+    frete.receitaEstimada += g.receitaComCusto - g.receitaFreteReal;
+
     const temCusto = custoCobertura !== 'ausente';
     const tML = temCusto ? g.receitaComCusto * taxas.taxaML : null;
-    const tEnv = temCusto ? g.receitaComCusto * taxas.taxaEnv : null;
+    // Já acumulado item a item no laço: real onde o envio é conhecido,
+    // percentual onde não é. Recalcular por percentual aqui apagaria o rateio.
+    const tEnv = temCusto ? g.freteReal + g.freteEstimado : null;
     const margem = temCusto
       ? g.receitaComCusto - (tML as number) - (tEnv as number) - g.custoTotal
       : null;
@@ -453,6 +528,10 @@ export function calcularRanking(
   if (linhas.length === 0) warnings.push(WARN_SEM_DADOS_NO_PERIODO);
   if (semCustoSkus > 0) warnings.push(WARN_CUSTO_PARCIAL);
 
+  const receitaFrete = frete.receitaReal + frete.receitaEstimada;
+  frete.fracaoReceitaReal = receitaFrete > 0 ? frete.receitaReal / receitaFrete : 1;
+  if (frete.receitaEstimada > 0) warnings.push(WARN_FRETE_ESTIMADO);
+
   let margemCobertura: ResultadoRanking['margemCobertura'] = null;
   if (criterio === 'margin') {
     const excluidos = linhas.length - elegiveis.length;
@@ -483,6 +562,7 @@ export function calcularRanking(
       fracaoReceita: totalReceita > 0 ? semCustoReceita / totalReceita : 0,
       titulos: [...titulosSemCusto].sort(),
     },
+    frete,
     margemCobertura,
     antesDePublicidade: true,
     estimado: true,

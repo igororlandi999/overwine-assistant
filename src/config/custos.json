@@ -4,8 +4,8 @@
   "moeda": "BRL",
   "fonte": "proprietario_2026_08",
   "logistica": {
-    "$comment": "Frete incide em toda venda. Embalagem incide SOMENTE em venda por estoque próprio — no Full o Mercado Livre embala, então não há custo de embalagem por unidade. A decisão por pedido usa shipping.logistic_type.",
-    "frete": 1.49,
+    "$comment": "ZERADO EM 20/08/2026 (Patch O3). O frete NÃO é mais um valor por garrafa neste arquivo: ele passou a ser o custo REAL do envio, lido de GET /shipments/{id} e guardado no mapa ship:logi (ver lib/shipping-store.ts), rateado por receita entre os itens do envio. Os R$ 1,49 eram média de planilha e conviviam com a taxaEnv de 14,4% do taxas.json — o mesmo frete estava sendo cobrado DUAS vezes, uma por garrafa dentro do custo e outra por percentual sobre a receita. Manter o campo em 0 preserva o schema e permite reativar a média caso o mapa de envios seja descartado; qualquer valor diferente de 0 volta a somar frete por cima do frete real. Embalagem continua aqui: incide SOMENTE em venda por estoque próprio — no Full o Mercado Livre embala — e UMA vez por venda, mesmo em kit. A decisão por pedido usa shipping.logistic_type.",
+    "frete": 0,
     "embalagem": 3.00
   },
   "regras": [

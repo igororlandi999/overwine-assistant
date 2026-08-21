@@ -7,17 +7,22 @@ import {
   WARN_CUSTO_PARCIAL,
   WARN_ANTES_DE_PUBLICIDADE,
   WARN_MARGEM_COBERTURA_PARCIAL,
+  WARN_FRETE_ESTIMADO,
 } from '../src/services/product-ranking.service.js';
 import { calcularMargem } from '../src/services/margin-metrics.service.js';
 import { WARN_SEM_DADOS_NO_PERIODO } from '../src/services/sales-metrics.service.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import type { CoberturaSnapshot } from '../src/services/sales-metrics.service.js';
+import type { EnvioInfo } from '../src/lib/shipping-store.js';
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
-// Custos vigentes (custos.json v2), com frete 1,49 e embalagem 3,00:
-//   arcos_750       12.80  -> proprio 17.29 | full 14.29
-//   ouro_meu_base   13.78  -> proprio 18.27 | full 15.27
-// Taxas: ML 14,8% + envio 14,4% sobre a receita de produtos.
+// Custos vigentes (custos.json v3, Patch O3: frete ZERADO no custos.json —
+// ele passou a ser o custo real do envio). Embalagem 3,00, so em venda propria:
+//   arcos_750       12.80  -> proprio 15.80 | full 12.80
+//   ouro_meu_base   13.78  -> proprio 16.78 | full 13.78
+// Tarifa ML: 14,8% da receita de produtos.
+// Frete: custo real do envio rateado por receita; sem mapa de envios cai no
+// percentual taxaEnv de 14,4% e o resultado declara isso em `frete`.
 const TAXAS = { taxaML: 0.148, taxaEnv: 0.144 };
 
 const COBERTURA: CoberturaSnapshot = {
@@ -258,7 +263,7 @@ describe('calcularRanking — custo desconhecido NUNCA vira zero', () => {
     expect(l.receitaProdutos).toBe(100);   // total real
     expect(l.receitaComCusto).toBe(40);    // base da margem
     expect(l.unidadesComCusto).toBe(1);
-    expect(l.custoTotal).toBeCloseTo(17.29, 10);
+    expect(l.custoTotal).toBeCloseTo(15.80, 10);
     // margemPct usa receitaComCusto, nao receitaProdutos.
     expect(l.margemPct).toBeCloseTo((l.margem as number) / 40, 10);
   });
@@ -280,8 +285,8 @@ describe('calcularRanking — ranking por margem', () => {
     expect(l.receitaComCusto).toBe(80);
     expect(l.tarifaML).toBeCloseTo(80 * 0.148, 10);
     expect(l.tarifaEnvio).toBeCloseTo(80 * 0.144, 10);
-    expect(l.custoTotal).toBeCloseTo(17.29 * 2, 10);   // 12.80 + 1.49 + 3.00
-    expect(l.margem).toBeCloseTo(80 - 80 * 0.148 - 80 * 0.144 - 34.58, 10);
+    expect(l.custoTotal).toBeCloseTo(15.80 * 2, 10);   // 12.80 + 3.00
+    expect(l.margem).toBeCloseTo(80 - 80 * 0.148 - 80 * 0.144 - 31.60, 10);
   });
 
   it('venda Full nao soma embalagem', () => {
@@ -289,7 +294,7 @@ describe('calcularRanking — ranking por margem', () => {
       [pedido([{ titulo: ARCOS, preco: 40, qtd: 1, sku: 'ARC' }], { logisticType: 'fulfillment' })],
       { criterio: 'margin' }
     );
-    expect(r.linhas[0].custoTotal).toBeCloseTo(14.29, 10); // 12.80 + 1.49
+    expect(r.linhas[0].custoTotal).toBeCloseTo(12.80, 10); // so o produto
   });
 
   it('margem negativa e resultado legitimo e ordena por ultimo', () => {
@@ -475,16 +480,16 @@ describe('calcularRanking — kits', () => {
   const KIT6 = 'Kit Com 6 Un Vinho Ouro Meu Tinto Seco 750ml';
 
   it('kit de 6 e custeado com SEIS garrafas, nao uma', () => {
-    // (13.78 + 1.49) x 6 + 3.00 = 94.62 por kit vendido; 2 kits = 189.24
+    // 13.78 x 6 + 3.00 = 85.68 por kit vendido; 2 kits = 171.36
     const r = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])], { criterio: 'margin' });
-    expect(r.linhas[0].custoTotal).toBeCloseTo(189.24, 2);
+    expect(r.linhas[0].custoTotal).toBeCloseTo(171.36, 2);
   });
 
   it('REGRESSAO: a margem do kit nao e mais inflada', () => {
-    // Antes desta correcao o kit custava 18.27 por venda (uma garrafa), e a
-    // margem saia ~R$ 152 maior a cada dois kits.
+    // Antes desta correcao o kit custava uma garrafa por venda (16.78), e a
+    // margem saia ~R$ 138 maior a cada dois kits.
     const kit = rank([pedido([{ titulo: KIT6, preco: 240, qtd: 2, sku: 'K6' }])], { criterio: 'margin' });
-    const comoUmaGarrafa = 18.27 * 2;
+    const comoUmaGarrafa = 16.78 * 2;
     expect(kit.linhas[0].custoTotal).toBeGreaterThan(comoUmaGarrafa * 5);
   });
 
@@ -504,7 +509,7 @@ describe('calcularRanking — kits', () => {
     const r = rank([pedido([
       { titulo: 'Vinho Tinto Arcos do Convento Bag In Box 5 Litros', preco: 140, qtd: 1, sku: 'BIB' },
     ])], { criterio: 'margin' });
-    expect(r.linhas[0].custoTotal).toBeCloseTo(56.37, 2);
+    expect(r.linhas[0].custoTotal).toBeCloseTo(54.88, 2);  // 51.88 + 3.00
   });
 
   it('unidades continuam contando VENDAS, nao garrafas', () => {
@@ -558,5 +563,119 @@ describe('calcularRanking — label representativo', () => {
       pedido([{ titulo: 'Vinho Real', preco: 10, qtd: 1, sku: 'S', id: 'MLB2' }]),
     ]);
     expect(r.linhas[0].label).toBe('Vinho Real');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// FRETE REAL POR ENVIO (Patch O3) — convencao 10
+// ══════════════════════════════════════════════════════════════════════════
+describe('calcularRanking — frete real por envio', () => {
+  function mapa(...pares: Array<[string, string, number | null]>) {
+    return new Map<string, EnvioInfo>(
+      pares.map(([id, lt, c]) => [id, { logisticType: lt, custoFrete: c }])
+    );
+  }
+
+  function pedEnvio(
+    shipId: number,
+    itens: Array<{ titulo: string; preco: number; qtd: number; sku?: string; id?: string }>,
+    logisticType = 'fulfillment'
+  ): OrderSlim {
+    const o = pedido(itens, { logisticType });
+    (o as { shipping: { id: number; logistic_type: string } }).shipping = {
+      id: shipId, logistic_type: logisticType,
+    };
+    return o;
+  }
+
+  it('tarifaEnvio da linha e o frete REAL, nao 14,4% da receita', () => {
+    const r = rank([pedEnvio(700, [{ titulo: ARCOS, preco: 40, qtd: 2, sku: '21002' }])], {
+      criterio: 'margin',
+      mapaLogistica: mapa(['700', 'fulfillment', 18.40]),
+    });
+    expect(r.linhas[0].tarifaEnvio).toBeCloseTo(18.40, 10);   // seriam 11,52
+    expect(r.frete.fracaoReceitaReal).toBe(1);
+    expect(r.warnings).not.toContain(WARN_FRETE_ESTIMADO);
+  });
+
+  it('a margem da linha usa o frete real', () => {
+    const r = rank([pedEnvio(700, [{ titulo: ARCOS, preco: 40, qtd: 2, sku: '21002' }])], {
+      criterio: 'margin',
+      mapaLogistica: mapa(['700', 'fulfillment', 18.40]),
+    });
+    const l = r.linhas[0];
+    // 80 - 11,84 (ML) - 18,40 (frete real) - 25,60 (12,80 x 2, Full sem embalagem)
+    expect(l.margem).toBeCloseTo(24.16, 10);
+    expect(l.margem).toBeCloseTo(l.receitaComCusto - l.tarifaML! - l.tarifaEnvio! - l.custoTotal!, 10);
+  });
+
+  it('pedido com dois produtos: o frete e rateado, nao duplicado', () => {
+    const r = rank([pedEnvio(700, [
+      { titulo: ARCOS, preco: 80, qtd: 1, sku: '21002', id: 'MLB1' },
+      { titulo: OURO, preco: 20, qtd: 1, sku: '25001', id: 'MLB2' },
+    ])], { criterio: 'margin', mapaLogistica: mapa(['700', 'fulfillment', 30]) });
+    const soma = r.linhas.reduce((s, l) => s + (l.tarifaEnvio ?? 0), 0);
+    expect(soma).toBeCloseTo(30, 10);
+    expect(r.linhas.find(l => l.sku === '21002')!.tarifaEnvio).toBeCloseTo(24, 10);
+    expect(r.linhas.find(l => l.sku === '25001')!.tarifaEnvio).toBeCloseTo(6, 10);
+  });
+
+  it('envio sem custo apurado cai no percentual e o resultado DECLARA', () => {
+    const r = rank([pedEnvio(700, [{ titulo: ARCOS, preco: 40, qtd: 2, sku: '21002' }])], {
+      criterio: 'margin',
+      mapaLogistica: mapa(['700', 'fulfillment', null]),
+    });
+    expect(r.linhas[0].tarifaEnvio).toBeCloseTo(11.52, 10);
+    expect(r.frete.estimado).toBeCloseTo(11.52, 10);
+    expect(r.frete.fracaoReceitaReal).toBe(0);
+    expect(r.warnings).toContain(WARN_FRETE_ESTIMADO);
+  });
+
+  it('o frete real REORDENA o ranking por margem', () => {
+    // Este e o motivo de o Patch O3 existir. O percentual cobra proporcional ao
+    // preco; o frete real depende de peso e distancia. Os dois valores de frete
+    // sao de envios reais medidos em 19/08/2026 (R$ 2,50 e R$ 16,65).
+    const envioBarato = pedEnvio(700, [{ titulo: ARCOS, preco: 100, qtd: 1, sku: 'FRETE-BARATO', id: 'MLB1' }]);
+    const envioCaro = pedEnvio(701, [{ titulo: OURO, preco: 104, qtd: 1, sku: 'FRETE-CARO', id: 'MLB2' }]);
+    const comReal = rank([envioBarato, envioCaro], {
+      criterio: 'margin',
+      mapaLogistica: mapa(['700', 'fulfillment', 2.50], ['701', 'fulfillment', 16.65]),
+    });
+    const comPercentual = rank([envioBarato, envioCaro], { criterio: 'margin' });
+    // Com o frete de verdade, quem manda menos peso lucra mais. Com o
+    // percentual, quem fatura mais aparecia na frente — classificacao falsa.
+    expect(comReal.linhas[0].sku).toBe('FRETE-BARATO');
+    expect(comPercentual.linhas[0].sku).toBe('FRETE-CARO');
+  });
+
+  it('linha sem custo nenhum nao ganha frete: tarifaEnvio continua null', () => {
+    const r = rank([pedEnvio(700, [{ titulo: DESCONHECIDO, preco: 40, qtd: 1, sku: 'ZZZ' }])], {
+      criterio: 'revenue',
+      mapaLogistica: mapa(['700', 'fulfillment', 18.40]),
+    });
+    expect(r.linhas[0].custoCobertura).toBe('ausente');
+    expect(r.linhas[0].tarifaEnvio).toBeNull();
+    expect(r.frete.real).toBe(0);
+  });
+
+  it('ranking indisponivel devolve cobertura de frete neutra', () => {
+    const r = calcularRanking([], { fromYmd: '2020-01-01', toYmd: '2020-01-31' }, COBERTURA, { taxas: TAXAS });
+    expect(r.disponivel).toBe(false);
+    expect(r.frete).toEqual({ real: 0, estimado: 0, receitaReal: 0, receitaEstimada: 0, fracaoReceitaReal: 1 });
+  });
+
+  it('ranking e margem concordam no frete do mesmo periodo', () => {
+    // Duas contas de frete no mesmo sistema divergindo seria repetir o erro de
+    // `!== cancelled` vs `=== paid`.
+    const pedidos = [
+      pedEnvio(700, [{ titulo: ARCOS, preco: 80, qtd: 1, sku: '21002', id: 'MLB1' }]),
+      pedEnvio(701, [{ titulo: OURO, preco: 20, qtd: 2, sku: '25001', id: 'MLB2' }], 'drop_off'),
+    ];
+    const m = mapa(['700', 'fulfillment', 12], ['701', 'drop_off', null]);
+    const rk = rank(pedidos, { criterio: 'margin', mapaLogistica: m, todos: true });
+    const mg = calcularMargem(pedidos, PERIODO, COBERTURA, TAXAS, m);
+    expect(rk.frete.real).toBeCloseTo(mg.frete.real, 10);
+    expect(rk.frete.estimado).toBeCloseTo(mg.frete.estimado, 10);
+    expect(rk.frete.fracaoReceitaReal).toBeCloseTo(mg.frete.fracaoReceitaReal, 10);
   });
 });

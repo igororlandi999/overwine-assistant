@@ -150,12 +150,14 @@ const SYSTEM_PROMPT_MARGEM = [
   '',
   'MODO MARGEM',
   '- A margem em result é ANTES de publicidade. Diga isso na resposta; nunca a apresente como margem final.',
-  '- Os valores são ESTIMATIVA: as tarifas de ML e envio são percentuais médios, não taxas reais por pedido. Marque o número com "est.".',
+  '- A tarifa do Mercado Livre é um percentual médio, não a taxa real do pedido. Por isso o número é ESTIMATIVA: marque-o com "est.".',
   '- productRevenue é a receita dos PRODUTOS (preço unitário × quantidade). Ela NÃO inclui o frete cobrado do comprador, então é MENOR que o faturamento das consultas de vendas. Se o usuário estranhar a diferença, explique isso; nunca diga que um dos dois está errado.',
   '- Se noCost.units for maior que zero, avise que os itens sem custo cadastrado ficaram de fora e cite os títulos de noCost.titles.',
   '- Se available for falso com o aviso custo_insuficiente, diga que a margem não pode ser calculada porque falta custo para boa parte da receita, e liste noCost.titles para o usuário cadastrar. NUNCA apresente isso como margem zero.',
   '- Margem negativa é um resultado legítimo: reporte o prejuízo com clareza.',
   '- Se shippingCoverage.share for menor que 1, parte dos envios está sem logística conhecida e foi tratada como estoque próprio, o que SOMA embalagem e SUBESTIMA a margem. Nesse caso diga que o valor é um piso, não o número exato. Se share for 1, não mencione o assunto.',
+  '- shippingCost diz de onde veio o frete. shippingCost.revenueShareActual igual a 1 significa que TODO o frete é o valor real pago em cada envio: nesse caso NÃO chame o frete de estimativa. Menor que 1 significa que essa fração da receita usou o frete real e o resto caiu no percentual médio de 14,4% — diga que parte do frete ainda é média. Igual a 0 significa que nenhum envio teve custo apurado e o frete inteiro é média.',
+  '- O frete real varia por peso e distância, não por preço. Se o usuário perguntar por que a margem mudou depois da apuração do frete, é isso: o percentual sobre a receita cobrava caro do vinho caro e barato do vinho barato, independentemente do que o envio custou.',
 ].join('\n');
 
 /**
@@ -179,6 +181,7 @@ const SYSTEM_PROMPT_RANKING = [
   '- Se noCost.skus for maior que zero, avise que há produtos sem custo cadastrado e cite noCost.titles.',
   '- Em rankBy "margin", se marginCoverage.skusExcluded for maior que zero, diga quantos produtos ficaram FORA da classificação por falta de custo. Não sugira que o ranking cobre todo o período.',
   '- Se shippingCoverage.share for menor que 1, parte dos envios está sem logística conhecida e foi tratada como estoque próprio, o que SUBESTIMA a margem. Diga que o valor é um piso. Se share for 1, não mencione o assunto.',
+  '- shippingCost diz de onde veio o frete das linhas com custo. revenueShareActual igual a 1 significa frete REAL por envio: não o chame de estimativa. Menor que 1 significa que o resto caiu no percentual médio — diga que parte do frete ainda é média. Este bloco só existe em rankBy "margin".',
   '- Se items vier vazio com available verdadeiro, não houve venda no período. Isso é zero real, não ausência de dado.',
 ].join('\n');
 
@@ -679,6 +682,10 @@ function projetarLinhaMargem(l: ResultadoMargem['total']) {
   return {
     productRevenue: l.receitaProdutos,
     mlFee: l.tarifaML,
+    // Custo de envio: frete REAL do envio rateado por receita onde ele é
+    // conhecido, percentual médio onde ainda não é. A divisão entre os dois
+    // está em shippingCost — sem ela o modelo não tem como saber se pode ou
+    // não chamar o número de estimativa.
     shippingFee: l.tarifaEnvio,
     cost: l.custoTotal,
     margin: l.margem,
@@ -705,6 +712,12 @@ function montarContextoMargem(q: ChatQuery, r: ResultadoMargem, st: OrdersReadSt
       units: r.semCusto.unidades,
       revenueShare: r.semCusto.fracaoReceita,
       titles: r.semCusto.titulos,
+    },
+    // De onde veio o frete: valor real do envio ou percentual médio.
+    shippingCost: {
+      actual: r.frete.real,
+      estimatedByPercent: r.frete.estimado,
+      revenueShareActual: r.frete.fracaoReceitaReal,
     },
     beforeAdvertising: r.antesDePublicidade,
     estimated: r.estimado,
@@ -739,6 +752,10 @@ function projetarLinhaRanking(l: ResultadoRanking['linhas'][number], comMargem: 
 /** Avisos que só fazem sentido quando há margem no contexto. */
 const WARNINGS_SO_DE_MARGEM: ReadonlySet<string> = new Set([
   'antes_de_publicidade', 'custo_parcial', 'ranking_margem_cobertura_parcial',
+  // frete_estimado descreve a composição do CUSTO DE ENVIO, que só aparece no
+  // ranking por margem. Em receita ou quantidade seria um aviso sobre um número
+  // que não está no contexto.
+  'frete_estimado',
 ]);
 
 function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersReadStatus) {
@@ -792,6 +809,13 @@ function montarContextoRanking(q: ChatQuery, r: ResultadoRanking, st: OrdersRead
       marginCoverage: r.margemCobertura === null ? null : {
         revenueShareWithCost: r.margemCobertura.fracaoReceitaComCusto,
         skusExcluded: r.margemCobertura.skusExcluidos,
+      },
+      // De onde veio o frete: valor real do envio ou percentual médio. Só entra
+      // no ranking POR MARGEM, pela mesma razão dos demais campos de custo.
+      shippingCost: {
+        actual: r.frete.real,
+        estimatedByPercent: r.frete.estimado,
+        revenueShareActual: r.frete.fracaoReceitaReal,
       },
       beforeAdvertising: r.antesDePublicidade,
       // ESTIMATIVA descreve as TARIFAS (percentuais médios de planilha), que só
