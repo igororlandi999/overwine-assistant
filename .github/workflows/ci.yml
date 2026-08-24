@@ -1,0 +1,56 @@
+name: Verificação
+
+# Este repositório não tinha nenhuma verificação automática: typecheck e testes
+# só rodavam na máquina de quem editava, e o único workflow existente é o de
+# sincronização, que não olha para o código. Um erro de tipo ou um teste
+# quebrado chegava ao deploy sem nada no caminho.
+#
+# NÃO faz deploy, NÃO publica nada, NÃO toca em produção e não usa segredo
+# algum: só lê o código e roda o que já existe no package.json.
+
+on:
+  # Todo push, em qualquer branch. NÃO escutamos `pull_request` de propósito:
+  # neste repositório o PR sai sempre de um branch daqui mesmo, então o push
+  # já cobriu o commit e o gatilho duplicado só gastaria execução à toa.
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Um push novo na mesma referência torna a execução anterior irrelevante.
+# Diferente do workflow de sincronização, aqui cancelar é o certo: não há
+# estado a preservar, só a resposta sobre o commit mais recente.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    name: Typecheck e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Preparar Node
+        uses: actions/setup-node@v4
+        with:
+          # Mesma major do runtime das funções na Vercel e do ambiente de
+          # desenvolvimento. `cache: npm` reaproveita ~/.npm entre execuções.
+          node-version: '24'
+          cache: npm
+
+      - name: Instalar dependências
+        # `npm ci` respeita o package-lock.json exatamente; `npm install`
+        # poderia resolver versões diferentes das testadas localmente.
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Testes
+        run: npm test
