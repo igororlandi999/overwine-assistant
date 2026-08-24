@@ -51,7 +51,7 @@ import {
 } from './orders-metrics.service.js';
 import type { PeriodoYmd } from './sales-metrics.service.js';
 import {
-  buildEstoqueFullPorSku, buildEstoquePorSku,
+  buildEstoqueFullPorSku, buildEstoquePorSku, classificarEstoque, ordenarLinhasClassificaveis,
   type EstoqueFullLinha, type EstoquePorSkuOpcoes, type EstoqueSkuLinha, type ModoEstoque,
 } from './inventory.service.js';
 
@@ -124,6 +124,11 @@ export interface Inventario {
   vendasDisponiveis: boolean;
   proprio: EstoqueSkuLinha[] | null;
   full: EstoqueFullLinha[] | null;
+  /**
+   * Mesmas linhas de `proprio`, reclassificadas sobre o saldo TOTAL. Presente
+   * só quando o escopo é `ambos`. Ver `classificarPorTotal`.
+   */
+  total: EstoqueSkuLinha[] | null;
   warnings: string[];
 }
 
@@ -205,9 +210,11 @@ export async function lerInventario(
 
   let proprio: EstoqueSkuLinha[] | null = null;
   let full: EstoqueFullLinha[] | null = null;
+  let total: EstoqueSkuLinha[] | null = null;
   try {
     proprio = escopo === 'full' ? null : buildEstoquePorSku(items, opts);
     full = escopo === 'proprio' ? null : buildEstoqueFullPorSku(items, opts);
+    total = escopo === 'ambos' && proprio ? classificarPorTotal(proprio, dias) : null;
   } catch (e) {
     // `classificarEstoque` lança com saldo negativo, que só o modo legado
     // propaga. Vira falha nomeada em vez de erro opaco.
@@ -230,9 +237,48 @@ export async function lerInventario(
       vendasDisponiveis: vendasPorItem !== undefined,
       proprio,
       full,
+      total,
       warnings,
     },
   };
+}
+
+/**
+ * Reclassifica as linhas sobre o saldo TOTAL (próprio + Full), em vez do saldo
+ * próprio.
+ *
+ * POR QUE ISSO EXISTE, e por que não é um limite novo.
+ *
+ * `buildEstoquePorSku` classifica pelo saldo PRÓPRIO — é a porta fiel da aba
+ * Gestão de Estoque do dashboard, e ali faz sentido: aquela tela cuida do
+ * depósito. Mas a pergunta genérica "o que está em ruptura?" não é sobre o
+ * depósito, é sobre o que está para acabar. Um SKU com 0 no depósito e 500 no
+ * Full apareceria como ruptura, e o assistente mandaria comprar um vinho que
+ * tem meio ano de estoque no galpão do Mercado Livre. Esse é o erro caro.
+ *
+ * A correção NÃO inventa faixa nenhuma: usa `classificarEstoque`, com
+ * LIMITES_CLASSIFICACAO intactos, trocando apenas o saldo de entrada de
+ * `estProprio` para `estTotal` — que `consolidarEstoqueGrupo` já calcula
+ * deduplicado. As vendas do período são as mesmas.
+ *
+ * Escopo explícito continua respeitado: quem pergunta "quanto temos no estoque
+ * próprio?" quer a base própria, e quem pergunta do Full quer a do Full. Só a
+ * pergunta genérica passa a olhar o total.
+ *
+ * LIMITE CONHECIDO: a base vem de `buildEstoquePorSku`, que considera apenas
+ * anúncios com `status === 'active'`. Saldo preso em anúncio pausado não entra
+ * — e não deveria, porque não está à venda.
+ */
+export function classificarPorTotal(
+  linhas: EstoqueSkuLinha[],
+  diasPeriodo: number
+): EstoqueSkuLinha[] {
+  const reclassificadas = linhas.map(l => {
+    if (l.vendasPeriodo === null) return { ...l };
+    const c = classificarEstoque(l.estTotal, l.vendasPeriodo, diasPeriodo);
+    return { ...l, tipo: c.tipo, velocidadeDia: c.velocidadeDia, diasCobertura: c.diasCobertura };
+  });
+  return ordenarLinhasClassificaveis(reclassificadas);
 }
 
 // ── Resolução determinística de produto ───────────────────────────────────

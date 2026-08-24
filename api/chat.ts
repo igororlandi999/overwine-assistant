@@ -175,7 +175,8 @@ const SYSTEM_PROMPT_ESTOQUE = [
   'MODO ESTOQUE',
   '- Os saldos e as classificações em <CONTEXTO> JÁ FORAM CALCULADOS pelo backend. Não some, não subtraia, não divida e não reclassifique nada.',
   '- own é o estoque no depósito PRÓPRIO; full é o estoque no Fulfillment do Mercado Livre; total é a soma dos dois, já deduplicada. Nunca troque um pelo outro e nunca some own e full por conta própria.',
-  '- classification.basis diz sobre QUAL saldo a classificação foi feita: "own" significa que ruptura, alerta, ok, excesso e sem venda olham apenas o estoque próprio; "full" significa que olham apenas o Full. Deixe isso claro quando citar uma classificação.',
+  '- classification.basis diz sobre QUAL saldo a classificação foi feita: "total" significa próprio mais Full somados, e é a base das perguntas gerais; "own" significa apenas o estoque próprio; "full" apenas o Full. Deixe isso claro quando citar uma classificação.',
+  '- Na base "total", um produto em ruptura está acabando NO CONJUNTO: não há reserva escondida no Full. Na base "own", pode haver saldo no Full que a classificação não enxergou — nesse caso nunca afirme que o produto vai acabar sem antes dizer que a conta olhou só o depósito próprio.',
   '- daysOfCover é a cobertura em dias no ritmo de venda do período. null significa que não houve venda no período, não que a cobertura seja infinita nem zero.',
   '- status "semvenda" significa que o produto NÃO vendeu no período. Não o descreva como ruptura nem como estoque baixo.',
   '- Se items.length for menor que total, a lista está truncada: diga quantos itens existem no total e que você está citando os primeiros, na ordem operacional.',
@@ -968,22 +969,31 @@ function projetarLinhaEstoque(l: LinhaEstoque) {
 /**
  * Qual lista responde a pergunta, e sobre qual saldo a classificação foi feita.
  *
- * `basis` NÃO é decoração: `buildEstoquePorSku` classifica pelo saldo PRÓPRIO e
- * `buildEstoqueFullPorSku` pelo saldo do Full. Um SKU zerado no depósito e
- * cheio no Full aparece como ruptura na primeira lista. Isso é a paridade com a
- * aba Gestão de Estoque do dashboard, e mudar a base aqui inventaria um
- * critério que o serviço não tem — então o contexto DECLARA a base e o prompt
- * obriga o modelo a dizê-la.
+ * `basis` NÃO é decoração, e a escolha dela é a diferença entre uma resposta
+ * útil e uma que faz o operador comprar sem precisar:
+ *
+ *  - escopo `ambos` (a pergunta genérica) → base TOTAL. "O que está em
+ *    ruptura?" pergunta o que está para acabar, não o que falta no depósito.
+ *    Com base própria, um SKU zerado em casa e cheio no Full viraria ruptura.
+ *  - escopo `proprio` → base própria, que foi exatamente o que se pediu.
+ *  - escopo `full` → base do Full, idem.
+ *
+ * O contexto declara a base e o prompt obriga o modelo a dizê-la.
  */
-function ladoDoEscopo(inv: Inventario): { linhas: LinhaEstoque[]; basis: 'own' | 'full' } {
+function ladoDoEscopo(inv: Inventario): { linhas: LinhaEstoque[]; basis: 'own' | 'full' | 'total' } {
   if (inv.escopo === 'full' && inv.full) return { linhas: inv.full, basis: 'full' };
+  if (inv.escopo === 'ambos' && inv.total) return { linhas: inv.total, basis: 'total' };
   if (inv.proprio) return { linhas: inv.proprio, basis: 'own' };
   return { linhas: inv.full ?? [], basis: 'full' };
 }
 
-/** Saldo que a classificação daquela lista enxerga. */
-function saldoClassificado(l: LinhaEstoque): number {
-  return ehLinhaPropria(l) ? l.estProprio : l.estTotal;
+/**
+ * Saldo que a classificação daquela lista enxerga. Na base `total` e nas linhas
+ * do Full é `estTotal`; só a base própria olha `estProprio`.
+ */
+function saldoClassificado(l: LinhaEstoque, basis: 'own' | 'full' | 'total'): number {
+  if (basis === 'own' && ehLinhaPropria(l)) return l.estProprio;
+  return l.estTotal;
 }
 
 /**
@@ -995,7 +1005,11 @@ function saldoClassificado(l: LinhaEstoque): number {
  * `semvenda` exige saldo maior que zero: um SKU zerado que não vendeu não é
  * estoque parado, é um anúncio sem estoque, e listá-lo afogaria o que importa.
  */
-function filtrarEstoque(linhas: LinhaEstoque[], filtro?: string): LinhaEstoque[] {
+function filtrarEstoque(
+  linhas: LinhaEstoque[],
+  basis: 'own' | 'full' | 'total',
+  filtro?: string
+): LinhaEstoque[] {
   const tipo = (l: LinhaEstoque, t: TipoEstoque) => l.tipo === t;
   switch (filtro) {
     case 'ruptura': return linhas.filter(l => tipo(l, 'ruptura'));
@@ -1003,7 +1017,7 @@ function filtrarEstoque(linhas: LinhaEstoque[], filtro?: string): LinhaEstoque[]
     case 'baixo':
     case 'reposicao': return linhas.filter(l => tipo(l, 'ruptura') || tipo(l, 'alerta'));
     case 'excesso': return linhas.filter(l => tipo(l, 'excesso'));
-    case 'semvenda': return linhas.filter(l => tipo(l, 'semvenda') && saldoClassificado(l) > 0);
+    case 'semvenda': return linhas.filter(l => tipo(l, 'semvenda') && saldoClassificado(l, basis) > 0);
     default: return linhas;
   }
 }
@@ -1062,7 +1076,7 @@ function montarContextoEstoqueResumo(q: ChatQuery, inv: Inventario) {
 
 function montarContextoEstoqueLista(q: ChatQuery, inv: Inventario) {
   const { linhas, basis } = ladoDoEscopo(inv);
-  const filtradas = filtrarEstoque(linhas, q.inventoryFilter);
+  const filtradas = filtrarEstoque(linhas, basis, q.inventoryFilter);
   const limite = Math.min(q.limit ?? ESTOQUE_LISTA_PADRAO, ESTOQUE_LISTA_MAX);
   return {
     ...baseEstoque(q, inv),

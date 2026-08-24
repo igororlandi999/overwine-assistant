@@ -125,6 +125,12 @@ function resumir<T extends { tipo: string | null }>(
  * de não determinismo da partição clássico/premium. `modo=legado` continua
  * disponível para comparar paridade.
  *
+ * TRÊS BASES: `proprio` e `full` classificam pelo saldo do respectivo lado, em
+ * paridade com as abas do dashboard. `total` traz as mesmas linhas de `proprio`
+ * reclassificadas sobre próprio + Full, com os MESMOS limites — é a base que
+ * responde "o que está acabando?" sem confundir depósito vazio com falta de
+ * estoque. Só aparece no escopo `ambos`.
+ *
  * PERÍODO: `dias=N` significa N dias civis terminando hoje, bordas incluídas —
  * NÃO os N+1 dias de `/api/orders/metrics`. A razão está em
  * inventory-read.service.ts: com estoque também no chat, as duas convenções
@@ -197,6 +203,14 @@ async function responderInventario(
       : null,
     full: inv.full
       ? { resumo: resumir(inv.full, l => l.estTotal), linhas: inv.full }
+      : null,
+    // Mesmas linhas de `proprio`, reclassificadas sobre próprio + Full. É a
+    // base que responde à pergunta geral "o que está acabando?" sem mandar
+    // repor um SKU que só está zerado no depósito. Presente só no escopo
+    // `ambos`; `proprio` e `full` seguem intocados, com a classificação de
+    // paridade que o dashboard já consome.
+    total: inv.total
+      ? { resumo: resumir(inv.total, l => l.estTotal), linhas: inv.total }
       : null,
     warnings: inv.warnings,
   });

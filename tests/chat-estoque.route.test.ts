@@ -222,10 +222,10 @@ describe('chat estoque — 1. resumo', () => {
     expect(c.product).toBeUndefined();
   });
 
-  it('declara a base da classificação', async () => {
+  it('a pergunta genérica classifica sobre o saldo TOTAL', async () => {
     const t = await cenario();
     await perguntar('como está nosso estoque?', t);
-    expect(contextoEnviado().classification.basis).toBe('own');
+    expect(contextoEnviado().classification.basis).toBe('total');
   });
 });
 
@@ -360,9 +360,11 @@ describe('chat estoque — 7. sem venda', () => {
     await perguntar('o que não vende há 30 dias?', t);
     const c = contextoEnviado();
     expect(c.query.filter).toBe('semvenda');
-    // PARADO tem 50 unidades e não vendeu. ZERO não vendeu mas está zerado:
-    // alertar sobre ele afogaria a lista com anúncios sem estoque.
-    expect(c.items.map((i: any) => i.sku)).toEqual(['PARADO']);
+    // PARADO tem 50 no depósito e FULLA tem 12 no Full: os dois são estoque
+    // parado de verdade. ZERO não vendeu mas está zerado — alertar sobre ele
+    // afogaria a lista com anúncios sem estoque.
+    expect(c.items.map((i: any) => i.sku).sort()).toEqual(['FULLA', 'PARADO']);
+    expect(c.items.map((i: any) => i.sku)).not.toContain('ZERO');
   });
 
   it('período de 60 dias muda a janela declarada', async () => {
@@ -416,6 +418,89 @@ describe('chat estoque — 10. inconsistências', () => {
     const res = await perguntar('quanto temos do SKU NEG?', t);
     expect(res.statusCode).toBe(200);
     expect(contextoEnviado().product.own).toBe(0);
+  });
+});
+
+
+// ══════════════════════════════════════════════════════════════════════════
+// A base da classificação é a diferença entre uma resposta útil e uma que faz
+// o operador comprar sem precisar. Cenário: um SKU com o depósito zerado e 500
+// unidades no Full, vendendo bem.
+// ══════════════════════════════════════════════════════════════════════════
+describe('chat estoque — base da classificação (próprio × total)', () => {
+  const COM_FULL: ItemSlim[] = [
+    // Mesmo SKU em dois anúncios: o próprio zerado, o espelho Full cheio.
+    item({ id: 'MLB-TF-P', seller_custom_field: 'TEMFULL', title: 'Tem Full', available_quantity: 0 }),
+    full({ id: 'MLB-TF-F', seller_custom_field: 'TEMFULL', title: 'Tem Full', available_quantity: 500, inventory_id: 'INVTF' }),
+    // Controle: acabando de verdade nos dois lados.
+    item({ id: 'MLB-REP', seller_custom_field: 'REPOR', title: 'Repor Mesmo', available_quantity: 5 }),
+  ];
+  const VENDAS = { 'MLB-TF-F': 30, 'MLB-REP': 30 };
+
+  async function cenarioFull() {
+    await publicarCatalogo(COM_FULL);
+    await publicarPedidos(VENDAS);
+    return comSessao();
+  }
+
+  it('"o que está em ruptura?" NÃO manda repor um SKU cheio no Full', async () => {
+    const t = await cenarioFull();
+    await perguntar('o que está em ruptura?', t);
+    const c = contextoEnviado();
+    expect(c.classification.basis).toBe('total');
+    expect(c.items.map((i: any) => i.sku)).toEqual(['REPOR']);
+    expect(c.items.map((i: any) => i.sku)).not.toContain('TEMFULL');
+  });
+
+  it('"o que preciso repor?" idem — é a mesma pergunta operacional', async () => {
+    const t = await cenarioFull();
+    await perguntar('o que preciso repor?', t);
+    expect(contextoEnviado().items.map((i: any) => i.sku)).not.toContain('TEMFULL');
+  });
+
+  it('"o que eu deveria repor primeiro?" idem', async () => {
+    const t = await cenarioFull();
+    await perguntar('o que eu deveria repor primeiro?', t);
+    expect(contextoEnviado().items.map((i: any) => i.sku)).not.toContain('TEMFULL');
+  });
+
+  it('o SKU cheio no Full aparece como excesso, não some da conta', async () => {
+    const t = await cenarioFull();
+    await perguntar('o que está com estoque excessivo?', t);
+    expect(contextoEnviado().items.map((i: any) => i.sku)).toContain('TEMFULL');
+  });
+
+  it('quem pergunta pelo estoque PRÓPRIO recebe a base própria, com o SKU zerado', async () => {
+    const t = await cenarioFull();
+    await perguntar('quais produtos no estoque próprio estão em ruptura?', t);
+    const c = contextoEnviado();
+    expect(c.classification.basis).toBe('own');
+    expect(c.items.map((i: any) => i.sku)).toContain('TEMFULL');
+  });
+
+  it('quem pergunta pelo Full recebe a base do Full', async () => {
+    const t = await cenarioFull();
+    await perguntar('quais produtos no Full estão em ruptura?', t);
+    expect(contextoEnviado().classification.basis).toBe('full');
+  });
+
+  it('o resumo genérico conta o SKU uma vez, no total, sem duplicar', async () => {
+    const t = await cenarioFull();
+    await perguntar('como está nosso estoque?', t);
+    const c = contextoEnviado();
+    // TEMFULL: 0 próprio + 500 Full. REPOR: 5 próprio.
+    expect(c.stock.own.units).toBe(5);
+    expect(c.stock.full.units).toBe(500);
+    expect(c.stock.totalUnits).toBe(505);
+    expect(c.classification.basis).toBe('total');
+  });
+
+  it('a base total usa os MESMOS limites, sem faixa nova', async () => {
+    const t = await cenarioFull();
+    await perguntar('como está nosso estoque?', t);
+    expect(contextoEnviado().limits).toMatchObject({
+      rupturaDiasMax: 30, alertaDiasMax: 90, okDiasMax: 365,
+    });
   });
 });
 

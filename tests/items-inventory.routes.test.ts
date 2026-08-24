@@ -407,6 +407,39 @@ describe('GET /api/items/inventory — semântica de período', () => {
   });
 });
 
+describe('GET /api/items/inventory — base total', () => {
+  it('escopo ambos devolve os três blocos, e `proprio` mantém a paridade', async () => {
+    await publicarCatalogo(cache);
+    await publicarPedidos(cache, { 'MLB-P2': 10 });
+    const c = (await chamar(JANELA, await comSessao())).json();
+    expect(c.proprio).not.toBeNull();
+    expect(c.full).not.toBeNull();
+    expect(c.total).not.toBeNull();
+    // As linhas de `total` são as mesmas, só reclassificadas.
+    expect(c.total.linhas.length).toBe(c.proprio.linhas.length);
+    expect(c.total.resumo.skus).toBe(c.proprio.resumo.skus);
+    // O resumo de `proprio` soma o saldo próprio; o de `total`, o saldo total.
+    const somaProprio = c.proprio.linhas.reduce((n: number, l: any) => n + l.estProprio, 0);
+    const somaTotal = c.proprio.linhas.reduce((n: number, l: any) => n + l.estTotal, 0);
+    expect(c.proprio.resumo.unidades).toBe(somaProprio);
+    expect(c.total.resumo.unidades).toBe(somaTotal);
+  });
+
+  it('escopo proprio e full não trazem o bloco total', async () => {
+    await publicarCatalogo(cache);
+    const sess = await comSessao();
+    expect((await chamar({ ...JANELA, escopo: 'proprio' }, sess)).json().total).toBeNull();
+    expect((await chamar({ ...JANELA, escopo: 'full' }, sess)).json().total).toBeNull();
+  });
+
+  it('estTotal = estProprio + estFull em toda linha devolvida', async () => {
+    await publicarCatalogo(cache);
+    await publicarPedidos(cache, { 'MLB-P2': 10 });
+    const c = (await chamar(JANELA, await comSessao())).json();
+    for (const l of c.proprio.linhas) expect(l.estTotal, l.sku).toBe(l.estProprio + l.estFull);
+  });
+});
+
 describe('GET /api/items/inventory — metadados da resposta', () => {
   it('declara a versão do catálogo, os limites de classificação e o modo', async () => {
     await publicarCatalogo(cache);
