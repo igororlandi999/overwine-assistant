@@ -181,6 +181,7 @@ const SYSTEM_PROMPT_ESTOQUE = [
   '- status "semvenda" significa que o produto NÃO vendeu no período. Não o descreva como ruptura nem como estoque baixo.',
   '- Se items.length for menor que total, a lista está truncada: diga quantos itens existem no total e que você está citando os primeiros, na ordem operacional.',
   '- A ordem da lista já é a ordem de prioridade: ruptura primeiro, depois menor cobertura, e o SKU como desempate. Não reordene.',
+  '- Quando os itens trouxerem `priority`, esse número É a ordem de reposição, já calculada pelo backend. Cite em ordem crescente de priority e nunca apresente um priority maior como mais urgente que um menor.',
   '- Nunca sugira quantidade de compra, previsão de demanda ou data de reposição: esses números não existem no contexto.',
   '- Se sales.available for falso, não houve snapshot de vendas para o período: informe os saldos e diga que a velocidade e a classificação não puderam ser calculadas.',
   '- Se catalog.stale for verdadeiro, avise que o catálogo de anúncios está desatualizado e que os saldos podem ter mudado.',
@@ -1078,11 +1079,22 @@ function montarContextoEstoqueLista(q: ChatQuery, inv: Inventario) {
   const { linhas, basis } = ladoDoEscopo(inv);
   const filtradas = filtrarEstoque(linhas, basis, q.inventoryFilter);
   const limite = Math.min(q.limit ?? ESTOQUE_LISTA_PADRAO, ESTOQUE_LISTA_MAX);
+
+  // Em `reposicao` a ORDEM é a resposta, não um detalhe de apresentação. Num
+  // teste contra o Preview real o modelo inverteu os dois itens e apresentou o
+  // de 59 dias de cobertura como mais urgente que o de 42. Pedir no prompt para
+  // não reordenar não bastou; numerar a prioridade tira a decisão dele.
+  const prioridade = q.inventoryFilter === 'reposicao';
+
   return {
     ...baseEstoque(q, inv),
     classification: { basis },
     total: filtradas.length,
-    items: filtradas.slice(0, limite).map(projetarLinhaEstoque),
+    items: filtradas.slice(0, limite).map((l, i) => (
+      prioridade
+        ? { priority: i + 1, ...projetarLinhaEstoque(l) }
+        : projetarLinhaEstoque(l)
+    )),
   };
 }
 

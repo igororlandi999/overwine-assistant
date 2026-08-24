@@ -255,6 +255,32 @@ describe('chat estoque — 2 a 3. ruptura, alerta e baixo', () => {
     expect(c.items.map((i: any) => i.sku)).toEqual(['RUP', 'ALE']);
   });
 
+  it('reposição numera a prioridade — a ordem é a resposta, não apresentação', async () => {
+    const t = await cenario();
+    await perguntar('o que eu deveria repor primeiro?', t);
+    const c = contextoEnviado();
+    // Contra o Preview real o modelo chegou a inverter dois itens e apresentar
+    // o de 59 dias de cobertura como mais urgente que o de 42. O número tira a
+    // decisão dele.
+    expect(c.items.map((i: any) => i.priority)).toEqual([1, 2]);
+    const dias = c.items.map((i: any) => i.daysOfCover);
+    expect(dias[0]).toBeLessThanOrEqual(dias[1] ?? Number.MAX_SAFE_INTEGER);
+  });
+
+  it('as demais listagens NÃO recebem priority — só reposição tem ordem obrigatória', async () => {
+    const t = await cenario();
+    for (const p of ['o que está em ruptura?', 'o que está com estoque excessivo?', 'o que não vende há 30 dias?']) {
+      await perguntar(p, t);
+      for (const it of contextoEnviado().items) expect(it.priority, p).toBeUndefined();
+    }
+  });
+
+  it('o prompt manda respeitar priority', async () => {
+    const t = await cenario();
+    await perguntar('o que eu deveria repor primeiro?', t);
+    expect(systemEnviado()).toContain('priority');
+  });
+
   it('prioridade de reposição usa a mesma união, na mesma ordem', async () => {
     const t = await cenario();
     await perguntar('o que eu deveria repor primeiro?', t);
