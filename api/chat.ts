@@ -38,12 +38,21 @@ import { readSnapshot } from '../src/lib/orders-store.js';
 import { getReadStatus, type OrdersReadStatus } from '../src/services/orders-read.service.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import {
+  ehIntencaoEstoque,
   parseChatQuery,
   previousQueryValida,
   type AmbiguousReason,
   type ChatQuery,
   type InvalidPeriodReason,
 } from '../src/services/chat-query.service.js';
+import {
+  MAX_CANDIDATOS, lerInventario, resolverProduto,
+  type Inventario,
+} from '../src/services/inventory-read.service.js';
+import {
+  LIMITES_CLASSIFICACAO,
+  type EstoqueAlerta, type EstoqueFullLinha, type EstoqueSkuLinha, type TipoEstoque,
+} from '../src/services/inventory.service.js';
 import {
   calcularComparacao,
   calcularConsulta,
@@ -153,6 +162,28 @@ const SYSTEM_PROMPT_AGREGADO = [
   '- Mencione os itens de warnings quando forem relevantes à pergunta.',
   '- Se compare.comparable for falso, NUNCA calcule nem cite variação percentual entre os períodos: informe os dois valores absolutos e diga que a comparação não é possível porque um dos períodos tem poucos dias de dados. Não estime, não deduza, não use expressões como "cresceu X vezes".',
   '- Responda em português do Brasil, direto, de 1 a 3 frases.',
+].join('\n');
+
+/**
+ * Extensão do modo agregado para ESTOQUE. As regras existem porque o estoque
+ * tem três armadilhas de redação que o modelo cometeria sozinho: confundir
+ * saldo próprio com saldo Full, tratar "sem venda" como ruptura, e apresentar
+ * uma lista truncada como se fosse a lista inteira.
+ */
+const SYSTEM_PROMPT_ESTOQUE = [
+  '',
+  'MODO ESTOQUE',
+  '- Os saldos e as classificações em <CONTEXTO> JÁ FORAM CALCULADOS pelo backend. Não some, não subtraia, não divida e não reclassifique nada.',
+  '- own é o estoque no depósito PRÓPRIO; full é o estoque no Fulfillment do Mercado Livre; total é a soma dos dois, já deduplicada. Nunca troque um pelo outro e nunca some own e full por conta própria.',
+  '- classification.basis diz sobre QUAL saldo a classificação foi feita: "own" significa que ruptura, alerta, ok, excesso e sem venda olham apenas o estoque próprio; "full" significa que olham apenas o Full. Deixe isso claro quando citar uma classificação.',
+  '- daysOfCover é a cobertura em dias no ritmo de venda do período. null significa que não houve venda no período, não que a cobertura seja infinita nem zero.',
+  '- status "semvenda" significa que o produto NÃO vendeu no período. Não o descreva como ruptura nem como estoque baixo.',
+  '- Se items.length for menor que total, a lista está truncada: diga quantos itens existem no total e que você está citando os primeiros, na ordem operacional.',
+  '- A ordem da lista já é a ordem de prioridade: ruptura primeiro, depois menor cobertura, e o SKU como desempate. Não reordene.',
+  '- Nunca sugira quantidade de compra, previsão de demanda ou data de reposição: esses números não existem no contexto.',
+  '- Se sales.available for falso, não houve snapshot de vendas para o período: informe os saldos e diga que a velocidade e a classificação não puderam ser calculadas.',
+  '- Se catalog.stale for verdadeiro, avise que o catálogo de anúncios está desatualizado e que os saldos podem ter mudado.',
+  '- Responda em português do Brasil, direto, de 1 a 4 frases.',
 ].join('\n');
 
 /**
@@ -512,16 +543,26 @@ function erro(res: VercelResponse, status: number, code: string, message: string
 // ══════════════════════════════════════════════════════════════════════════
 
 /**
- * Allowlist determinística dos módulos JÁ presentes no contexto 1.0.0 do
- * frontend. Quando o parser devolve `assunto_nao_suportado` e a mensagem cita
- * um destes termos, a pergunta segue no FLUXO LEGADO (contexto completo +
- * Gemini). Qualquer outro assunto vira indisponibilidade determinística.
+ * Allowlist determinística dos módulos que ainda dependem do contexto 1.0.0
+ * enviado pelo frontend. Quando o parser devolve `assunto_nao_suportado` e a
+ * mensagem cita um destes termos, a pergunta segue no FLUXO LEGADO (contexto
+ * completo + Gemini). Qualquer outro assunto vira indisponibilidade
+ * determinística.
  *
- * 'anuncio'/'anuncios' ficam DELIBERADAMENTE de fora nesta etapa: o contexto
- * traz contagens de anúncios, mas não responde "qual anúncio vendeu mais",
- * que é a forma como a pergunta costuma aparecer.
+ * HOJE ESTÁ VAZIA. Continha 'estoque', 'ruptura', 'sem estoque', 'inventory' e
+ * 'full': os cinco saíram quando o backend passou a responder estoque pelo
+ * inventory-read.service, e mantê-los aqui faria a pergunta voltar a depender
+ * dos números que a tela manda — o oposto do objetivo.
+ *
+ * A lista e `pareceAssuntoLegado` permanecem de propósito. São o ponto de
+ * extensão para o próximo módulo que precise do contexto do frontend antes de
+ * ter serviço próprio; apagá-los obrigaria a redescobrir o desenho.
+ *
+ * 'anuncio'/'anuncios' nunca estiveram aqui: o contexto traz contagens de
+ * anúncios, mas não responde "qual anúncio vendeu mais", que é a forma como a
+ * pergunta costuma aparecer.
  */
-const TERMOS_LEGADO = ['estoque', 'ruptura', 'sem estoque', 'inventory', 'full'];
+const TERMOS_LEGADO: string[] = [];
 
 /** minúsculas, sem acentos, espaços colapsados (mesma convenção do parser). */
 function normalizarTexto(t: string): string {
@@ -589,6 +630,9 @@ interface QueryPublica {
   comparePeriod?: PeriodoPublico;
   rankBy?: ChatQuery['rankBy'];
   limit?: number;
+  inventoryFilter?: ChatQuery['inventoryFilter'];
+  inventoryScope?: ChatQuery['inventoryScope'];
+  productTerm?: string;
 }
 function projetarPeriodo(p: { kind: string; fromYmd: string; toYmd: string }): PeriodoPublico {
   return { kind: p.kind, fromYmd: p.fromYmd, toYmd: p.toYmd };
@@ -601,6 +645,11 @@ function projetarQuery(q: ChatQuery): QueryPublica {
     ...(q.comparePeriod ? { comparePeriod: projetarPeriodo(q.comparePeriod) } : {}),
     ...(q.rankBy ? { rankBy: q.rankBy } : {}),
     ...(q.limit !== undefined ? { limit: q.limit } : {}),
+    ...(q.inventoryFilter ? { inventoryFilter: q.inventoryFilter } : {}),
+    ...(q.inventoryScope ? { inventoryScope: q.inventoryScope } : {}),
+    // Eco do texto do próprio usuário, já normalizado. Não é PII e ajuda o
+    // frontend a mostrar o que foi entendido.
+    ...(q.productTerm ? { productTerm: q.productTerm } : {}),
   };
 }
 
@@ -865,6 +914,274 @@ function comCoberturaLogistica(
   };
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// ESTOQUE
+//
+// Mesmo desenho do caminho agregado de vendas: o parser decide, o backend
+// calcula, e o provedor só redige. A diferença é a fonte — aqui o número vem do
+// snapshot de CATÁLOGO mais o de pedidos, via inventory-read.service, o mesmo
+// serviço que `GET /api/items/inventory` usa. Nenhuma chamada HTTP interna:
+// seria uma viagem de rede para o próprio processo, com sessão e rate limit no
+// meio, e abriria a porta para os dois caminhos divergirem.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Itens citados numa listagem. 10 e não os 5 do ranking: uma lista de
+ * reposição de 5 linhas esconde metade do trabalho do dia, e o custo de
+ * contexto de 10 linhas curtas é irrelevante. O teto de 20 é o mesmo do
+ * ranking (RANKING_LIMITE_MAX), para não haver dois limites no chatbot.
+ */
+const ESTOQUE_LISTA_PADRAO = 10;
+const ESTOQUE_LISTA_MAX = 20;
+
+/** Quantos SKUs citar por tipo de inconsistência. */
+const ESTOQUE_AMOSTRA_PROBLEMAS = 5;
+
+type LinhaEstoque = EstoqueSkuLinha | EstoqueFullLinha;
+
+function ehLinhaPropria(l: LinhaEstoque): l is EstoqueSkuLinha {
+  return (l as EstoqueSkuLinha).estProprio !== undefined;
+}
+
+/**
+ * Projeção pública de uma linha. `own` é null nas linhas do Full: aquele build
+ * só enxerga anúncios Full, então o saldo próprio do mesmo SKU não passou por
+ * ali e afirmar zero seria inventar.
+ */
+function projetarLinhaEstoque(l: LinhaEstoque) {
+  const propria = ehLinhaPropria(l);
+  return {
+    sku: l.semSku ? null : l.sku,
+    label: l.label,
+    own: propria ? l.estProprio : null,
+    full: propria ? l.estFull : l.estTotal,
+    total: l.estTotal,
+    soldInPeriod: l.vendasPeriodo,
+    perDay: l.velocidadeDia,
+    daysOfCover: l.diasCobertura,
+    status: l.tipo,
+    listings: l.itemIds.length,
+  };
+}
+
+/**
+ * Qual lista responde a pergunta, e sobre qual saldo a classificação foi feita.
+ *
+ * `basis` NÃO é decoração: `buildEstoquePorSku` classifica pelo saldo PRÓPRIO e
+ * `buildEstoqueFullPorSku` pelo saldo do Full. Um SKU zerado no depósito e
+ * cheio no Full aparece como ruptura na primeira lista. Isso é a paridade com a
+ * aba Gestão de Estoque do dashboard, e mudar a base aqui inventaria um
+ * critério que o serviço não tem — então o contexto DECLARA a base e o prompt
+ * obriga o modelo a dizê-la.
+ */
+function ladoDoEscopo(inv: Inventario): { linhas: LinhaEstoque[]; basis: 'own' | 'full' } {
+  if (inv.escopo === 'full' && inv.full) return { linhas: inv.full, basis: 'full' };
+  if (inv.proprio) return { linhas: inv.proprio, basis: 'own' };
+  return { linhas: inv.full ?? [], basis: 'full' };
+}
+
+/** Saldo que a classificação daquela lista enxerga. */
+function saldoClassificado(l: LinhaEstoque): number {
+  return ehLinhaPropria(l) ? l.estProprio : l.estTotal;
+}
+
+/**
+ * Aplica o recorte pedido. A ORDEM de entrada já é a operacional
+ * (`ordenarLinhasClassificaveis`: ruptura primeiro, menor cobertura depois, SKU
+ * como desempate), e filtrar preserva ordem — por isso `reposicao` não precisa
+ * de ordenação própria: ela É `baixo` na ordem que já vem.
+ *
+ * `semvenda` exige saldo maior que zero: um SKU zerado que não vendeu não é
+ * estoque parado, é um anúncio sem estoque, e listá-lo afogaria o que importa.
+ */
+function filtrarEstoque(linhas: LinhaEstoque[], filtro?: string): LinhaEstoque[] {
+  const tipo = (l: LinhaEstoque, t: TipoEstoque) => l.tipo === t;
+  switch (filtro) {
+    case 'ruptura': return linhas.filter(l => tipo(l, 'ruptura'));
+    case 'alerta': return linhas.filter(l => tipo(l, 'alerta'));
+    case 'baixo':
+    case 'reposicao': return linhas.filter(l => tipo(l, 'ruptura') || tipo(l, 'alerta'));
+    case 'excesso': return linhas.filter(l => tipo(l, 'excesso'));
+    case 'semvenda': return linhas.filter(l => tipo(l, 'semvenda') && saldoClassificado(l) > 0);
+    default: return linhas;
+  }
+}
+
+function contarPorTipo(linhas: LinhaEstoque[]): Record<string, number> {
+  const c: Record<string, number> = { ruptura: 0, alerta: 0, ok: 0, excesso: 0, semvenda: 0 };
+  for (const l of linhas) if (l.tipo) c[l.tipo] = (c[l.tipo] ?? 0) + 1;
+  return c;
+}
+
+function somar(linhas: LinhaEstoque[], f: (l: LinhaEstoque) => number): number {
+  return linhas.reduce((s, l) => s + f(l), 0);
+}
+
+function baseEstoque(q: ChatQuery, inv: Inventario) {
+  return {
+    query: {
+      intent: q.intent,
+      scope: inv.escopo,
+      period: projetarPeriodo(q.period),
+      ...(q.inventoryFilter ? { filter: q.inventoryFilter } : {}),
+    },
+    catalog: {
+      version: inv.catalogo.versao,
+      updatedAt: inv.catalogo.updatedAt,
+      stale: inv.catalogo.stale,
+      listings: inv.catalogo.counts.total,
+    },
+    sales: { available: inv.vendasDisponiveis, windowDays: inv.periodo.dias },
+    limits: LIMITES_CLASSIFICACAO,
+    warnings: inv.warnings,
+  };
+}
+
+function montarContextoEstoqueResumo(q: ChatQuery, inv: Inventario) {
+  const { linhas, basis } = ladoDoEscopo(inv);
+  const own = inv.proprio
+    ? { skus: inv.proprio.length, units: somar(inv.proprio, l => (l as EstoqueSkuLinha).estProprio) }
+    : null;
+  const full = inv.full
+    ? { skus: inv.full.length, units: somar(inv.full, l => l.estTotal) }
+    : null;
+  return {
+    ...baseEstoque(q, inv),
+    stock: {
+      own,
+      full,
+      // Depósito próprio e Full são estoques FÍSICOS distintos, então somam sem
+      // dupla contagem. null quando um dos lados não foi pedido: somar o que
+      // não se leu daria um total silenciosamente menor.
+      totalUnits: own && full ? own.units + full.units : null,
+    },
+    classification: { basis, counts: contarPorTipo(linhas) },
+  };
+}
+
+function montarContextoEstoqueLista(q: ChatQuery, inv: Inventario) {
+  const { linhas, basis } = ladoDoEscopo(inv);
+  const filtradas = filtrarEstoque(linhas, q.inventoryFilter);
+  const limite = Math.min(q.limit ?? ESTOQUE_LISTA_PADRAO, ESTOQUE_LISTA_MAX);
+  return {
+    ...baseEstoque(q, inv),
+    classification: { basis },
+    total: filtradas.length,
+    items: filtradas.slice(0, limite).map(projetarLinhaEstoque),
+  };
+}
+
+function montarContextoEstoqueProduto(q: ChatQuery, inv: Inventario, linha: LinhaEstoque) {
+  const { basis } = ladoDoEscopo(inv);
+  return {
+    ...baseEstoque(q, inv),
+    classification: { basis },
+    product: projetarLinhaEstoque(linha),
+  };
+}
+
+/**
+ * Inconsistências nos DADOS de estoque. Duas fontes, ambas já produzidas pelo
+ * inventory.service: os alertas por linha (saldo negativo normalizado,
+ * inventory_id inválido, próprio sem inventory descartado) e a contagem de
+ * anúncios sem SKU, que vem do próprio agrupamento.
+ *
+ * Só o TIPO e uma amostra de SKUs saem daqui. As mensagens internas dos alertas
+ * citam ids de anúncio e critérios de desempate, que não ajudam quem opera.
+ */
+function montarContextoEstoqueProblemas(q: ChatQuery, inv: Inventario) {
+  const { linhas } = ladoDoEscopo(inv);
+  const porTipo = new Map<string, string[]>();
+  for (const l of linhas) {
+    for (const a of l.alertas as EstoqueAlerta[]) {
+      const lista = porTipo.get(a.tipo) ?? [];
+      if (!lista.includes(l.sku)) lista.push(l.sku);
+      porTipo.set(a.tipo, lista);
+    }
+  }
+  const semSku = linhas.filter(l => l.semSku);
+  if (semSku.length > 0) porTipo.set('anuncio_sem_sku', semSku.map(l => l.label));
+
+  const byType = [...porTipo.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([type, skus]) => ({
+      type,
+      count: skus.length,
+      samples: skus.slice(0, ESTOQUE_AMOSTRA_PROBLEMAS),
+    }));
+
+  return {
+    ...baseEstoque(q, inv),
+    issues: { types: byType.length, total: byType.reduce((n, t) => n + t.count, 0), byType },
+  };
+}
+
+// ── Respostas determinísticas de estoque ──────────────────────────────────
+const MSG_ESTOQUE_INDISPONIVEL =
+  'Os dados de estoque ainda não estão disponíveis. O catálogo de anúncios precisa ser sincronizado antes.';
+const MSG_PRODUTO_AUSENTE =
+  'Não encontrei esse produto no catálogo. Tente o SKU exato ou o nome como aparece no anúncio.';
+
+function mensagemProdutoAmbiguo(candidatos: Array<{ sku: string; label: string }>): string {
+  const lista = candidatos
+    .map(c => `${c.label} (SKU ${c.sku})`)
+    .join('; ');
+  return `Encontrei mais de um produto com esse nome: ${lista}. Qual deles?`;
+}
+
+/**
+ * Roteia uma consulta de ESTOQUE. Devolve o plano; respostas determinísticas
+ * (catálogo ausente, produto ambíguo, produto inexistente) já foram enviadas e
+ * NÃO consomem chave nem cota do provedor, igual ao caminho de vendas.
+ */
+async function rotearEstoque(
+  res: VercelResponse,
+  cache: Cache,
+  q: ChatQuery
+): Promise<PlanoChat> {
+  const r = await lerInventario(cache, {
+    periodo: { fromYmd: q.period.fromYmd, toYmd: q.period.toYmd },
+    escopo: q.inventoryScope ?? 'ambos',
+    hardTtlS: getEnv().ITEMS_CATALOG_HARD_TTL_S,
+  });
+
+  if (!r.ok) {
+    responderDeterministicamente(res, MSG_ESTOQUE_INDISPONIVEL, q);
+    return { tipo: 'respondido' };
+  }
+  const inv = r.value;
+
+  if (q.intent === 'inventory_issues') {
+    return { tipo: 'agregado', contexto: montarContextoEstoqueProblemas(q, inv), query: q, estoque: true };
+  }
+
+  if (q.intent === 'inventory_product') {
+    const { linhas } = ladoDoEscopo(inv);
+    const achado = resolverProduto(linhas, q.productTerm ?? '');
+    if (achado.kind === 'ambiguo') {
+      responderDeterministicamente(res, mensagemProdutoAmbiguo(achado.candidatos), q);
+      return { tipo: 'respondido' };
+    }
+    if (achado.kind === 'ausente') {
+      responderDeterministicamente(res, MSG_PRODUTO_AUSENTE, q);
+      return { tipo: 'respondido' };
+    }
+    return {
+      tipo: 'agregado',
+      contexto: montarContextoEstoqueProduto(q, inv, achado.linha),
+      query: q,
+      estoque: true,
+    };
+  }
+
+  if (q.intent === 'inventory_list') {
+    return { tipo: 'agregado', contexto: montarContextoEstoqueLista(q, inv), query: q, estoque: true };
+  }
+
+  return { tipo: 'agregado', contexto: montarContextoEstoqueResumo(q, inv), query: q, estoque: true };
+}
+
 /**
  * Plano de execução decidido pelo roteador.
  *  - 'respondido': a resposta determinística JÁ foi enviada; o handler retorna.
@@ -874,7 +1191,10 @@ function comCoberturaLogistica(
 type PlanoChat =
   | { tipo: 'respondido' }
   | { tipo: 'legado' }
-  | { tipo: 'agregado'; contexto: unknown; query: ChatQuery; margem?: boolean; ranking?: boolean };
+  | {
+      tipo: 'agregado'; contexto: unknown; query: ChatQuery;
+      margem?: boolean; ranking?: boolean; estoque?: boolean;
+    };
 
 /**
  * Roteamento determinístico. Leituras de snapshot acontecem SOMENTE no ramo
@@ -914,6 +1234,10 @@ async function rotearConsulta(
   }
 
   const q = parsed.query;
+
+  // Estoque tem outra fonte (catálogo + pedidos) e outro serviço. Sai daqui
+  // antes da leitura do manifesto de pedidos, que não responderia a pergunta.
+  if (ehIntencaoEstoque(q.intent)) return rotearEstoque(res, cache, q);
 
   // Manifesto: ausente, corrompido, sem versão, sem datas ou vazio => sem
   // números. Nunca inventar zero, nunca chamar a Gemini.
@@ -1096,9 +1420,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           apiKey,
           message,
           plano.contexto,
-          plano.ranking ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_RANKING
-            : plano.margem ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_MARGEM
-              : SYSTEM_PROMPT_AGREGADO
+          plano.estoque ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_ESTOQUE
+            : plano.ranking ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_RANKING
+              : plano.margem ? SYSTEM_PROMPT_AGREGADO + SYSTEM_PROMPT_MARGEM
+                : SYSTEM_PROMPT_AGREGADO
         )
       : await chamarIA(apiKey, message, body.context);
     const dur = Date.now() - t0;

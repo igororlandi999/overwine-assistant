@@ -57,8 +57,42 @@ import type { PeriodoYmd } from './sales-metrics.service.js';
 // ── Tipos públicos ──────────────────────────────────────────────────────────
 
 /** FONTE ÚNICA das intenções. Ver a nota de CHAT_PERIOD_KINDS abaixo. */
-export const CHAT_INTENTS = ['sales_summary', 'sales_comparison', 'sales_ranking'] as const;
+export const CHAT_INTENTS = [
+  'sales_summary', 'sales_comparison', 'sales_ranking',
+  'inventory_summary', 'inventory_list', 'inventory_product', 'inventory_issues',
+] as const;
 export type ChatIntent = typeof CHAT_INTENTS[number];
+
+/** Intenções que falam de ESTOQUE, e não do snapshot de pedidos. */
+const INVENTORY_INTENTS: ReadonlySet<string> = new Set<string>([
+  'inventory_summary', 'inventory_list', 'inventory_product', 'inventory_issues',
+]);
+
+export function ehIntencaoEstoque(i: ChatIntent): boolean {
+  return INVENTORY_INTENTS.has(i);
+}
+
+/**
+ * Recortes de uma listagem de estoque. Todos derivam da classificação que o
+ * inventory.service já produz — nenhum limite novo foi inventado.
+ *
+ * `baixo` é o único que NÃO é uma classificação: é a UNIÃO de `ruptura` e
+ * `alerta`. "estoque baixo" e "pouco estoque" não distinguem as duas faixas na
+ * fala, e responder só uma esconderia metade da lista operacional. Quem quer
+ * apenas a faixa intermediária diz "em alerta", que mapeia para `alerta`.
+ *
+ * `reposicao` também não é classificação: é `baixo` com a ORDENAÇÃO de
+ * prioridade (ruptura antes de alerta, menor cobertura antes). Não estima
+ * demanda nem sugere quantidade de compra.
+ */
+export const CHAT_INVENTORY_FILTERS = [
+  'ruptura', 'alerta', 'baixo', 'excesso', 'semvenda', 'reposicao',
+] as const;
+export type ChatInventoryFilter = typeof CHAT_INVENTORY_FILTERS[number];
+
+/** Onde o saldo está: depósito próprio, Full do Mercado Livre, ou os dois. */
+export const CHAT_INVENTORY_SCOPES = ['proprio', 'full', 'ambos'] as const;
+export type ChatInventoryScope = typeof CHAT_INVENTORY_SCOPES[number];
 
 /**
  * Critérios de ranking. Subconjunto DELIBERADO de CHAT_METRICS: só faz sentido
@@ -97,7 +131,14 @@ export interface ChatPeriod extends PeriodoYmd {
 export interface ChatQuerySource {
   intent: 'text' | 'previous';
   metric: 'text' | 'previous' | 'default';
-  period: 'text' | 'previous';
+  /**
+   * `default` só acontece em estoque: "o que está em ruptura?" não tem período
+   * nenhum e não deveria ter — o saldo é de agora. O período ali serve apenas
+   * para a janela de vendas que alimenta a velocidade, e 30 dias é o padrão
+   * herdado da aba Estoque do dashboard. Em vendas, período ausente continua
+   * sendo ambiguidade.
+   */
+  period: 'text' | 'previous' | 'default';
 }
 
 export interface ChatQuery {
@@ -113,8 +154,19 @@ export interface ChatQuery {
    * que este é o eixo de ORDENAÇÃO, não só o número pedido.
    */
   rankBy?: ChatRankBy;
-  /** Top N pedido. Ausente = padrão do serviço de ranking. */
+  /** Top N pedido. Ausente = padrão do serviço (ranking ou estoque). */
   limit?: number;
+  /** Presente somente em inventory_list. Ausente = a listagem inteira. */
+  inventoryFilter?: ChatInventoryFilter;
+  /** Presente em qualquer intenção de estoque. Ausente = 'ambos'. */
+  inventoryScope?: ChatInventoryScope;
+  /**
+   * Presente somente em inventory_product: o texto do produto pedido, já
+   * normalizado. O parser NÃO resolve o produto — não conhece o catálogo. Quem
+   * resolve é `resolverProduto` do inventory-read.service, de forma
+   * determinística, depois de ler o snapshot.
+   */
+  productTerm?: string;
   source: ChatQuerySource;
 }
 
@@ -221,11 +273,16 @@ const RE_INJECAO = /\b(ignore|ignorar|desconsidere|esqueca|finja|aja como|voce a
  *
  * SAÍRAM daqui ao ganhar suporte: `ranking`, `mais vendido`, `top N`,
  * `produto`, `produtos`, `sku` — agora tratados por RE_RANKING_EXPLICITO e
- * RE_DIMENSAO_PRODUTO. `anuncio` PERMANECE: um anúncio não é um produto (três
- * anúncios do mesmo vinho compartilham um SKU), e responder ranking de produto
- * a uma pergunta sobre anúncio seria trocar a dimensão pedida.
+ * RE_DIMENSAO_PRODUTO. `estoque` e `ruptura` também saíram: são tratados por
+ * `interpretarEstoque`, que roda ANTES deste bloco.
+ *
+ * `anuncio` PERMANECE: um anúncio não é um produto (três anúncios do mesmo
+ * vinho compartilham um SKU), e responder ranking de produto a uma pergunta
+ * sobre anúncio seria trocar a dimensão pedida. `cobertura` PERMANECE porque
+ * sozinha é ambígua entre cobertura de estoque e cobertura do snapshot; a
+ * forma composta "dias de cobertura" é reconhecida como estoque.
  */
-const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|estoque|ruptura|cobertura|reputacao|qualidade|cancelad\w*|motivo)\b/;
+const RE_FORA_ESCOPO = /\b(custo|tacos|anuncio|anuncios|ads|publicidade|cobertura|reputacao|qualidade|cancelad\w*|motivo)\b/;
 
 /**
  * Ranking por PALAVRA EXPLÍCITA. Basta um destes termos: a pergunta já é
@@ -378,6 +435,13 @@ function extrairDatas(t: string, hoje: string): { datas: DataBruta[]; invalida: 
 const MAX_JANELA_DIAS = 365;
 
 /** Multiplicador de unidade para janelas móveis. Mês = 30 dias corridos. */
+/**
+ * Janela padrão das consultas de ESTOQUE quando a pergunta não traz período.
+ * 30 dias civis terminando hoje — a mesma de `resolverPeriodoInventario`, para
+ * que a rota HTTP e o chat calculem a velocidade sobre o mesmo intervalo.
+ */
+export const INVENTARIO_JANELA_PADRAO_DIAS = 30;
+
 const UNIDADE_JANELA: Record<string, number> = {
   dia: 1, dias: 1,
   semana: 7, semanas: 7,
@@ -630,6 +694,284 @@ export function previousQueryValida(q: unknown): q is ChatQuery {
   return true;
 }
 
+
+// ── Estoque ───────────────────────────────────────────────────────────────
+
+/**
+ * Núcleo léxico de estoque. Um destes termos já torna a pergunta de estoque,
+ * sem precisar de mais nada na frase.
+ *
+ * `cobertura` NÃO entra sozinho: no dashboard a palavra também descreve a
+ * cobertura do snapshot de pedidos, e "qual a cobertura?" é ambíguo. Só entra
+ * na forma composta, tratada em RE_ESTOQUE_COMPOSTO.
+ *
+ * `parado` também não entra: "pedidos parados" não é estoque. Ele classifica
+ * (RE_SEM_VENDA_FRACO) mas não dispara.
+ */
+const RE_ESTOQUE_NUCLEO =
+  /\b(estoque|estoques|inventario|inventarios|inventory|saldo|saldos|ruptura|rupturas|reposicao|repor|reabastec\w*|abastec\w*|acabando|esgotad\w*|encalhad\w*|alerta|alertas|excesso|excessiv\w*|sobrando|sobras?|excedente\w*)\b/;
+
+/** Formas compostas que só significam estoque juntas. */
+const RE_ESTOQUE_COMPOSTO = /\b(dias de cobertura|cobertura de estoque|giro de estoque)\b/;
+
+/** Posse. Sozinho não basta ("quanto temos de faturamento?" é venda). */
+const RE_POSSE = /\b(temos|tenho|tem|resta\w*|sobra\w*|disponive\w+)\b/;
+
+/** Depósito Full do Mercado Livre. Palavra inteira: não casa "fulminante". */
+const RE_FULL = /\b(full|fulfillment)\b/;
+const RE_PROPRIO = /\b(proprio|propria|proprios|proprias)\b/;
+
+/**
+ * "não vende", "sem venda" — dispara estoque SOZINHO.
+ *
+ * A pergunta "quais produtos não venderam nos últimos 60 dias?" não diz
+ * estoque, mas só é operacional contra estoque: uma lista de SKUs zerados que
+ * não venderam não serve para nada. O lado de vendas não tem essa consulta e
+ * responderia módulo indisponível, então tratá-la como estoque é ganho puro.
+ */
+const RE_SEM_VENDA_FORTE =
+  /\b(sem (?:venda|vendas|vender|giro)|nao (?:vende|vendem|vendeu|venderam|girou|girab\w*)|zero venda\w*|nenhuma venda)\b/;
+
+/** Classifica como "sem venda", mas não dispara estoque por conta própria. */
+const RE_SEM_VENDA_FRACO = /\b(parad[oa]s?|encalhad\w*|sem sair|sem giro)\b/;
+
+/**
+ * Dimensões que o backend NÃO calcula e que mudariam a resposta. Presentes
+ * junto de estoque ("custo do estoque"), a pergunta NÃO é tratada como estoque:
+ * cai no bloco de assunto fora de escopo, como antes. Responder o saldo a quem
+ * perguntou o custo seria trocar a pergunta.
+ */
+const RE_DIMENSAO_ALHEIA = /\b(custo|custos|publicidade|ads|anuncio|anuncios|reputacao|cancelad\w*)\b/;
+
+const RE_F_RUPTURA =
+  /\b(ruptura|rupturas|acabando|acabar|esgotad\w*|falta|faltando|faltam|zerad\w*|repor|reposicao|reabastec\w*|abastec\w*|comprar)\b/;
+const RE_F_ALERTA = /\b(alerta|alertas|atencao)\b/;
+const RE_F_BAIXO = /\b(baixo|baixa|baixos|baixas|pouco|pouca|poucos|poucas|pouquinho)\b/;
+const RE_F_EXCESSO = /\b(excesso|excessiv\w*|demais|sobrando|sobra|sobras|excedente\w*)\b/;
+
+/** Marca de PRIORIZAÇÃO: transforma "repor" em ordem de reposição. */
+const RE_PRIORIDADE =
+  /\b(prioridade|prioridades|primeiro|primeiros|primeira|primeiras|urgente|urgentes|urgencia|antes)\b/;
+
+/** Problemas nos DADOS de estoque, não no estoque em si. */
+const RE_PROBLEMAS =
+  /\b(problema|problemas|inconsistencia\w*|inconsistente\w*|divergencia\w*|negativ[oa]s?|erro|erros|errad[oa]s?|estranho\w*)\b/;
+
+/** Pedido explícito de LISTA, e não de número agregado. */
+const RE_LISTAGEM = /\b(quais|liste|listar|lista|mostre|mostrar|quero ver|me mostre)\b/;
+
+/**
+ * Termos que aparecem depois de "do/da/de" mas não são produto. Sem esta
+ * guarda, "quanto temos de estoque?" extrairia o produto "estoque".
+ */
+const NAO_SAO_PRODUTO: ReadonlySet<string> = new Set([
+  'estoque', 'estoques', 'inventario', 'inventarios', 'saldo', 'saldos',
+  'full', 'fulfillment', 'proprio', 'propria', 'proprios', 'proprias',
+  'ruptura', 'rupturas', 'alerta', 'alertas', 'excesso', 'reposicao',
+  'produto', 'produtos', 'sku', 'skus', 'item', 'itens', 'vinho', 'vinhos',
+  'cobertura', 'tudo', 'todos', 'todas', 'geral', 'nada', 'venda', 'vendas',
+  'unidade', 'unidades', 'giro', 'cada um', 'cada',
+]);
+
+/** Tira pontuação final para os padrões ancorados em fim de frase. */
+function semPontuacaoFinal(t: string): string {
+  return t.replace(/[?!.,;:\s]+$/, '');
+}
+
+/** Gatilhos que podem introduzir o nome de um produto. */
+const RE_GATILHO_PRODUTO = /\b(sku|produto|item|vinho|d[eoa]s?)\s+/g;
+
+/** Forma aceitável de um termo: letras, dígitos, espaço, ponto, hífen. */
+const RE_TERMO_ACEITAVEL = /^[a-z0-9][a-z0-9\s.\-_]*$/;
+
+/** Precedência do gatilho. "no Full do SKU X" tem que resolver X, não "full…". */
+function forcaDoGatilho(g: string): number {
+  if (g === 'sku') return 0;
+  if (g === 'produto' || g === 'item' || g === 'vinho') return 1;
+  return 2; // de/do/da/dos/das
+}
+
+/**
+ * Conectivos e quantificadores. Um termo que comece por um deles não é nome de
+ * produto — é o resto da frase que sobrou depois do gatilho.
+ */
+const CONECTIVOS: ReadonlySet<string> = new Set([
+  'com', 'sem', 'e', 'ou', 'que', 'para', 'por', 'no', 'na', 'nos', 'nas',
+  'em', 'um', 'uma', 'uns', 'umas', 'o', 'a', 'os', 'as', 'meu', 'meus',
+  'nosso', 'nossos', 'algum', 'alguns', 'qualquer',
+]);
+
+/**
+ * Extrai o PRODUTO pedido, se houver, do fim da frase.
+ *
+ * Ordem: "sku X" vence "produto X", que vence o genérico "... de X". O parser
+ * só devolve o TEXTO; quem decide se ele corresponde a um SKU, a um título ou a
+ * nada é `resolverProduto`, com o catálogo em mãos.
+ */
+function termoValido(termo: string): boolean {
+  if (termo === '' || !RE_TERMO_ACEITAVEL.test(termo)) return false;
+  const palavras = termo.split(' ');
+  // Vocabulário de estoque em QUALQUER posição descarta o termo: "com estoque e
+  // sem venda" é o fim de uma frase, não o nome de um vinho. Um título real
+  // ("arcos do convento") não carrega essas palavras.
+  if (palavras.some(w => NAO_SAO_PRODUTO.has(w))) return false;
+  if (CONECTIVOS.has(palavras[0])) return false;
+  return true;
+}
+
+/**
+ * Extrai o PRODUTO pedido, se houver.
+ *
+ * Varre TODOS os gatilhos e escolhe por precedência: `sku` vence
+ * `produto/item/vinho`, que vencem o genérico `de/do/da`; empatada a
+ * precedência, vence o mais à ESQUERDA. As duas regras juntas são o que faz
+ * "qual o estoque do Arcos do Convento" resolver o título inteiro em vez de
+ * "convento" — o "do" interno do título é um gatilho mais à direita — e
+ * "quanto tem no Full do SKU 21002" resolver "21002" em vez de "full do sku…".
+ *
+ * Um único `exec` não bastaria: o primeiro gatilho pode produzir um termo
+ * inválido ("me da um resumo do estoque" → "um resumo do estoque"), e é preciso
+ * seguir para o próximo em vez de desistir.
+ */
+function detectarProduto(t: string): string | null {
+  const limpo = semPontuacaoFinal(t);
+  const candidatos: Array<{ forca: number; pos: number; termo: string }> = [];
+
+  RE_GATILHO_PRODUTO.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = RE_GATILHO_PRODUTO.exec(limpo)) !== null) {
+    const termo = limpo.slice(m.index + m[0].length).trim();
+    if (termoValido(termo)) {
+      candidatos.push({ forca: forcaDoGatilho(m[1]), pos: m.index, termo });
+    }
+    // Recua o cursor: gatilhos podem se sobrepor ("do sku" tem "do" e "sku").
+    RE_GATILHO_PRODUTO.lastIndex = m.index + 1;
+  }
+  if (candidatos.length === 0) return null;
+
+  candidatos.sort((a, b) => (a.forca - b.forca) || (a.pos - b.pos));
+  return candidatos[0].termo;
+}
+
+function detectarEscopoEstoque(t: string): ChatInventoryScope {
+  const full = RE_FULL.test(t);
+  const proprio = RE_PROPRIO.test(t);
+  if (full && !proprio) return 'full';
+  if (proprio && !full) return 'proprio';
+  return 'ambos';
+}
+
+/**
+ * Recorte pedido. A ORDEM é a regra: "sem venda" vence tudo (a pergunta é sobre
+ * giro, não sobre faixa de saldo); excesso vem antes de ruptura porque
+ * "sobrando" e "acabando" nunca aparecem juntos; e a marca de prioridade
+ * transforma "repor" em `reposicao`.
+ */
+function detectarFiltroEstoque(t: string): ChatInventoryFilter | null {
+  if (RE_SEM_VENDA_FORTE.test(t) || RE_SEM_VENDA_FRACO.test(t)) return 'semvenda';
+  if (RE_F_EXCESSO.test(t)) return 'excesso';
+  if (RE_F_RUPTURA.test(t)) return RE_PRIORIDADE.test(t) ? 'reposicao' : 'ruptura';
+  if (RE_F_ALERTA.test(t)) return 'alerta';
+  if (RE_F_BAIXO.test(t)) return 'baixo';
+  return null;
+}
+
+/**
+ * Interpreta uma pergunta de ESTOQUE. Devolve `null` quando a pergunta não é de
+ * estoque, e aí o parser segue o caminho de vendas intocado.
+ *
+ * PERÍODO: opcional, ao contrário de vendas. O saldo é de AGORA; o período só
+ * define a janela de vendas que alimenta a velocidade. Sem período no texto,
+ * usa 30 dias civis terminando hoje — a mesma janela que
+ * `resolverPeriodoInventario` usa por padrão, para que a rota HTTP e o chat
+ * respondam o mesmo número.
+ */
+function interpretarEstoque(t: string, hoje: string): ChatQueryResult | null {
+  const produto = detectarProduto(t);
+  const armazem = RE_FULL.test(t) || RE_PROPRIO.test(t);
+
+  const ehEstoque =
+    RE_ESTOQUE_NUCLEO.test(t) ||
+    RE_ESTOQUE_COMPOSTO.test(t) ||
+    RE_SEM_VENDA_FORTE.test(t) ||
+    // "quanto TEMOS do SKU X" é posse; "quanto VENDEMOS do SKU X" não é. O
+    // léxico de venda desempata, e sem ele a frase cairia no filtro por produto
+    // do caminho de vendas, que é recusado.
+    (RE_POSSE.test(t) && produto !== null && !RE_INTENCAO_VENDAS.test(t)) ||
+    // "quais produtos estão no Full?" não tem verbo de posse, mas nomear o
+    // armazém já é falar de estoque.
+    (armazem && (RE_POSSE.test(t) || RE_LISTAGEM.test(t))) ||
+    // "o que precisamos comprar primeiro?" não diz estoque nem reposição, mas
+    // comprar + prioridade só significa uma coisa nesta operação.
+    (RE_F_RUPTURA.test(t) && RE_PRIORIDADE.test(t));
+  if (!ehEstoque) return null;
+
+  // Dimensão que o backend não calcula: devolve ao fluxo antigo em vez de
+  // responder outra pergunta.
+  if (RE_DIMENSAO_ALHEIA.test(t)) return null;
+
+  // Comparar estoque entre períodos exige histórico de saldo, que o snapshot
+  // não guarda. Recusa explícita em vez de responder o saldo de agora.
+  if (RE_COMPARACAO.test(t)) return { kind: 'out_of_scope', reason: 'assunto_nao_suportado' };
+
+  const per = detectarPeriodo(t, hoje);
+  if (per && per.ok === false) return { kind: 'invalid_period', reason: per.erro };
+
+  const period: ChatPeriod = per && per.ok === true
+    ? per.period
+    : periodo('last_n_days', somaDias(hoje, -(INVENTARIO_JANELA_PADRAO_DIAS - 1)), hoje);
+  const periodFrom: ChatQuerySource['period'] = per && per.ok === true ? 'text' : 'default';
+
+  const escopo = detectarEscopoEstoque(t);
+  const filtro = detectarFiltroEstoque(t);
+  const limite = detectarLimite(t);
+
+  const base = {
+    metric: 'units' as ChatMetric,
+    period,
+    inventoryScope: escopo,
+    source: { intent: 'text' as const, metric: 'default' as const, period: periodFrom },
+  };
+
+  if (RE_PROBLEMAS.test(t)) {
+    return { kind: 'recognized', query: { ...base, intent: 'inventory_issues' } };
+  }
+
+  if (produto !== null) {
+    return {
+      kind: 'recognized',
+      query: { ...base, intent: 'inventory_product', productTerm: produto },
+    };
+  }
+
+  if (filtro !== null) {
+    return {
+      kind: 'recognized',
+      query: {
+        ...base,
+        intent: 'inventory_list',
+        inventoryFilter: filtro,
+        ...(limite !== undefined ? { limit: limite } : {}),
+      },
+    };
+  }
+
+  // "quais produtos estão no Full?" é listagem; "quanto temos no Full?" é
+  // resumo. O que separa as duas é o pedido explícito de lista.
+  if (RE_LISTAGEM.test(t) && escopo !== 'ambos') {
+    return {
+      kind: 'recognized',
+      query: {
+        ...base,
+        intent: 'inventory_list',
+        ...(limite !== undefined ? { limit: limite } : {}),
+      },
+    };
+  }
+
+  return { kind: 'recognized', query: { ...base, intent: 'inventory_summary' } };
+}
+
 // ── Parser principal ────────────────────────────────────────────────────────
 
 /**
@@ -647,6 +989,12 @@ export function parseChatQuery(texto: string, opts: ParseOptions = {}): ChatQuer
   if (RE_SENSIVEL.test(t) || RE_INJECAO.test(t)) {
     return { kind: 'out_of_scope', reason: 'conteudo_sensivel' };
   }
+
+  // 1a) ESTOQUE. Antes do bloco de assunto fora de escopo, que é onde
+  //     `estoque` e `ruptura` moravam. Devolve null quando a pergunta não é de
+  //     estoque, e o caminho de vendas segue exatamente como antes.
+  const estoque = interpretarEstoque(t, hoje);
+  if (estoque !== null) return estoque;
 
   const metricaTexto = detectarMetrica(t);
   const ehComparacao = RE_COMPARACAO.test(t);

@@ -273,9 +273,9 @@ describe('chat-query — ambiguidade e fora de escopo', () => {
   it('assunto do dashboard fora do escopo desta fase => out_of_scope', () => {
     // Filtro por UM produto continua fora: o ranking classifica todos, nao isola um.
     expect(parseChatQuery('qual a margem do produto x?', opt()).kind).toBe('out_of_scope');
-    expect(parseChatQuery('como esta o estoque?', opt()).kind).toBe('out_of_scope');
     // 'qual produto mais vendeu este mes?' passou a ser SUPORTADA como ranking
-    // (ver o bloco 'chat-query — ranking por produto').
+    // (ver o bloco 'chat-query — ranking por produto'), e 'como esta o estoque?'
+    // passou a ser SUPORTADA como inventory_summary (ver 'chat-query — estoque').
   });
 });
 
@@ -1006,7 +1006,6 @@ describe('chat-query — ranking por produto', () => {
     expect(parseChatQuery('qual o custo do arcos ontem?', opt()).kind).toBe('out_of_scope');
     expect(parseChatQuery('quanto gastei com publicidade ontem?', opt()).kind).toBe('out_of_scope');
     expect(parseChatQuery('quantos pedidos foram cancelados ontem?', opt()).kind).toBe('out_of_scope');
-    expect(parseChatQuery('como esta o estoque?', opt()).kind).toBe('out_of_scope');
     expect(parseChatQuery('ranking dos compradores de ontem', opt()).kind).toBe('out_of_scope');
     // Consulta simples NAO virou ranking.
     const q = rk('quanto vendemos ontem?');
@@ -1092,7 +1091,6 @@ describe('chat-query — conjugacoes sem o "que"', () => {
 
   it('as guardas continuam intactas apos alargar os regex', () => {
     for (const frase of [
-      'como esta o estoque?',
       'quanto gastei com publicidade ontem?',
       'quantos pedidos foram cancelados ontem?',
       'qual o custo do arcos ontem?',
