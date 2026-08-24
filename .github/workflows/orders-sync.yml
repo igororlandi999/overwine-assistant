@@ -143,6 +143,21 @@ jobs:
           if concluido is True:
               raise SystemExit(0)
 
+          # `sem_novos` é SUCESSO, não falha: a sincronização incremental leu as
+          # páginas, não achou pedido novo nem alterado, e por isso não publicou
+          # versão nova. O job foi encerrado e o status gravado — não há o que
+          # retomar, e é exatamente por isso que `retomavel` vem false.
+          #
+          # Entre 17/08/2026 e 24/08/2026 esta linha não existia e a condição
+          # abaixo tratava esse estado como fatal. Resultado: 34 das 60 últimas
+          # execuções ficaram vermelhas com o backend funcionando perfeitamente,
+          # os dois backends em uníssono, em 4 a 6 segundos. Ver o teste
+          # "6. nada novo e nada alterado" em tests/orders-sync.service.test.ts,
+          # que trava o contrato do qual esta regra depende.
+          if motivo == "sem_novos":
+              print("Nada novo desde a última sincronização; snapshot mantido.")
+              raise SystemExit(0)
+
           if retomavel is not True:
               print(
                   "::error::O passo não concluiu e não é retomável. "
