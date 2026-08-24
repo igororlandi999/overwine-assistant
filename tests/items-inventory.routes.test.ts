@@ -12,6 +12,8 @@ import {
 } from '../src/lib/orders-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import handler from '../api/items/[resource].js';
+import { hojeBRT } from '../src/lib/datas-brt.js';
+import { ymdMenosDias } from '../src/services/orders-metrics.service.js';
 
 // ── mocks mínimos de Vercel req/res (mesmo padrão dos demais testes de rota) ──
 function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown> }> = {}) {
@@ -368,6 +370,40 @@ describe('GET /api/items/inventory — escopo e modo', () => {
     const totais = (c: any) => c.proprio.linhas.map((l: any) => [l.sku, l.estProprio, l.estFull, l.estTotal]);
     expect(totais(legado)).toEqual(totais(seguro));
     expect(legado.full.resumo.unidades).toBe(seguro.full.resumo.unidades);
+  });
+});
+
+describe('GET /api/items/inventory — semântica de período', () => {
+  it('dias=N são N dias civis terminando hoje, não N+1', async () => {
+    await publicarCatalogo(cache);
+    const c = (await chamar({ dias: '30' }, await comSessao())).json();
+    const hoje = hojeBRT();
+    expect(c.periodo.toYmd).toBe(hoje);
+    expect(c.periodo.fromYmd).toBe(ymdMenosDias(hoje, 29));
+    // 31 seria a convenção de /api/orders/metrics; estoque diverge de propósito
+    // para bater com o "últimos 30 dias" do parser do chat.
+    expect(c.periodo.dias).toBe(30);
+  });
+
+  it('sem parâmetro de período usa a mesma janela de dias=30', async () => {
+    await publicarCatalogo(cache);
+    const sess = await comSessao();
+    const semParam = (await chamar({}, sess)).json();
+    const com30 = (await chamar({ dias: '30' }, sess)).json();
+    expect(semParam.periodo).toEqual(com30.periodo);
+  });
+
+  it('dias=1 é só hoje', async () => {
+    await publicarCatalogo(cache);
+    const c = (await chamar({ dias: '1' }, await comSessao())).json();
+    expect(c.periodo.fromYmd).toBe(c.periodo.toYmd);
+    expect(c.periodo.dias).toBe(1);
+  });
+
+  it('intervalo explícito passa intocado', async () => {
+    await publicarCatalogo(cache);
+    const c = (await chamar(JANELA, await comSessao())).json();
+    expect(c.periodo).toMatchObject({ fromYmd: '2026-08-01', toYmd: '2026-08-10', dias: 10 });
   });
 });
 

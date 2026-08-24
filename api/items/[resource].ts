@@ -43,15 +43,11 @@ import {
   reconstruirCatalogo,
   type FetchItemIds, type FetchItemsBatch, type ItemBruto, type StatusCatalogo,
 } from '../../src/services/items-catalog.service.js';
-import { brtEndOfDay, brtStartOfDay } from '../../src/lib/datas-brt.js';
-import { readSnapshot } from '../../src/lib/orders-store.js';
-import { getReadStatus } from '../../src/services/orders-read.service.js';
-import { unidadesPorItem } from '../../src/services/orders.service.js';
-import { resolverPeriodo } from '../../src/services/orders-metrics.service.js';
+import { LIMITES_CLASSIFICACAO, type ModoEstoque } from '../../src/services/inventory.service.js';
 import {
-  LIMITES_CLASSIFICACAO, buildEstoqueFullPorSku, buildEstoquePorSku,
-  type EstoquePorSkuOpcoes, type ModoEstoque,
-} from '../../src/services/inventory.service.js';
+  lerInventario, resolverPeriodoInventario,
+  type EscopoEstoque, type Inventario,
+} from '../../src/services/inventory-read.service.js';
 
 /** Ids aleatórios do lock — sem depender de crypto extra. */
 function donoLock(): string {
@@ -96,14 +92,6 @@ const ESCOPOS_ESTOQUE = new Set<string>(['proprio', 'full', 'ambos']);
  */
 const INVENTARIO_DIAS_PADRAO = 30;
 
-/** Dias do período, bordas incluídas. Ver a nota sobre o divisor abaixo. */
-function diasInclusive(fromYmd: string, toYmd: string): number {
-  const ini = brtStartOfDay(fromYmd);
-  const fim = brtStartOfDay(toYmd);
-  if (!ini || !fim) return 1;
-  return Math.round((fim.getTime() - ini.getTime()) / 86400000) + 1;
-}
-
 interface ResumoEstoque {
   skus: number;
   unidades: number;
@@ -111,7 +99,7 @@ interface ResumoEstoque {
 }
 
 function resumir<T extends { tipo: string | null }>(
-  linhas: T[],
+  linhas: readonly T[],
   unidadeDe: (l: T) => number
 ): ResumoEstoque {
   const porTipo: Record<string, number> = {
@@ -137,10 +125,14 @@ function resumir<T extends { tipo: string | null }>(
  * de não determinismo da partição clássico/premium. `modo=legado` continua
  * disponível para comparar paridade.
  *
- * DIVISOR DA VELOCIDADE: usa o span REAL do período, bordas incluídas. Com
- * `dias=30` o período resolvido é `hoje-30..hoje`, que são 31 dias, e o
- * dashboard legado divide essas mesmas vendas por 30. Preferimos o divisor
- * honesto e devolvemos `periodo.dias` para o consumidor auditar a conta.
+ * PERÍODO: `dias=N` significa N dias civis terminando hoje, bordas incluídas —
+ * NÃO os N+1 dias de `/api/orders/metrics`. A razão está em
+ * inventory-read.service.ts: com estoque também no chat, as duas convenções
+ * passariam a responder a mesma pergunta com números diferentes. `periodo.dias`
+ * vai na resposta para o consumidor auditar o divisor.
+ *
+ * A composição inteira vive em inventory-read.service.ts, para que o assistente
+ * produza exatamente os mesmos números sem uma chamada HTTP interna.
  */
 async function responderInventario(
   req: VercelRequest,
@@ -164,99 +156,49 @@ async function responderInventario(
   }
 
   const rawEscopo = req.query.escopo;
-  let escopo = 'ambos';
+  let escopo: EscopoEstoque = 'ambos';
   if (rawEscopo !== undefined && rawEscopo !== '') {
     if (typeof rawEscopo !== 'string' || !ESCOPOS_ESTOQUE.has(rawEscopo)) {
       return json(res, 400, { error: 'invalid_params', code: 'escopo_invalido' });
     }
-    escopo = rawEscopo;
+    escopo = rawEscopo as EscopoEstoque;
   }
 
-  const p = resolverPeriodo(
-    { dias: req.query.dias, from: req.query.from, to: req.query.to },
-    new Date(),
-    INVENTARIO_DIAS_PADRAO
-  );
+  const p = resolverPeriodoInventario({
+    dias: req.query.dias, from: req.query.from, to: req.query.to,
+  });
   if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
 
-  // Catálogo: SOMENTE o snapshot publicado. Reconstruir é trabalho de
-  // `catalog?refresh=1` — este recurso nunca toca o Mercado Livre nem pega o
-  // lock de reconstrução, para que uma consulta de estoque não possa competir
-  // com a atualização do catálogo.
-  let manifest: CatalogManifest | null = null;
-  try {
-    manifest = await readCatalogManifest(cache);
-  } catch {
-    manifest = null; // manifesto corrompido é tratado como ausente
-  }
-  if (!manifest) return json(res, 409, { error: 'not_ready', code: 'catalogo_indisponivel' });
-
-  const items = await lerCatalogoPublicado(cache, manifest);
-  if (items.length === 0) return json(res, 409, { error: 'not_ready', code: 'catalogo_vazio' });
-
-  const warnings: string[] = [];
   const env = getEnv();
-  if (precisaReconstruir(manifest, env.ITEMS_CATALOG_HARD_TTL_S)) warnings.push('catalogo_stale');
-
-  // Vendas são OPCIONAIS: sem elas o saldo deduplicado continua correto e
-  // apenas a classificação por velocidade fica nula. Degradar aqui é melhor
-  // que 409 — a pergunta "quanto tenho em estoque?" não depende de pedidos.
-  let vendasPorItem: Record<string, number> | undefined;
-  try {
-    const st = await getReadStatus(cache, 'ativos');
-    if (st.versao !== null && st.totalRegistros > 0) {
-      const pedidos = await readSnapshot(cache, 'ativos');
-      if (pedidos.length > 0) {
-        vendasPorItem = Object.fromEntries(
-          unidadesPorItem(pedidos, brtStartOfDay(p.periodo.fromYmd), brtEndOfDay(p.periodo.toYmd))
-        );
-      }
-    }
-  } catch {
-    vendasPorItem = undefined; // segue sem classificação
-  }
-  if (!vendasPorItem) warnings.push('vendas_indisponiveis');
-
-  const dias = diasInclusive(p.periodo.fromYmd, p.periodo.toYmd);
-  const opcoes: EstoquePorSkuOpcoes = { modo, vendasPorItem, diasPeriodo: dias };
-
-  // `classificarEstoque` LANÇA com saldo negativo, e o modo legado propaga
-  // negativo de propósito. Sem este guarda um único anúncio com
-  // available_quantity < 0 viraria um 500 opaco em `modo=legado`; aqui vira um
-  // 409 que diz o que fazer. O modo padrão (seguro) normaliza e nunca cai aqui.
-  let linhasProprio: ReturnType<typeof buildEstoquePorSku> | null = null;
-  let linhasFull: ReturnType<typeof buildEstoqueFullPorSku> | null = null;
-  try {
-    linhasProprio = escopo === 'full' ? null : buildEstoquePorSku(items, opcoes);
-    linhasFull = escopo === 'proprio' ? null : buildEstoqueFullPorSku(items, opcoes);
-  } catch (e) {
-    if (modo === 'legado') {
-      console.warn('[items-inventory] falha no modo legado', e instanceof Error ? e.message : e);
-      return json(res, 409, { error: 'not_ready', code: 'saldo_invalido_no_modo_legado' });
-    }
-    throw e;
-  }
-
-  return json(res, 200, {
-    ok: true,
-    catalogo: {
-      versao: manifest.versao,
-      updatedAt: manifest.updatedAt,
-      counts: manifest.counts,
-      stale: warnings.includes('catalogo_stale'),
-    },
-    periodo: { fromYmd: p.periodo.fromYmd, toYmd: p.periodo.toYmd, dias },
+  const r = await lerInventario(cache, {
+    periodo: p.periodo,
     modo,
     escopo,
-    vendas: { disponivel: vendasPorItem !== undefined },
+    hardTtlS: env.ITEMS_CATALOG_HARD_TTL_S,
+  });
+
+  if (!r.ok) {
+    // `saldo_invalido_no_modo_legado` é 409 e não 500 de propósito: o pedido
+    // foi entendido, o modo pedido é que não suporta o dado que existe.
+    return json(res, 409, { error: 'not_ready', code: r.code });
+  }
+
+  const inv = r.value;
+  return json(res, 200, {
+    ok: true,
+    catalogo: inv.catalogo,
+    periodo: inv.periodo,
+    modo: inv.modo,
+    escopo: inv.escopo,
+    vendas: { disponivel: inv.vendasDisponiveis },
     limites: LIMITES_CLASSIFICACAO,
-    proprio: linhasProprio
-      ? { resumo: resumir(linhasProprio, l => l.estProprio), linhas: linhasProprio }
+    proprio: inv.proprio
+      ? { resumo: resumir(inv.proprio, l => l.estProprio), linhas: inv.proprio }
       : null,
-    full: linhasFull
-      ? { resumo: resumir(linhasFull, l => l.estTotal), linhas: linhasFull }
+    full: inv.full
+      ? { resumo: resumir(inv.full, l => l.estTotal), linhas: inv.full }
       : null,
-    warnings,
+    warnings: inv.warnings,
   });
 }
 
