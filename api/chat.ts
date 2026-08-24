@@ -1,15 +1,30 @@
 /**
- * POST /api/chat — Fase 5d (resposta MOCK, sem IA).
+ * POST /api/chat — assistente de vendas da Overwine.
  *
- * Contrato frontend ↔ backend para o assistente. NAO chama modelo de IA, NAO
- * persiste conversa, NAO cria banco, NAO usa SDK. Valida autenticacao (sessao
- * Bearer), método, Content-Type, tamanho do body, o schema 1.0.0 COMPLETO do
- * contexto (allowlist de chaves + tipos + limites estruturais + chaves
- * proibidas normalizadas) e devolve um answer FIXO.
+ * ATENÇÃO ao histórico deste cabeçalho: ele descreveu por muito tempo a Fase 5d
+ * ("resposta MOCK, sem IA", "NÃO chama modelo de IA"). Isso deixou de ser
+ * verdade quando a Fase 5g entrou — a rota chama o provedor de IA. O texto
+ * antigo ficou para trás e mentia sobre a única coisa que mais importa saber
+ * antes de mexer aqui.
+ *
+ * O caminho de uma pergunta, em ordem:
+ *
+ *  1. autenticação (sessão Bearer; x-admin-key NÃO vale), método,
+ *     Content-Type, tamanho do body e o schema 1.0.0 COMPLETO do contexto
+ *     (allowlist de chaves, tipos, limites estruturais, chaves proibidas);
+ *  2. rate limit por sessão (RL_LIMIT/RL_WINDOW_S) e teto diário (DAILY_LIMIT);
+ *  3. `parseChatQuery` interpreta a pergunta de forma DETERMINÍSTICA —
+ *     intenção, métrica e período saem de regras, nunca do modelo;
+ *  4. os serviços (sales-metrics, margin-metrics, product-ranking) calculam
+ *     sobre o snapshot de pedidos, no backend;
+ *  5. só então um contexto MÍNIMO vai ao provedor, que apenas REDIGE.
+ *
+ * O modelo nunca escolhe período, nunca soma e nunca decide se um módulo está
+ * disponível. Consulta ambígua, período inválido, assunto fora de escopo e
+ * dados indisponíveis têm resposta determinística e NÃO vão ao provedor.
  *
  * Reusa os helpers existentes: applyCors, validateSession, readBearer,
- * rateLimitOk, json (padrao de api/orders/[resource].ts). Nenhuma rota,
- * lib, env, vercel.json ou dependencia existente e alterada.
+ * rateLimitOk, json (padrão de api/orders/[resource].ts).
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import type { Cache } from '../src/lib/cache/cache.js';
