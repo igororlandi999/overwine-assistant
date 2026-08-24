@@ -4,9 +4,10 @@
  * interface Cache, nunca com Upstash direto, nunca com scan/keys.
  *
  * Layout:
- *   ship:logi:manifest          manifesto PUBLICADO (ponteiro único)
- *   ship:logi:chunk:{versao}:{i}  chunk = JSON de Array<[shipmentId, logisticType]>
- *   ship:logi:lock              lock de sincronização (setNX/delIfEquals)
+ *   ship:logi:manifest            manifesto PUBLICADO (ponteiro único)
+ *   ship:logi:manifest:previous   manifesto da versão imediatamente anterior
+ *   ship:logi:chunk:{versao}:{i}  chunk = JSON de Array<[shipmentId, EnvioInfo]>
+ *   ship:logi:lock                lock de sincronização (setNX/delIfEquals)
  *
  * ─────────────────────────────────────────────────────────────────────────
  * POR QUE ESTE MAPA EXISTE
@@ -39,12 +40,26 @@
  * isso um id resolvido NUNCA é buscado de novo, e o mapa não tem TTL.
  *
  * ─────────────────────────────────────────────────────────────────────────
+ * RETENÇÃO
+ *
+ * A publicação REESCREVE todos os chunks numa versão NOVA. Sem limpeza, cada
+ * publicação deixaria os chunks da versão anterior órfãos PARA SEMPRE: uma
+ * execução por hora, ~105 KB por publicação, são centenas de MB por ano num
+ * Redis que não tem esse espaço sobrando. Este store era o único dos três sem
+ * retenção — orders-store e items-store já apagavam.
+ *
+ * A regra é a mesma dos outros dois: guardamos um ponteiro `previous` e
+ * apagamos SOMENTE os chunks do previous ANTIGO. A versão publicada e a
+ * imediatamente anterior continuam legíveis, então uma leitura que já pegou o
+ * manifesto de antes da troca ainda encontra os chunks dela.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
  * LIMITE CONHECIDO
  *
- * A publicação REESCREVE todos os chunks. Com 3.521 envios (~105 KB) isso é
- * trivial. Acima de ~50.000 envios, o custo de reescrita passa a incomodar e o
- * store precisa virar append-only. Está documentado aqui de propósito: é uma
- * decisão de escala, não um descuido.
+ * Com 3.521 envios (~105 KB) reescrever tudo é trivial. Acima de ~50.000
+ * envios o custo de reescrita passa a incomodar e o store precisa virar
+ * append-only. Está documentado aqui de propósito: é uma decisão de escala,
+ * não um descuido.
  */
 import type { Cache } from './cache/cache.js';
 
@@ -85,6 +100,7 @@ export interface ManifestoLogistica {
 }
 
 export const CHAVE_MANIFESTO = 'ship:logi:manifest';
+export const CHAVE_MANIFESTO_ANTERIOR = 'ship:logi:manifest:previous';
 export const CHAVE_LOCK = 'ship:logi:lock';
 
 /** Entradas por chunk. 2.000 × ~30 bytes ≈ 60 KB, folgado no limite do Upstash. */
@@ -106,8 +122,8 @@ function manifestoValido(v: unknown): v is ManifestoLogistica {
   );
 }
 
-export async function lerManifesto(cache: Cache): Promise<ManifestoLogistica | null> {
-  const bruto = await cache.get(CHAVE_MANIFESTO);
+async function lerManifestoDe(cache: Cache, chave: string): Promise<ManifestoLogistica | null> {
+  const bruto = await cache.get(chave);
   if (bruto === null) return null;
   try {
     const v: unknown = JSON.parse(bruto);
@@ -117,6 +133,18 @@ export async function lerManifesto(cache: Cache): Promise<ManifestoLogistica | n
     // derrubar o cálculo por causa dele seria pior que recomeçar do zero.
     return null;
   }
+}
+
+export async function lerManifesto(cache: Cache): Promise<ManifestoLogistica | null> {
+  return lerManifestoDe(cache, CHAVE_MANIFESTO);
+}
+
+/**
+ * Manifesto da versão imediatamente anterior. Existe só para a RETENÇÃO —
+ * nenhuma leitura de mapa passa por aqui.
+ */
+export async function lerManifestoAnterior(cache: Cache): Promise<ManifestoLogistica | null> {
+  return lerManifestoDe(cache, CHAVE_MANIFESTO_ANTERIOR);
 }
 
 /**
@@ -162,9 +190,16 @@ export async function lerMapaEnvios(cache: Cache): Promise<Map<string, EnvioInfo
 }
 
 /**
- * Publica o mapa inteiro numa versão NOVA e só então troca o manifesto. Os
- * chunks antigos ficam órfãos de propósito: uma leitura concorrente que já
- * pegou o manifesto anterior continua encontrando os chunks dela.
+ * Publica o mapa inteiro numa versão NOVA e só então troca o manifesto.
+ *
+ * Ordem exata, igual à de orders-store.publishManifest:
+ *   1. gravar os chunks da versão nova;
+ *   2. apagar SOMENTE os chunks do `previous` ANTIGO (dois passos atrás);
+ *   3. mover o manifesto atual para `previous`;
+ *   4. trocar o ponteiro `manifest` (a troca que publica de fato).
+ *
+ * Os chunks do manifesto ATUAL nunca são apagados aqui: uma leitura que pegou
+ * esse manifesto antes do passo 4 continua encontrando tudo que precisa.
  */
 /** Só a logística, para quem não precisa do custo. */
 export async function lerMapaLogistica(cache: Cache): Promise<Map<string, string>> {
@@ -202,6 +237,19 @@ export async function publicarMapaEnvios(
     chunkSize: CHUNK_SIZE,
     updatedAt: agora.toISOString(),
   };
+
+  // Retenção: apaga os chunks de duas versões atrás. A guarda de reuso de
+  // chave é a mesma do orders-store — uma chave só some se nem o manifesto
+  // atual nem o novo dependerem dela.
+  const anteriorAntigo = await lerManifestoAnterior(cache);
+  if (anteriorAntigo) {
+    const emUso = new Set([...(anterior?.chunks ?? []), ...chunks]);
+    for (const chave of anteriorAntigo.chunks) {
+      if (!emUso.has(chave)) await cache.del(chave);
+    }
+  }
+
+  if (anterior) await cache.set(CHAVE_MANIFESTO_ANTERIOR, JSON.stringify(anterior));
   await cache.set(CHAVE_MANIFESTO, JSON.stringify(manifesto));
   return manifesto;
 }
