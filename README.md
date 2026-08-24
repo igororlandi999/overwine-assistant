@@ -32,6 +32,12 @@ próprio e o espelho Full, classificação por velocidade de venda (ruptura,
 alerta, ok, excesso, sem venda). Modo padrão `seguro` (saldo negativo
 normalizado); `modo=legado` reproduz o dashboard antigo.
 
+Atenção ao período: **em `inventory`, `dias=N` são N dias civis terminando
+hoje**, e não os N+1 de `metrics` e `margin`. As rotas de vendas mantêm a
+paridade com o dashboard legado; estoque não tem esse legado e usa a mesma
+janela que o assistente, para que a mesma pergunta não receba duas velocidades
+diferentes. A resposta declara `periodo.dias`.
+
 ### Leitura com reconstrução
 
 | Rota | Método | Função |
@@ -79,8 +85,28 @@ O modelo nunca escolhe período, nunca soma e nunca decide se um módulo está
 disponível. Perguntas fora do que o parser reconhece recebem resposta
 determinística, sem ir ao provedor.
 
-Cobre hoje: faturamento, pedidos, ticket médio, unidades, margem e ranking de
-produtos, com comparação entre períodos.
+Cobre hoje:
+
+- **vendas** — faturamento, pedidos, ticket médio, unidades, margem e ranking de
+  produtos, com comparação entre períodos;
+- **estoque** — resumo, ruptura, alerta, estoque baixo, consulta por SKU ou por
+  nome, Full, estoque próprio, sem venda, excesso, prioridade de reposição e
+  inconsistências nos dados.
+
+O estoque usa o mesmo `inventory-read.service` da rota HTTP, sem chamada de rede
+interna, e **não depende mais do contexto que o navegador envia**. Duas
+convenções valem a pena registrar: "estoque baixo" é a união de ruptura e
+alerta, e "prioridade de reposição" é essa mesma união na ordem que o serviço já
+produz — sem previsão de demanda e sem quantidade sugerida de compra.
+
+A resolução de produto é determinística: SKU exato, SKU normalizado, título
+normalizado exato e, por último, correspondência contida aceita só quando é
+única. Vários candidatos viram uma resposta de ambiguidade com a lista; o modelo
+nunca escolhe em silêncio.
+
+A classificação de estoque olha UM saldo por vez — o próprio ou o do Full,
+conforme o escopo da pergunta — e o contexto declara qual, porque é assim que o
+`inventory.service` calcula e inventar uma base nova mudaria os limites.
 
 ## Proxy `/api/ml/<op>`
 
@@ -120,6 +146,12 @@ volta a somar frete por cima do frete real.
 São dois projetos Vercel **separados, com Redis separados**: o oficial
 (`overwine-assistant`) e o de laboratório (`overwine-assistant-preview`).
 Mesmo código, dados independentes. Experimento vai no preview.
+
+**Um push em `main` publica o backend OFICIAL em produção.** O projeto oficial
+está conectado a este repositório pelo app do Vercel no GitHub — o commit recebe
+um status "Vercel — Deployment has completed" e o deploy sai em segundos. O
+projeto de preview NÃO está conectado: ele é publicado à mão. Portanto push aqui
+não é "só rodar CI".
 
 ## Desenvolvimento
 

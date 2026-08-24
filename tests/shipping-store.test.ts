@@ -129,6 +129,55 @@ describe('shipping-store — retenção de chunks', () => {
   });
 });
 
+describe('shipping-store — retenção sob falha e reuso de chave', () => {
+  it('publicação interrompida entre a limpeza e a troca do ponteiro não destrói o estado válido', async () => {
+    const v1 = await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1]));
+    const v2 = await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2]));
+
+    // Simula a terceira publicação morrendo depois de gravar os chunks novos e
+    // de apagar os da v1, mas ANTES de trocar `manifest`.
+    const v3chunk = 'ship:logi:chunk:3:0';
+    await cache.set(v3chunk, JSON.stringify([['9', ['xd_drop_off', 9]]]));
+    for (const chave of v1.chunks) await cache.del(chave);
+
+    // O manifesto publicado ainda é o v2, e os chunks dele continuam lá.
+    const atual = await lerManifesto(cache);
+    expect(atual!.versao).toBe(2);
+    for (const chave of v2.chunks) expect(cache.store.has(chave)).toBe(true);
+    expect((await lerMapaEnvios(cache)).size).toBe(2);
+
+    // E a próxima publicação retoma normalmente, sem tropeçar no ponteiro
+    // `previous` que aponta para chunks já apagados.
+    const v4 = await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2], ['3', 'self_service', 3]));
+    expect(v4.versao).toBe(3);
+    expect((await lerMapaEnvios(cache)).size).toBe(3);
+  });
+
+  it('chunk ainda referenciado pelo manifesto atual NUNCA é apagado, mesmo se o previous o citar', async () => {
+    // Estado patológico: o `previous` aponta para as MESMAS chaves do atual.
+    // Sem a guarda de reuso, a limpeza apagaria os chunks em uso e o mapa
+    // publicado ficaria ilegível.
+    const v1 = await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2]));
+    await cache.set(CHAVE_MANIFESTO_ANTERIOR, JSON.stringify({
+      versao: 1, chunks: v1.chunks, total: 2, chunkSize: CHUNK_SIZE,
+      updatedAt: '2026-08-20T00:00:00.000Z',
+    }));
+
+    await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2], ['3', 'self_service', 3]));
+    for (const chave of v1.chunks) expect(cache.store.has(chave)).toBe(true);
+    expect((await lerMapaEnvios(cache)).size).toBe(3);
+  });
+
+  it('a limpeza nunca alcança os chunks da versão que está sendo publicada', async () => {
+    await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1]));
+    await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2]));
+    const v3 = await publicarMapaEnvios(cache, mapa(['1', 'fulfillment', 1], ['2', 'drop_off', 2], ['3', 'self_service', 3]));
+    for (const chave of v3.chunks) expect(cache.store.has(chave)).toBe(true);
+    // E o mapa publicado é legível inteiro logo após a limpeza.
+    expect((await lerMapaEnvios(cache)).size).toBe(3);
+  });
+});
+
 describe('shipping-store — leitura tolerante a falha', () => {
   it('sem manifesto devolve mapa vazio, sem lançar', async () => {
     expect((await lerMapaEnvios(cache)).size).toBe(0);

@@ -53,4 +53,14 @@ jobs:
         run: npm run typecheck
 
       - name: Testes
+        # `npm test` e `vitest run`, nao `vitest`: termina, nao entra em watch.
         run: npm test
+
+# NAO validamos a sintaxe dos proprios workflows aqui, e isso e uma decisao.
+# O GitHub ja recusa um workflow com YAML invalido e mostra o erro na aba
+# Actions no mesmo push, entao um arquivo quebrado nao passa despercebido. Um
+# linter dedicado (actionlint) pegaria a mais erros de SCHEMA — chave inexistente
+# que ainda e YAML valido — mas custaria uma acao de terceiro na pipeline ou uma
+# dependencia nova num projeto que tem duas de runtime e quatro de
+# desenvolvimento. Se o schema virar problema de verdade, o caminho e adicionar
+# actionlint com versao fixada, nao um `npx` sem pino.
