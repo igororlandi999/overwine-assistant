@@ -600,6 +600,18 @@ describe('chat estoque — garantias arquiteturais', () => {
     }
   });
 
+  it('o prompt proíbe número por extenso e origem inventada', async () => {
+    // Ambas as regras vieram de falhas observadas contra o Preview real: "311"
+    // virou "trinta e um" ao ser escrito por extenso, e uma resposta atribuiu
+    // os saldos ao "dashboard legado".
+    const t = await cenario();
+    await perguntar('como está nosso estoque?', t);
+    const sys = systemEnviado();
+    expect(sys).toContain('algarismos');
+    expect(sys).toContain('por extenso');
+    expect(sys).toContain('dashboard legado');
+  });
+
   it('o cálculo não é delegado ao modelo: o prompt proíbe recalcular', async () => {
     const t = await cenario();
     await perguntar('como está nosso estoque?', t);

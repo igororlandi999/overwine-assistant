@@ -185,6 +185,8 @@ const SYSTEM_PROMPT_ESTOQUE = [
   '- Nunca sugira quantidade de compra, previsão de demanda ou data de reposição: esses números não existem no contexto.',
   '- Se sales.available for falso, não houve snapshot de vendas para o período: informe os saldos e diga que a velocidade e a classificação não puderam ser calculadas.',
   '- Se catalog.stale for verdadeiro, avise que o catálogo de anúncios está desatualizado e que os saldos podem ter mudado.',
+  '- Escreva TODO número em algarismos: 311, 42, 1.234. Nunca escreva quantidade por extenso — numa resposta real "trezentos e onze" saiu como "trinta e um", trocando o saldo por outro dez vezes menor.',
+  '- Os saldos vêm do snapshot de catálogo e do snapshot de pedidos DESTE backend. Nunca atribua os números ao dashboard, ao dashboard legado, a uma planilha ou a uma consulta em tempo real ao Mercado Livre.',
   '- Responda em português do Brasil, direto, de 1 a 4 frases.',
 ].join('\n');
 
