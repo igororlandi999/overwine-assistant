@@ -104,6 +104,19 @@ export interface OpDef {
   shape: (data: any) => unknown;
 }
 
+/**
+ * Métricas pedidas nas consultas de publicidade. É CONSTANTE de servidor de
+ * propósito: o gasto tem que sair sempre do mesmo campo, e uma lista escolhida
+ * pelo cliente viraria texto livre dentro da URL do ML.
+ *
+ * Sem este parâmetro a campanha volta SEM bloco de métrica — foi exatamente
+ * isso que fez o dashboard listar 5 campanhas e somar custo 0,00.
+ *
+ * `cost` é o gasto REAL do período. Não confundir com `total_amount`, que é a
+ * receita atribuída à publicidade, nem com o orçamento configurado da campanha.
+ */
+const PUB_METRICAS = 'clicks,prints,cost';
+
 export const OPS: Record<string, OpDef> = {
   // 1) IDs de anúncios por status (paginado) — loadAllItemIds
   'items-search': {
@@ -225,15 +238,21 @@ export const OPS: Record<string, OpDef> = {
     path: p =>
       `/marketplace/advertising/${p.site_id}/advertisers/${p.advertiser_id}` +
       `/product_ads/campaigns/search?limit=${p.limit}&offset=${p.offset}` +
-      `&date_from=${p.date_from}&date_to=${p.date_to}`,
+      `&date_from=${p.date_from}&date_to=${p.date_to}` +
+      `&metrics=${PUB_METRICAS}&metrics_summary=true`,
     headers: { 'api-version': '2' },
     // Campanha não carrega dado de comprador: são nomes, orçamentos e métricas.
     // Passa `results` inteiro, como `promotions` já faz, porque os nomes de
     // campo de métrica variam por versão e uma allowlist estreita demais
     // devolveria objeto vazio sem ninguém perceber.
+    //
+    // `metrics_summary` é o agregado do PERÍODO somando todas as campanhas —
+    // é dele que sai o investimento real, sem o consumidor ter que paginar e
+    // somar campanha por campanha (e sem errar a conta se esquecer uma página).
     shape: d => ({
       results: Array.isArray(d?.results) ? d.results : [],
       paging: pick(d?.paging, ['total', 'offset', 'limit']),
+      metrics_summary: d?.metrics_summary ?? null,
     }),
   },
 

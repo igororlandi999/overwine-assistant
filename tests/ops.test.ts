@@ -178,11 +178,60 @@ describe('allowlist do proxy', () => {
     const url = op.path(p as never, '2329718196');
     expect(url).toBe(
       '/marketplace/advertising/MLB/advertisers/671874/product_ads/campaigns/search' +
-      '?limit=50&offset=0&date_from=2026-07-01&date_to=2026-07-31'
+      '?limit=50&offset=0&date_from=2026-07-01&date_to=2026-07-31' +
+      '&metrics=clicks,prints,cost&metrics_summary=true'
     );
     expect(op.headers).toEqual({ 'api-version': '2' });
     // Escopado por advertiser, NAO por user_id: era esse o erro da rota antiga.
     expect(url).not.toContain('2329718196');
+  });
+
+  it('pub-campanhas PEDE metricas — sem isso a campanha volta sem custo', () => {
+    // Regressao real: a consulta sem `metrics` devolveu 5 campanhas e custo
+    // 0,00, porque a API atual so anexa o bloco de metrica quando ele e pedido.
+    const op = OPS['pub-campanhas'];
+    const p = op.params.parse({ advertiser_id: 671874, date_from: '2026-08-18', date_to: '2026-08-25' });
+    const url = op.path(p as never, '1');
+    expect(url).toContain('metrics=');
+    expect(url).toContain('cost');           // gasto REAL do periodo
+    expect(url).toContain('metrics_summary=true');
+    // `total_amount` e receita atribuida, nao gasto: nao entra na lista pedida
+    // para ninguem confundir os dois do outro lado.
+    expect(url).not.toContain('total_amount');
+  });
+
+  it('pub-campanhas: a lista de metricas e do SERVIDOR, nao do cliente', () => {
+    // Se o cliente pudesse escolher as metricas, a URL do ML voltaria a ter
+    // texto livre vindo do navegador — o oposto do que a allowlist existe para
+    // impedir. zod descarta a chave desconhecida e o path ignora.
+    const op = OPS['pub-campanhas'];
+    const p = op.params.parse({
+      advertiser_id: 671874, date_from: '2026-07-01', date_to: '2026-07-31',
+      metrics: 'qualquer-coisa&x=1', metrics_summary: 'false',
+    });
+    const url = op.path(p as never, '1');
+    expect(url).toContain('metrics=clicks,prints,cost');
+    expect(url).toContain('metrics_summary=true');
+    expect(url).not.toContain('qualquer-coisa');
+  });
+
+  it('pub-campanhas devolve o metrics_summary do periodo', () => {
+    // E dele que sai o investimento real: agregado de TODAS as campanhas, sem
+    // o consumidor precisar paginar e somar (nem errar a conta se faltar pagina).
+    const op = OPS['pub-campanhas'];
+    const saida = op.shape({
+      results: [{ id: 1, name: 'C1', metrics: { cost: 12.5, clicks: 3 } }],
+      paging: { total: 1, offset: 0, limit: 50 },
+      metrics_summary: { cost: 12.5, clicks: 3, prints: 900 },
+    }) as { results: Array<Record<string, unknown>>; metrics_summary: Record<string, unknown> };
+    expect(saida.metrics_summary.cost).toBe(12.5);
+    // A metrica por campanha tambem sobrevive ao filtro (fallback do consumidor).
+    expect((saida.results[0].metrics as Record<string, unknown>).cost).toBe(12.5);
+  });
+
+  it('pub-campanhas: sem metrics_summary devolve null, nao quebra', () => {
+    const op = OPS['pub-campanhas'];
+    expect((op.shape({ results: [] }) as { metrics_summary: unknown }).metrics_summary).toBeNull();
   });
 
   it('pub-campanhas valida os parametros', async () => {
@@ -193,8 +242,8 @@ describe('allowlist do proxy', () => {
 
   it('pub-campanhas: resposta inesperada vira lista vazia, nao quebra', () => {
     const op = OPS['pub-campanhas'];
-    expect(op.shape({})).toEqual({ results: [], paging: null });
-    expect(op.shape({ results: 'nao e array' })).toEqual({ results: [], paging: null });
+    expect(op.shape({})).toEqual({ results: [], paging: null, metrics_summary: null });
+    expect(op.shape({ results: 'nao e array' })).toEqual({ results: [], paging: null, metrics_summary: null });
   });
 
   it('nenhuma op de publicidade tem "ads" no NOME', () => {
