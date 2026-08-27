@@ -43,6 +43,9 @@ import {
 import { tamanhoFila, lerObsProcessamento, lerObsRecebimento } from '../src/lib/orders-events.js';
 
 const UID = TEST_ENV.ML_USER_ID;
+const APP = TEST_ENV.ML_CLIENT_ID;
+/** O par que o backend espera em toda notificacao: vendedor e aplicacao. */
+const ESPERADO = { mlUserId: UID, applicationId: APP };
 
 let cache: FakeCache;
 beforeEach(() => {
@@ -134,10 +137,10 @@ function comoInput(o: OrderSlim): OrderInput {
 
 // ═══════════════════════════════════════════════════════════════════════════
 describe('1. interpretarNotificacao — o que entra e o que é recusado', () => {
-  const base = { _id: 'n1', topic: 'orders_v2', resource: '/orders/2000012345', user_id: Number(UID) };
+  const base = { _id: 'n1', topic: 'orders_v2', resource: '/orders/2000012345', user_id: Number(UID), application_id: Number(APP) };
 
   it('aceita orders_v2 e extrai o id do pedido', () => {
-    const r = interpretarNotificacao(base, UID);
+    const r = interpretarNotificacao(base, ESPERADO);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.evento.orderId).toBe('2000012345');
@@ -147,7 +150,7 @@ describe('1. interpretarNotificacao — o que entra e o que é recusado', () => 
   });
 
   it('aceita created_orders — o tópico antigo pode estar assinado no painel', () => {
-    expect(interpretarNotificacao({ ...base, topic: 'created_orders' }, UID).ok).toBe(true);
+    expect(interpretarNotificacao({ ...base, topic: 'created_orders' }, ESPERADO).ok).toBe(true);
   });
 
   it('os dois tópicos aceitos são exatamente orders_v2 e created_orders', () => {
@@ -156,38 +159,41 @@ describe('1. interpretarNotificacao — o que entra e o que é recusado', () => 
 
   it('recusa tópico cujo resource não é um pedido (shipments, payments, items)', () => {
     for (const topic of ['shipments', 'payments', 'items', 'messages', 'questions']) {
-      const r = interpretarNotificacao({ ...base, topic, resource: '/shipments/5' }, UID);
+      const r = interpretarNotificacao({ ...base, topic, resource: '/shipments/5' }, ESPERADO);
       expect(r.ok, topic).toBe(false);
       if (!r.ok) expect(r.motivo).toBe('topico_ignorado');
     }
   });
 
   it('recusa notificação de OUTRA conta — a aplicação pode ter mais de um vendedor', () => {
-    const r = interpretarNotificacao({ ...base, user_id: 999999999 }, UID);
+    const r = interpretarNotificacao({ ...base, user_id: 999999999 }, ESPERADO);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.motivo).toBe('user_id_divergente');
   });
 
   it('user_id numérico do ML bate com ML_USER_ID em string', () => {
-    expect(interpretarNotificacao({ ...base, user_id: Number(UID) }, UID).ok).toBe(true);
-    expect(interpretarNotificacao({ ...base, user_id: UID }, UID).ok).toBe(true);
+    expect(interpretarNotificacao({ ...base, user_id: Number(UID) }, ESPERADO).ok).toBe(true);
+    expect(interpretarNotificacao({ ...base, user_id: UID }, ESPERADO).ok).toBe(true);
   });
 
   it('recusa resource fora do formato /orders/{digitos}', () => {
     for (const resource of ['/orders/', '/orders/abc', 'orders/1', '/orders/1/x', '']) {
-      const r = interpretarNotificacao({ ...base, resource }, UID);
+      const r = interpretarNotificacao({ ...base, resource }, ESPERADO);
       expect(r.ok, resource).toBe(false);
     }
   });
 
   it('recusa corpo que não é objeto', () => {
     for (const body of [null, undefined, 'x', 42, []]) {
-      expect(interpretarNotificacao(body, UID).ok).toBe(false);
+      expect(interpretarNotificacao(body, ESPERADO).ok).toBe(false);
     }
   });
 
   it('notificação sem _id é aceita — a correção não depende da deduplicação', () => {
-    const r = interpretarNotificacao({ topic: 'orders_v2', resource: '/orders/7', user_id: Number(UID) }, UID);
+    const r = interpretarNotificacao(
+      { topic: 'orders_v2', resource: '/orders/7', user_id: Number(UID), application_id: Number(APP) },
+      ESPERADO
+    );
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.evento.notifId).toBeNull();
   });
@@ -196,37 +202,38 @@ describe('1. interpretarNotificacao — o que entra e o que é recusado', () => 
 // ═══════════════════════════════════════════════════════════════════════════
 describe('2. receberNotificacao — o caminho do ACK não toca no Mercado Livre', () => {
   const notif = (id: string, orderId = '2000012345') => ({
-    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`, user_id: Number(UID),
+    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`,
+    user_id: Number(UID), application_id: Number(APP),
   });
 
   it('enfileira uma vez e responde com o tamanho da fila', async () => {
-    const r = await receberNotificacao(cache, notif('a'), UID);
+    const r = await receberNotificacao(cache, notif('a'), ESPERADO);
     expect(r).toMatchObject({ aceito: true, duplicada: false, orderId: '2000012345', fila: 1 });
     expect(await tamanhoFila(cache)).toBe(1);
   });
 
   it('o MESMO _id duas vezes não enfileira duas vezes', async () => {
-    await receberNotificacao(cache, notif('a'), UID);
-    const segunda = await receberNotificacao(cache, notif('a'), UID);
+    await receberNotificacao(cache, notif('a'), ESPERADO);
+    const segunda = await receberNotificacao(cache, notif('a'), ESPERADO);
     expect(segunda).toMatchObject({ aceito: true, duplicada: true });
     expect(await tamanhoFila(cache)).toBe(1);
   });
 
   it('_ids diferentes para o MESMO pedido entram os dois — o dreno é que colapsa', async () => {
-    await receberNotificacao(cache, notif('a'), UID);
-    await receberNotificacao(cache, notif('b'), UID);
+    await receberNotificacao(cache, notif('a'), ESPERADO);
+    await receberNotificacao(cache, notif('b'), ESPERADO);
     expect(await tamanhoFila(cache)).toBe(2);
   });
 
   it('notificação recusada não entra na fila e conta como rejeitada', async () => {
-    const r = await receberNotificacao(cache, { topic: 'shipments', resource: '/shipments/1' }, UID);
+    const r = await receberNotificacao(cache, { topic: 'shipments', resource: '/shipments/1' }, ESPERADO);
     expect(r.aceito).toBe(false);
     expect(await tamanhoFila(cache)).toBe(0);
     expect((await lerObsRecebimento(cache)).totalRejeitadas).toBe(1);
   });
 
   it('a telemetria de recebimento registra quando, qual tópico e qual pedido', async () => {
-    await receberNotificacao(cache, notif('a', '777'), UID);
+    await receberNotificacao(cache, notif('a', '777'), ESPERADO);
     const obs = await lerObsRecebimento(cache);
     expect(obs.totalRecebidas).toBe(1);
     expect(obs.ultimaNotificacaoPedido).toBe('777');
@@ -410,7 +417,8 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
   }
 
   const notif = (id: string, orderId: string) => ({
-    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`, user_id: Number(UID),
+    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`,
+    user_id: Number(UID), application_id: Number(APP), sent: new Date().toISOString(),
   });
 
   it('um evento vira um pedido novo no snapshot', async () => {
@@ -418,7 +426,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     const estado = new Map([['5000', pedido('5000', -1)]]);
     const { fn } = fakeFetch(estado);
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     const r = await drenarFila(cache, fn);
 
     expect(r).toMatchObject({ ok: true, processados: 1, novos: 1, falhas: 0, restantes: 0 });
@@ -431,10 +439,10 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     const estado = new Map([['5000', pedido('5000', -1)]]);
     const { fn } = fakeFetch(estado);
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
     // Segunda notificação, _id diferente, mesmo pedido, nada mudou no ML.
-    await receberNotificacao(cache, notif('b', '5000'), UID);
+    await receberNotificacao(cache, notif('b', '5000'), ESPERADO);
     const segunda = await drenarFila(cache, fn);
 
     expect(segunda.semMudanca).toBe(1);
@@ -449,7 +457,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     const estado = new Map([['5000', pedido('5000', -1)]]);
     const { fn, chamadas } = fakeFetch(estado);
 
-    for (const id of ['a', 'b', 'c']) await receberNotificacao(cache, notif(id, '5000'), UID);
+    for (const id of ['a', 'b', 'c']) await receberNotificacao(cache, notif(id, '5000'), ESPERADO);
     expect(await tamanhoFila(cache)).toBe(3);
 
     await drenarFila(cache, fn);
@@ -462,7 +470,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     const estado = new Map([['7', pedido(7, 6, { status: 'cancelled', paid_amount: 0 })]]);
     const { fn } = fakeFetch(estado);
 
-    await receberNotificacao(cache, notif('antigo', '7'), UID);
+    await receberNotificacao(cache, notif('antigo', '7'), ESPERADO);
     await drenarFila(cache, fn);
 
     const snap = await readSnapshot(cache, 'ativos');
@@ -473,7 +481,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     await publicarBase(100, 50);
     const fn = async (): Promise<OrderInput> => { throw new Error('ML GET /orders/5000 HTTP 500.'); };
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     const r = await drenarFila(cache, fn);
 
     expect(r.ok).toBe(false);
@@ -492,7 +500,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
       return comoInput(estado.get(id)!);
     };
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
     falhar = false;
     const r = await drenarFila(cache, fn);
@@ -505,7 +513,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     await publicarBase(100, 50);
     const fn = async (): Promise<OrderInput> => comoInput(pedido('outro', -1));
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     const r = await drenarFila(cache, fn);
 
     expect(r.falhas).toBe(1);
@@ -517,7 +525,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'a-sincronizacao', 120);
     const { fn, chamadas } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     const r = await drenarFila(cache, fn);
 
     expect(r.motivo).toBe('sync_em_andamento');
@@ -529,7 +537,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
   it('o dreno LIBERA o lock ao terminar', async () => {
     await publicarBase(100, 50);
     const { fn } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
     expect(await cache.get(ORDERS_SYNC_LOCK_KEY)).toBeNull();
   });
@@ -537,7 +545,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
   it('o dreno libera o lock mesmo quando o processamento falha', async () => {
     await publicarBase(100, 50);
     const fn = async (): Promise<OrderInput> => { throw new Error('boom'); };
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
     expect(await cache.get(ORDERS_SYNC_LOCK_KEY)).toBeNull();
   });
@@ -548,7 +556,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     for (let i = 1; i <= 5; i++) estado.set(String(6000 + i), pedido(6000 + i, -i));
     const { fn } = fakeFetch(estado);
 
-    for (let i = 1; i <= 5; i++) await receberNotificacao(cache, notif(`n${i}`, String(6000 + i)), UID);
+    for (let i = 1; i <= 5; i++) await receberNotificacao(cache, notif(`n${i}`, String(6000 + i)), ESPERADO);
     const r = await drenarFila(cache, fn, { max: 2 });
 
     expect(r.processados).toBe(2);
@@ -566,7 +574,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
   it('a telemetria diz qual foi o último pedido atualizado e quando', async () => {
     await publicarBase(100, 50);
     const { fn } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
 
     const obs = await lerObsProcessamento(cache);
@@ -588,7 +596,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
     } as unknown as OrderInput;
     const fn = async (): Promise<OrderInput> => cru;
 
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     await drenarFila(cache, fn);
 
     const gravado = (await readSnapshot(cache, 'ativos')).find(o => String(o.id) === '5000')!;
@@ -599,7 +607,7 @@ describe('5. drenarFila — idempotência, ordem e concorrência', () => {
 
   it('sem snapshot base o evento não fica preso em laço: vira falha registrada', async () => {
     const { fn } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
-    await receberNotificacao(cache, notif('a', '5000'), UID);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
     const r = await drenarFila(cache, fn);
 
     expect(r.falhas).toBe(1);
@@ -720,5 +728,134 @@ describe('6. convivência com a reconciliação periódica', () => {
 
     delete process.env.ORDERS_CHUNK_SIZE;
     resetEnvForTests();
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+describe('7. portão de pré-merge', () => {
+  const notif = (over: Record<string, unknown> = {}) => ({
+    _id: 'n1', topic: 'orders_v2', resource: '/orders/2000012345',
+    user_id: Number(UID), application_id: Number(APP), ...over,
+  });
+
+  it('application_id divergente reprova antes de qualquer coisa', () => {
+    const r = interpretarNotificacao(notif({ application_id: 987654321 }), ESPERADO);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.motivo).toBe('application_id_divergente');
+  });
+
+  it('application_id ausente nao reprova; o resto da validacao continua valendo', () => {
+    const semApp = notif();
+    delete (semApp as Record<string, unknown>).application_id;
+    expect(interpretarNotificacao(semApp, ESPERADO).ok).toBe(true);
+    // ...mas um user_id errado no MESMO corpo ainda reprova.
+    const semAppOutraConta = { ...semApp, user_id: 1 };
+    expect(interpretarNotificacao(semAppOutraConta, ESPERADO).ok).toBe(false);
+  });
+
+  it('`sent` atravessa a fila; qualquer outro campo do corpo NAO', () => {
+    const r = interpretarNotificacao(
+      notif({ sent: '2026-08-27T09:00:00.000Z', status: 'cancelled', paid_amount: 1 }),
+      ESPERADO
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.evento.sent).toBe('2026-08-27T09:00:00.000Z');
+      expect(Object.keys(r.evento).sort()).toEqual(
+        ['notifId', 'orderId', 'recebidoEm', 'sent', 'topico']
+      );
+    }
+  });
+
+  it('`sent` fora de formato de data vira null', () => {
+    for (const sent of ['ontem', '', 42, null, {}]) {
+      const r = interpretarNotificacao(notif({ sent }), ESPERADO);
+      expect(r.ok, String(sent)).toBe(true);
+      if (r.ok) expect(r.evento.sent).toBeNull();
+    }
+  });
+
+  /**
+   * O ciclo de vida inteiro de um pedido — criacao e mudanca de status — sai
+   * de `orders_v2` sozinho. Este teste existe porque a configuracao oficial no
+   * painel do ML vai marcar SO esse topico: se algum caminho passasse a
+   * depender de `created_orders`, a mudanca de status pararia de chegar e o
+   * sintoma apareceria semanas depois, como "as vezes o cancelamento nao
+   * atualiza".
+   */
+  it('orders_v2 sozinho cobre criacao E mudanca de status', async () => {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    const paginaDe = (l: OrderSlim[]) => async ({ offset, limit }: { offset: number; limit: number }) => ({
+      results: l.slice(offset, offset + limit) as unknown as OrderInput[],
+      total: l.length,
+    });
+    await runSyncStep(cache, paginaDe(lista), { modo: 'full' });
+
+    const estado = new Map<string, OrderSlim>([['5000', pedido('5000', -1)]]);
+    const fn = async (id: string): Promise<OrderInput> => comoInput(estado.get(id)!);
+
+    // 1) criacao, por orders_v2
+    await receberNotificacao(cache, { ...notif({ _id: 'a' }), resource: '/orders/5000' }, ESPERADO);
+    const criacao = await drenarFila(cache, fn);
+    expect(criacao.novos).toBe(1);
+
+    // 2) cancelamento, pelo MESMO topico
+    estado.set('5000', pedido('5000', -1, { status: 'cancelled', paid_amount: 0 }));
+    await receberNotificacao(cache, { ...notif({ _id: 'b' }), resource: '/orders/5000' }, ESPERADO);
+    const mudanca = await drenarFila(cache, fn);
+    expect(mudanca.atualizados).toBe(1);
+
+    const gravado = (await readSnapshot(cache, 'ativos')).find(o => String(o.id) === '5000');
+    expect(gravado?.status).toBe('cancelled');
+  });
+
+  it('a telemetria registra versao publicada e latencia ponta a ponta', async () => {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    const paginaDe = async ({ offset, limit }: { offset: number; limit: number }) => ({
+      results: lista.slice(offset, offset + limit) as unknown as OrderInput[],
+      total: lista.length,
+    });
+    await runSyncStep(cache, paginaDe, { modo: 'full' });
+    const versaoAntes = (await readManifest(cache, 'ativos'))!.versao;
+
+    const estado = new Map([['5000', pedido('5000', -1)]]);
+    const fn = async (id: string): Promise<OrderInput> => comoInput(estado.get(id)!);
+
+    const sent = new Date(Date.now() - 1500).toISOString();
+    await receberNotificacao(
+      cache, { ...notif({ _id: 'a', sent }), resource: '/orders/5000' }, ESPERADO
+    );
+    await drenarFila(cache, fn);
+
+    const obs = await lerObsProcessamento(cache);
+    expect(obs.ultimaVersaoPublicada).toBe(versaoAntes + 1);
+    expect(obs.ultimaLatenciaTotalMs).toBeGreaterThanOrEqual(1500);
+    expect(obs.ultimaLatenciaTotalMs).toBeLessThan(60_000);
+  });
+
+  it('sem `sent` a latencia fica null em vez de um numero inventado', async () => {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    const paginaDe = async ({ offset, limit }: { offset: number; limit: number }) => ({
+      results: lista.slice(offset, offset + limit) as unknown as OrderInput[],
+      total: lista.length,
+    });
+    await runSyncStep(cache, paginaDe, { modo: 'full' });
+
+    const estado = new Map([['5000', pedido('5000', -1)]]);
+    const fn = async (id: string): Promise<OrderInput> => comoInput(estado.get(id)!);
+    await receberNotificacao(cache, { ...notif({ _id: 'a' }), resource: '/orders/5000' }, ESPERADO);
+    await drenarFila(cache, fn);
+
+    expect((await lerObsProcessamento(cache)).ultimaLatenciaTotalMs).toBeNull();
+  });
+
+  it('o ack registra ackMs quando recebe o inicio da medicao', async () => {
+    await receberNotificacao(
+      cache, notif(), ESPERADO, { inicioMs: Date.now() - 30, waitUntilDisponivel: true }
+    );
+    const obs = await lerObsRecebimento(cache);
+    expect(obs.ultimoAckMs).toBeGreaterThanOrEqual(30);
+    expect(obs.waitUntilDisponivel).toBe(true);
   });
 });

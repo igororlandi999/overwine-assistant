@@ -45,6 +45,18 @@ function contexto(): ContextoRequisicao | null {
 }
 
 /**
+ * O runtime oferece waitUntil? Consulta PURA — não agenda nada, não faz I/O.
+ *
+ * Existe para a telemetria: sem waitUntil o dreno não roda no caminho da
+ * notificação, e a fila fica esperando o job de hora em hora. Isso não pode
+ * ser descoberto por dedução meses depois; a rota de status precisa dizer.
+ */
+export function suportaWaitUntil(): boolean {
+  const ctx = contexto();
+  return !!ctx && typeof ctx.waitUntil === 'function';
+}
+
+/**
  * Pede ao runtime que mantenha a função viva até o trabalho terminar.
  * Retorna true se o runtime aceitou; false se não há suporte.
  *

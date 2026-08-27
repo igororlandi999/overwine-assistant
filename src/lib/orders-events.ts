@@ -61,12 +61,38 @@ export interface EventoPedido {
   notifId: string | null;
   /** Quando o backend recebeu (ISO). Não é o `sent` do ML. */
   recebidoEm: string;
+  /**
+   * `sent` do corpo do ML: quando o Mercado Livre despachou a notificação.
+   *
+   * É o ÚNICO campo do corpo, além do id, que atravessa a fila — e serve
+   * exclusivamente para MEDIR latência ponta a ponta. Nenhuma decisão de
+   * negócio o consulta, e ele nunca vira dado de pedido. `null` quando ausente
+   * ou fora do formato ISO.
+   */
+  sent: string | null;
 }
 
 export interface ObsRecebimento {
   ultimaNotificacaoEm: string | null;
   ultimaNotificacaoTopico: string | null;
   ultimaNotificacaoPedido: string | null;
+  /** `sent` do ML na última notificação aceita — o relógio DELES. */
+  ultimaNotificacaoSent: string | null;
+  /**
+   * Milissegundos gastos no caminho da resposta da última notificação aceita.
+   * O Mercado Livre exige HTTP 200 em menos de 500 ms; este número é a prova
+   * de que continuamos dentro do orçamento.
+   */
+  ultimoAckMs: number | null;
+  /**
+   * O runtime ofereceu waitUntil na última notificação?
+   *
+   * `false` significa que o processamento pesado NÃO foi agendado e a fila
+   * depende do job de hora em hora. Não é falha silenciosa por decisão: sem
+   * este campo, um runtime sem waitUntil se manifestaria como "às vezes o
+   * pedido demora uma hora", que é indistinguível de dez outras coisas.
+   */
+  waitUntilDisponivel: boolean | null;
   totalRecebidas: number;
   totalDuplicadas: number;
   totalRejeitadas: number;
@@ -76,6 +102,16 @@ export interface ObsProcessamento {
   ultimoPedidoAtualizadoId: string | null;
   ultimoPedidoAtualizadoEm: string | null;
   ultimaAcao: 'novo' | 'atualizado' | 'sem_mudanca' | null;
+  /** Versão do snapshot publicada pelo último upsert que mudou algo. */
+  ultimaVersaoPublicada: number | null;
+  /**
+   * Latência ponta a ponta em milissegundos: do `sent` do Mercado Livre até a
+   * publicação do manifesto. `null` quando o evento não trouxe `sent`.
+   *
+   * Depende dos relógios de duas máquinas diferentes, então vale como ordem de
+   * grandeza — não como medição de precisão.
+   */
+  ultimaLatenciaTotalMs: number | null;
   totalNovos: number;
   totalAtualizados: number;
   totalSemMudanca: number;
@@ -89,6 +125,9 @@ const OBS_RECEBIMENTO_ZERO: ObsRecebimento = {
   ultimaNotificacaoEm: null,
   ultimaNotificacaoTopico: null,
   ultimaNotificacaoPedido: null,
+  ultimaNotificacaoSent: null,
+  ultimoAckMs: null,
+  waitUntilDisponivel: null,
   totalRecebidas: 0,
   totalDuplicadas: 0,
   totalRejeitadas: 0,
@@ -98,6 +137,8 @@ const OBS_PROCESSAMENTO_ZERO: ObsProcessamento = {
   ultimoPedidoAtualizadoId: null,
   ultimoPedidoAtualizadoEm: null,
   ultimaAcao: null,
+  ultimaVersaoPublicada: null,
+  ultimaLatenciaTotalMs: null,
   totalNovos: 0,
   totalAtualizados: 0,
   totalSemMudanca: 0,
@@ -174,7 +215,15 @@ export function tamanhoFila(cache: Cache): Promise<number> {
 
 export async function registrarRecebimento(
   cache: Cache,
-  dados: { topico: string; orderId: string | null; duplicada: boolean; rejeitada: boolean }
+  dados: {
+    topico: string;
+    orderId: string | null;
+    duplicada: boolean;
+    rejeitada: boolean;
+    sent?: string | null;
+    ackMs?: number | null;
+    waitUntilDisponivel?: boolean | null;
+  }
 ): Promise<void> {
   const obs = await lerObsRecebimento(cache);
   if (dados.rejeitada) {
@@ -186,6 +235,11 @@ export async function registrarRecebimento(
     obs.ultimaNotificacaoEm = new Date().toISOString();
     obs.ultimaNotificacaoTopico = dados.topico;
     obs.ultimaNotificacaoPedido = dados.orderId;
+    obs.ultimaNotificacaoSent = dados.sent ?? null;
+    obs.ultimoAckMs = typeof dados.ackMs === 'number' ? dados.ackMs : null;
+  }
+  if (dados.waitUntilDisponivel !== undefined) {
+    obs.waitUntilDisponivel = dados.waitUntilDisponivel;
   }
   await cache.set(CHAVE_OBS_NOTIF, JSON.stringify(obs));
 }
@@ -193,7 +247,12 @@ export async function registrarRecebimento(
 export async function registrarProcessamento(
   cache: Cache,
   dados:
-    | { tipo: 'novo' | 'atualizado' | 'sem_mudanca'; orderId: string }
+    | {
+        tipo: 'novo' | 'atualizado' | 'sem_mudanca';
+        orderId: string;
+        versao?: number | null;
+        latenciaTotalMs?: number | null;
+      }
     | { tipo: 'falha'; erro: string }
 ): Promise<void> {
   const obs = await lerObsProcessamento(cache);
@@ -209,6 +268,8 @@ export async function registrarProcessamento(
     obs.ultimaAcao = dados.tipo;
     obs.ultimoPedidoAtualizadoId = dados.orderId;
     obs.ultimoPedidoAtualizadoEm = agora;
+    if (dados.versao !== undefined) obs.ultimaVersaoPublicada = dados.versao;
+    if (dados.latenciaTotalMs !== undefined) obs.ultimaLatenciaTotalMs = dados.latenciaTotalMs;
     if (dados.tipo === 'novo') obs.totalNovos++;
     else if (dados.tipo === 'atualizado') obs.totalAtualizados++;
     else obs.totalSemMudanca++;

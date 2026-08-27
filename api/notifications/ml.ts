@@ -15,6 +15,14 @@
  * resposta — validar, deduplicar, enfileirar — e delega o trabalho pesado ao
  * dreno, agendado via waitUntil.
  *
+ * O orçamento de 500 ms é INVIOLÁVEL neste arquivo. Nenhuma chamada à API do
+ * Mercado Livre, nenhuma leitura de chunk e nenhuma publicação de manifesto
+ * pode entrar no caminho da resposta, nem como "só desta vez, quando o runtime
+ * não tiver waitUntil". Sem waitUntil o evento fica na fila e o job de hora em
+ * hora o drena — e `tempoReal.waitUntilDisponivel` em /api/orders/status diz
+ * exatamente que foi isso que aconteceu, em vez de deixar o sintoma virar
+ * "às vezes o pedido demora".
+ *
  * Corolário: qualquer coisa que não seja um problema de autenticação responde
  * 200. Tópico que não interessa, corpo estranho, pedido de outra conta: tudo
  * 200. Devolver 4xx nesses casos só faria o ML reenviar para sempre um evento
@@ -41,7 +49,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
-import { agendar } from '../../src/lib/wait-until.js';
+import { agendar, suportaWaitUntil } from '../../src/lib/wait-until.js';
 import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import { receberNotificacao, drenarFila } from '../../src/services/orders-webhook.service.js';
 
@@ -59,6 +67,7 @@ function lerCorpo(req: VercelRequest): unknown {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const inicioMs = Date.now();
   const cache = getCache();
   const ip = clientIp(req);
 
@@ -86,7 +95,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 401, { error: 'unauthorized' });
     }
 
-    const r = await receberNotificacao(cache, lerCorpo(req), env.ML_USER_ID);
+    // Consulta PURA, sem I/O: só para a telemetria saber se o dreno pôde ser
+    // agendado. Precisa vir antes do registro do recebimento, que é a única
+    // escrita de telemetria do caminho da resposta.
+    const comWaitUntil = suportaWaitUntil();
+
+    const r = await receberNotificacao(
+      cache,
+      lerCorpo(req),
+      // `application_id` do Mercado Livre É o client_id da aplicação. Não há
+      // fonte nova nem valor duplicado aqui: ML_CLIENT_ID já é obrigatório
+      // desde a primeira versão do backend, e é o mesmo número que aparece no
+      // corpo da notificação.
+      { mlUserId: env.ML_USER_ID, applicationId: env.ML_CLIENT_ID },
+      { inicioMs, waitUntilDisponivel: comWaitUntil }
+    );
 
     if (!r.aceito) {
       // 200 de propósito: ver a nota de contrato no topo.
@@ -113,20 +136,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     );
 
     if (!agendado) {
-      // Runtime sem waitUntil. Drenamos UM pedido no caminho da resposta e
-      // aceitamos estourar os 500 ms: o ML reenvia, a deduplicação por `_id`
-      // torna o reenvio barato, e a alternativa seria o pedido esperar a
-      // próxima reconciliação — uma hora, que é exatamente o que esta fase
-      // existe para eliminar.
-      try {
-        const d = await drenarFila(cache, criarFetchOrder(cache), { max: 1 });
-        console.info(`[ml-notif] dreno inline processados=${d.processados} restantes=${d.restantes}`);
-      } catch (e) {
-        console.error('[ml-notif] dreno inline', e instanceof Error ? e.message : e);
-      }
+      // Sem waitUntil NÃO drenamos aqui. Drenar no caminho da resposta
+      // estouraria os 500 ms e faria o ML contar entrega falha — trocaríamos
+      // um atraso conhecido por reenvios e risco de a callback ser desligada.
+      // O evento está na fila e o job `notificacoes` do workflow o processa.
+      console.warn('[ml-notif] runtime sem waitUntil: evento fica na fila ate o dreno agendado');
     }
 
-    console.info(`[ml-notif] enfileirada pedido=${r.orderId} fila=${r.fila} dreno=${agendado ? 'agendado' : 'inline'}`);
+    console.info(
+      `[ml-notif] enfileirada pedido=${r.orderId} fila=${r.fila} ` +
+      `dreno=${agendado ? 'agendado' : 'adiado'} ackMs=${Date.now() - inicioMs}`
+    );
     return json(res, 200, { ok: true });
   } catch (e) {
     // Erro nosso: 500 faz o ML reenviar, que é o comportamento desejado — o

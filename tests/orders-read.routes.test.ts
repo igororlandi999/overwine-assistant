@@ -646,8 +646,11 @@ describe('GET /api/orders/status — telemetria de tempo real', () => {
     await publicar(cache, 'ativos', 10, 50);
     await receberNotificacao(
       cache,
-      { _id: 'n1', topic: 'orders_v2', resource: '/orders/4242', user_id: Number(TEST_ENV.ML_USER_ID) },
-      TEST_ENV.ML_USER_ID
+      {
+        _id: 'n1', topic: 'orders_v2', resource: '/orders/4242',
+        user_id: Number(TEST_ENV.ML_USER_ID), application_id: Number(TEST_ENV.ML_CLIENT_ID),
+      },
+      { mlUserId: TEST_ENV.ML_USER_ID, applicationId: TEST_ENV.ML_CLIENT_ID }
     );
     await registrarProcessamento(cache, { tipo: 'atualizado', orderId: '4242' });
 
@@ -686,8 +689,11 @@ describe('GET /api/orders/status — telemetria de tempo real', () => {
     await publicar(cache, 'ativos', 10, 50);
     await receberNotificacao(
       cache,
-      { _id: 'n1', topic: 'orders_v2', resource: '/orders/4242', user_id: Number(TEST_ENV.ML_USER_ID) },
-      TEST_ENV.ML_USER_ID
+      {
+        _id: 'n1', topic: 'orders_v2', resource: '/orders/4242',
+        user_id: Number(TEST_ENV.ML_USER_ID), application_id: Number(TEST_ENV.ML_CLIENT_ID),
+      },
+      { mlUserId: TEST_ENV.ML_USER_ID, applicationId: TEST_ENV.ML_CLIENT_ID }
     );
     const bruto = String((await pedirStatus()).body);
     for (const proibido of ['orders:chunk', 'orders:evt', 'orders:manifest', 'segredo-de-webhook', 'access_token']) {

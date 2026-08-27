@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { FakeCache, TEST_ENV } from './fake-cache.js';
 import { setCacheForTests } from '../src/lib/cache/cache.js';
 import { resetEnvForTests } from '../src/config/env.js';
-import { tamanhoFila, lerObsRecebimento } from '../src/lib/orders-events.js';
+import { tamanhoFila, lerObsRecebimento, CHAVE_OBS_NOTIF, CHAVE_OBS_PROC } from '../src/lib/orders-events.js';
 import handler from '../api/notifications/ml.js';
 
 const SEGREDO = 'segredo-de-webhook-bem-longo';
@@ -37,7 +37,7 @@ const corpo = (over: Record<string, unknown> = {}) => ({
   topic: 'orders_v2',
   resource: '/orders/2000012345',
   user_id: Number(UID),
-  application_id: 1234,
+  application_id: Number(TEST_ENV.ML_CLIENT_ID),
   attempts: 1,
   sent: '2026-08-27T09:00:00.000Z',
   received: '2026-08-27T09:00:00.000Z',
@@ -152,5 +152,154 @@ describe('POST /api/notifications/ml — limite de taxa', () => {
     }
     const res = await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'estoura' }) });
     expect(res.statusCode).toBe(429);
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * Portão anterior ao merge. Cada teste aqui trava uma promessa feita ao
+ * revisor, e não uma escolha de implementação.
+ */
+describe('portão — o segredo e a query string não vazam', () => {
+  it('o segredo NAO aparece na telemetria gravada', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    const gravado = (cache.store.get(CHAVE_OBS_NOTIF)?.v ?? '') + (cache.store.get(CHAVE_OBS_PROC)?.v ?? '');
+    expect(gravado).not.toContain(SEGREDO);
+  });
+
+  it('a query string NAO e gravada na telemetria, nem quando tem lixo junto', async () => {
+    await chamar({
+      query: { k: SEGREDO, debug: 'valor-marcado-xyz', outro: 'nao-deveria-persistir' },
+      body: corpo(),
+    });
+    const gravado = (cache.store.get(CHAVE_OBS_NOTIF)?.v ?? '') + (cache.store.get(CHAVE_OBS_PROC)?.v ?? '');
+    expect(gravado).not.toContain('valor-marcado-xyz');
+    expect(gravado).not.toContain('nao-deveria-persistir');
+    expect(gravado).not.toContain('k=');
+  });
+
+  it('o segredo NAO vai para o log, nem quando esta errado', async () => {
+    const warn = vi.mocked(console.warn);
+    await chamar({ query: { k: 'segredo-errado-de-atacante' }, body: corpo() });
+    const tudo = warn.mock.calls.flat().map(String).join(' ');
+    expect(tudo).not.toContain('segredo-errado-de-atacante');
+    expect(tudo).not.toContain(SEGREDO);
+  });
+
+  it('nenhum log de sucesso carrega o segredo', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    const tudo = [...vi.mocked(console.info).mock.calls, ...vi.mocked(console.warn).mock.calls]
+      .flat().map(String).join(' ');
+    expect(tudo).not.toContain(SEGREDO);
+  });
+});
+
+describe('portão — application_id e user_id conferidos antes de enfileirar', () => {
+  it('application_id divergente e recusado, sem enfileirar', async () => {
+    const res = await chamar({ query: { k: SEGREDO }, body: corpo({ application_id: 999999999 }) });
+    expect(res.statusCode).toBe(200);   // 200 para o ML nao reenviar para sempre
+    expect(await tamanhoFila(cache)).toBe(0);
+    expect((await lerObsRecebimento(cache)).totalRejeitadas).toBe(1);
+  });
+
+  it('application_id ausente NAO reprova — o corpo do ML varia por topico', async () => {
+    const sem = corpo();
+    delete (sem as Record<string, unknown>).application_id;
+    const res = await chamar({ query: { k: SEGREDO }, body: sem });
+    expect(res.statusCode).toBe(200);
+    expect(await tamanhoFila(cache)).toBe(1);
+  });
+
+  it('application_id como string bate com o ML_CLIENT_ID numerico', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo({ application_id: TEST_ENV.ML_CLIENT_ID }) });
+    expect(await tamanhoFila(cache)).toBe(1);
+  });
+
+  it('user_id certo e application_id errado ainda reprova', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo({ user_id: Number(UID), application_id: 42 }) });
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+});
+
+describe('portão — orders_v2 basta, sem depender de created_orders', () => {
+  it('orders_v2 sozinho enfileira: nada no caminho exige o topico antigo', async () => {
+    const res = await chamar({ query: { k: SEGREDO }, body: corpo({ topic: 'orders_v2' }) });
+    expect(res.statusCode).toBe(200);
+    expect(await tamanhoFila(cache)).toBe(1);
+    expect((await lerObsRecebimento(cache)).ultimaNotificacaoTopico).toBe('orders_v2');
+  });
+});
+
+describe('portão — os 500 ms sao inviolaveis no caminho da resposta', () => {
+  it('a rota NAO chama o Mercado Livre para responder', async () => {
+    const fetchEspiao = vi.spyOn(globalThis, 'fetch');
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    expect(fetchEspiao).not.toHaveBeenCalled();
+  });
+
+  it('o ack so enfileira: nada de manifesto publicado nem pedido buscado', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    expect(await tamanhoFila(cache)).toBe(1);
+    expect(cache.store.get('orders:manifest')).toBeUndefined();
+  });
+
+  it('sem waitUntil o evento FICA na fila — nao ha dreno inline', async () => {
+    // O runtime de teste nao publica o contexto de requisicao da Vercel, entao
+    // este e exatamente o cenario "sem waitUntil".
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    const obs = await lerObsRecebimento(cache);
+    expect(obs.waitUntilDisponivel).toBe(false);
+    expect(await tamanhoFila(cache)).toBe(1);
+  });
+
+  it('registra o tempo do ack, para o orcamento ser conferivel', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    const obs = await lerObsRecebimento(cache);
+    expect(typeof obs.ultimoAckMs).toBe('number');
+    expect(obs.ultimoAckMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('guarda o `sent` do ML para medir latencia ponta a ponta', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo({ sent: '2026-08-27T09:00:00.000Z' }) });
+    expect((await lerObsRecebimento(cache)).ultimaNotificacaoSent).toBe('2026-08-27T09:00:00.000Z');
+  });
+
+  it('`sent` invalido vira null em vez de sujar a medicao', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo({ sent: 'nao-e-data' }) });
+    expect((await lerObsRecebimento(cache)).ultimaNotificacaoSent).toBeNull();
+  });
+});
+
+describe('portão — o corpo nunca vira estado do pedido', () => {
+  it('campos de pedido no corpo sao IGNORADOS: so o id atravessa a fila', async () => {
+    await chamar({
+      query: { k: SEGREDO },
+      body: corpo({
+        status: 'cancelled',
+        paid_amount: 999999,
+        total_amount: 999999,
+        order_items: [{ quantity: 42, item: { id: 'MLB-FORJADO' } }],
+        buyer: { nickname: 'atacante' },
+      }),
+    });
+    const naFila = cache.lists.get('orders:evt:queue') ?? [];
+    expect(naFila).toHaveLength(1);
+    const evento = JSON.parse(naFila[0]);
+    expect(evento.orderId).toBe('2000012345');
+    expect(Object.keys(evento).sort()).toEqual(
+      ['notifId', 'orderId', 'recebidoEm', 'sent', 'topico']
+    );
+    expect(naFila[0]).not.toContain('MLB-FORJADO');
+    expect(naFila[0]).not.toContain('atacante');
+    expect(naFila[0]).not.toContain('999999');
+  });
+
+  it('resource com id nao numerico e recusado — o id so serve para GET /orders/{id}', async () => {
+    for (const resource of ['/orders/1;rm', '/orders/../items/1', '/orders/1?x=1', '/orders/abc']) {
+      const res = await chamar({ query: { k: SEGREDO }, body: corpo({ _id: resource, resource }) });
+      expect(res.json().ignorada, resource).toBe(true);
+    }
+    expect(await tamanhoFila(cache)).toBe(0);
   });
 });

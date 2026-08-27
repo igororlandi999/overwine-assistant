@@ -108,6 +108,15 @@ manifesto passou a declarar `chunkCounts`, e a paginação anda pelos tamanhos
 reais em vez de derivar a posição de `chunkSize`. Manifesto antigo, sem o campo,
 continua sendo lido pela conta antiga.
 
+### O orçamento de 500 ms é inviolável
+
+Nada no caminho da resposta chama a API do ML, lê chunk ou publica manifesto —
+nem como exceção. Se o runtime não oferecer `waitUntil`, o evento **fica na
+fila** e o job `notificacoes` do workflow o processa; drenar ali estouraria os
+500 ms e faria o ML contar entrega falha, trocando um atraso conhecido por
+reenvios e risco de a callback ser desligada. `tempoReal.waitUntilDisponivel`
+denuncia esse estado em vez de deixá-lo virar "às vezes o pedido demora".
+
 ### Idempotência
 
 O evento carrega **só o id do pedido**. O estado vem sempre de uma busca nova em
@@ -135,16 +144,31 @@ Nada disso funciona só com o deploy. É preciso, em
 
 1. **URL de callback**:
    `https://overwine-assistant.vercel.app/api/notifications/ml?k=<ML_WEBHOOK_SECRET>`
-2. **Tópico**: `orders_v2`. (`created_orders` é aceito pelo backend por
-   compatibilidade, mas só dispara na criação — `orders_v2` cobre criação e
-   mudanças.)
+2. **Tópico**: marque **somente `orders_v2`**. Ele cobre o ciclo inteiro —
+   criação, pagamento, cancelamento, reembolso. `created_orders` é aceito pelo
+   backend por compatibilidade, mas nada depende dele: só dispara na criação, e
+   marcá-lo sozinho faria a mudança de status parar de chegar.
 3. **Variável** `ML_WEBHOOK_SECRET` no projeto Vercel, com o mesmo valor que
    está na URL, mínimo de 16 caracteres.
 
 O ML **não assina** as notificações: não há HMAC, header de assinatura nem lista
 de IPs publicada. O segredo na URL é o único mecanismo disponível, e por isso a
-URL registrada no painel é uma credencial. A segunda camada é arquitetural: o
-endpoint nunca acredita no corpo.
+URL registrada no painel é uma credencial.
+
+Sobre ele vêm mais três camadas, nenhuma com fonte de verdade nova:
+
+- **`user_id`** conferido contra `ML_USER_ID`;
+- **`application_id`** conferido contra `ML_CLIENT_ID` — no Mercado Livre o
+  `application_id` da notificação **é** o `client_id` da aplicação, então não há
+  variável nova nem valor duplicado;
+- o endpoint **nunca acredita no corpo**: do payload só atravessam o id do
+  pedido e o `sent` (usado apenas para medir latência). O estado vem sempre de
+  um `GET /orders/{id}` novo.
+
+Os dois primeiros usam a mesma regra defensiva: campo **ausente** não reprova (o
+corpo do ML varia por tópico e por versão), campo **presente e divergente**
+reprova. Nunca degradam para "aceita qualquer coisa": o `resource` ainda precisa
+casar com `/orders/{dígitos}` e o segredo da URL já foi conferido antes.
 
 Sem `ML_WEBHOOK_SECRET` o endpoint responde `503 notificacoes_desabilitadas` e
 **nada mais muda** — a reconciliação de hora em hora continua sendo a fonte de
@@ -158,6 +182,13 @@ atualização, exatamente como antes.
 - `tempoReal.habilitado` — se as notificações estão configuradas;
 - `tempoReal.ultimaNotificacaoEm` / `ultimaNotificacaoPedido` / `ultimaNotificacaoTopico`;
 - `tempoReal.ultimoPedidoAtualizadoId` / `ultimoPedidoAtualizadoEm` / `ultimaAcao`;
+- `tempoReal.ultimaNotificacaoSent` — o `sent` do ML, para medir latência;
+- `tempoReal.ultimoAckMs` — milissegundos do caminho da resposta. O ML exige
+  HTTP 200 em menos de 500 ms; é aqui que se confere o orçamento;
+- `tempoReal.waitUntilDisponivel` — se `false`, o dreno **não** roda junto da
+  notificação e a fila espera o job de hora em hora;
+- `tempoReal.ultimaVersaoPublicada` — versão publicada pelo último upsert;
+- `tempoReal.ultimaLatenciaTotalMs` — do `sent` do ML até a publicação;
 - `tempoReal.pendentes` — eventos na fila (persistentemente > 0 é problema);
 - `tempoReal.falhas` / `ultimoErro` / `ultimoErroEm`;
 - `lastSyncAt` / `lastResult` — continuam sendo da **reconciliação**, e só dela.

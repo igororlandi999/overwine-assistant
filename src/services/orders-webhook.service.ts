@@ -107,7 +107,10 @@ export type Interpretacao =
  * envia por aplicação, e uma aplicação pode ter mais de um vendedor
  * autorizado) não pode entrar neste snapshot.
  */
-export function interpretarNotificacao(body: unknown, mlUserId: string): Interpretacao {
+export function interpretarNotificacao(
+  body: unknown,
+  esperado: { mlUserId: string; applicationId: string }
+): Interpretacao {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { ok: false, motivo: 'corpo_invalido', topico: '' };
   }
@@ -118,10 +121,21 @@ export function interpretarNotificacao(body: unknown, mlUserId: string): Interpr
     return { ok: false, motivo: 'topico_ignorado', topico };
   }
 
-  // O ML manda user_id como número; comparamos em string canônica.
+  // O ML manda user_id e application_id como número; comparamos em string
+  // canônica. Ambos são conferidos com a MESMA regra defensiva: campo ausente
+  // não reprova (o corpo do ML pode variar por tópico e por versão), campo
+  // presente e divergente reprova. Um corpo mais pobre que o esperado degrada
+  // para a validação que sobrou; nunca para "aceita qualquer coisa em
+  // silêncio", porque o `resource` ainda precisa casar e o segredo da URL já
+  // foi conferido antes de chegarmos aqui.
   const userId = b.user_id;
-  if (userId !== undefined && userId !== null && String(userId) !== mlUserId) {
+  if (userId !== undefined && userId !== null && String(userId) !== esperado.mlUserId) {
     return { ok: false, motivo: 'user_id_divergente', topico };
+  }
+
+  const appId = b.application_id;
+  if (appId !== undefined && appId !== null && String(appId) !== esperado.applicationId) {
+    return { ok: false, motivo: 'application_id_divergente', topico };
   }
 
   const resource = typeof b.resource === 'string' ? b.resource : '';
@@ -134,8 +148,23 @@ export function interpretarNotificacao(body: unknown, mlUserId: string): Interpr
 
   return {
     ok: true,
-    evento: { orderId: m[1], topico, notifId, recebidoEm: new Date().toISOString() },
+    evento: {
+      orderId: m[1],
+      topico,
+      notifId,
+      recebidoEm: new Date().toISOString(),
+      sent: lerSent(b.sent),
+    },
   };
+}
+
+/**
+ * `sent` do ML, aceito só se for data reconhecível. Serve exclusivamente para
+ * medir latência: nunca vira dado de pedido e nunca decide nada.
+ */
+function lerSent(v: unknown): string | null {
+  if (typeof v !== 'string' || v === '') return null;
+  return Number.isFinite(Date.parse(v)) ? v : null;
 }
 
 // ── 2. Recebimento: valida, deduplica, enfileira. NÃO busca nada no ML. ─────
@@ -152,15 +181,20 @@ export type ResultadoRecebimento =
 export async function receberNotificacao(
   cache: Cache,
   body: unknown,
-  mlUserId: string
+  esperado: { mlUserId: string; applicationId: string },
+  medicao: { inicioMs?: number; waitUntilDisponivel?: boolean } = {}
 ): Promise<ResultadoRecebimento> {
-  const r = interpretarNotificacao(body, mlUserId);
+  const decorrido = () =>
+    typeof medicao.inicioMs === 'number' ? Math.max(0, Math.round(Date.now() - medicao.inicioMs)) : null;
+
+  const r = interpretarNotificacao(body, esperado);
   if (!r.ok) {
     await registrarRecebimento(cache, {
       topico: r.topico,
       orderId: null,
       duplicada: false,
       rejeitada: true,
+      waitUntilDisponivel: medicao.waitUntilDisponivel,
     });
     return { aceito: false, motivo: r.motivo };
   }
@@ -173,6 +207,7 @@ export async function receberNotificacao(
       orderId: r.evento.orderId,
       duplicada: true,
       rejeitada: false,
+      waitUntilDisponivel: medicao.waitUntilDisponivel,
     });
     return { aceito: true, duplicada: true, orderId: r.evento.orderId, fila };
   }
@@ -183,6 +218,9 @@ export async function receberNotificacao(
     orderId: r.evento.orderId,
     duplicada: false,
     rejeitada: false,
+    sent: r.evento.sent,
+    ackMs: decorrido(),
+    waitUntilDisponivel: medicao.waitUntilDisponivel,
   });
   return { aceito: true, duplicada: false, orderId: r.evento.orderId, fila };
 }
@@ -431,9 +469,15 @@ export async function drenarFila(
         }
         const res = await upsertPedido(cache, toSlim(bruto), ALVO);
         r.processados++;
-        if (res.acao === 'novo') { r.novos++; await registrarProcessamento(cache, { tipo: 'novo', orderId }); }
-        else if (res.acao === 'atualizado') { r.atualizados++; await registrarProcessamento(cache, { tipo: 'atualizado', orderId }); }
-        else if (res.acao === 'sem_mudanca') { r.semMudanca++; await registrarProcessamento(cache, { tipo: 'sem_mudanca', orderId }); }
+        // Latência ponta a ponta: do relógio do ML até a publicação. Dois
+        // relógios diferentes, então vale como ordem de grandeza.
+        const sent = porId.get(orderId)?.sent ?? null;
+        const t = sent !== null ? Date.parse(sent) : NaN;
+        const latenciaTotalMs = Number.isFinite(t) ? Math.max(0, Math.round(Date.now() - t)) : null;
+        const comum = { orderId, versao: res.versao, latenciaTotalMs };
+        if (res.acao === 'novo') { r.novos++; await registrarProcessamento(cache, { tipo: 'novo', ...comum }); }
+        else if (res.acao === 'atualizado') { r.atualizados++; await registrarProcessamento(cache, { tipo: 'atualizado', ...comum }); }
+        else if (res.acao === 'sem_mudanca') { r.semMudanca++; await registrarProcessamento(cache, { tipo: 'sem_mudanca', ...comum }); }
         else {
           // sem_snapshot: não há base para o upsert. Não é falha do evento, e
           // reenfileirar só repetiria o mesmo resultado — a carga inicial (ou a

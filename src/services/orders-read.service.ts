@@ -66,9 +66,25 @@ export interface OrdersRealtimeStatus {
   ultimaNotificacaoEm: string | null;
   ultimaNotificacaoTopico: string | null;
   ultimaNotificacaoPedido: string | null;
+  /** `sent` do Mercado Livre na última notificação aceita — o relógio deles. */
+  ultimaNotificacaoSent: string | null;
+  /**
+   * Milissegundos do caminho da resposta da última notificação aceita. O ML
+   * exige HTTP 200 em menos de 500 ms; é aqui que se confere.
+   */
+  ultimoAckMs: number | null;
+  /**
+   * O runtime ofereceu waitUntil? `false` significa que o dreno NÃO roda junto
+   * da notificação e a fila espera o job de hora em hora.
+   */
+  waitUntilDisponivel: boolean | null;
   ultimoPedidoAtualizadoId: string | null;
   ultimoPedidoAtualizadoEm: string | null;
   ultimaAcao: 'novo' | 'atualizado' | 'sem_mudanca' | null;
+  /** Versão publicada pelo último upsert que mudou alguma coisa. */
+  ultimaVersaoPublicada: number | null;
+  /** Do `sent` do ML até a publicação do manifesto, em milissegundos. */
+  ultimaLatenciaTotalMs: number | null;
   ultimoDrenoEm: string | null;
   /** Eventos ainda não processados. Persistentemente > 0 é sinal de problema. */
   pendentes: number;
@@ -129,7 +145,9 @@ export async function getReadStatus(
   let tempoReal: OrdersRealtimeStatus = {
     habilitado: false,
     ultimaNotificacaoEm: null, ultimaNotificacaoTopico: null, ultimaNotificacaoPedido: null,
+    ultimaNotificacaoSent: null, ultimoAckMs: null, waitUntilDisponivel: null,
     ultimoPedidoAtualizadoId: null, ultimoPedidoAtualizadoEm: null, ultimaAcao: null,
+    ultimaVersaoPublicada: null, ultimaLatenciaTotalMs: null,
     ultimoDrenoEm: null, pendentes: 0,
     recebidas: 0, duplicadas: 0, rejeitadas: 0,
     aplicadosNovos: 0, aplicadosAtualizados: 0, falhas: 0,
@@ -147,9 +165,14 @@ export async function getReadStatus(
       ultimaNotificacaoEm: rec.ultimaNotificacaoEm,
       ultimaNotificacaoTopico: rec.ultimaNotificacaoTopico,
       ultimaNotificacaoPedido: rec.ultimaNotificacaoPedido,
+      ultimaNotificacaoSent: rec.ultimaNotificacaoSent,
+      ultimoAckMs: rec.ultimoAckMs,
+      waitUntilDisponivel: rec.waitUntilDisponivel,
       ultimoPedidoAtualizadoId: proc.ultimoPedidoAtualizadoId,
       ultimoPedidoAtualizadoEm: proc.ultimoPedidoAtualizadoEm,
       ultimaAcao: proc.ultimaAcao,
+      ultimaVersaoPublicada: proc.ultimaVersaoPublicada,
+      ultimaLatenciaTotalMs: proc.ultimaLatenciaTotalMs,
       ultimoDrenoEm: proc.ultimoDrenoEm,
       pendentes,
       recebidas: rec.totalRecebidas,
