@@ -91,6 +91,13 @@ export interface OrdersRealtimeStatus {
   recebidas: number;
   duplicadas: number;
   rejeitadas: number;
+  /**
+   * Motivo da última recusa. Uma recusa é invisível do lado do ML — ele recebe
+   * 200 e considera a entrega boa —, então este é o único lugar em que
+   * `application_id_divergente` aparece antes de alguém abrir o log.
+   */
+  ultimoMotivoRejeicao: string | null;
+  ultimaRejeicaoEm: string | null;
   aplicadosNovos: number;
   aplicadosAtualizados: number;
   falhas: number;
@@ -150,6 +157,7 @@ export async function getReadStatus(
     ultimaVersaoPublicada: null, ultimaLatenciaTotalMs: null,
     ultimoDrenoEm: null, pendentes: 0,
     recebidas: 0, duplicadas: 0, rejeitadas: 0,
+    ultimoMotivoRejeicao: null, ultimaRejeicaoEm: null,
     aplicadosNovos: 0, aplicadosAtualizados: 0, falhas: 0,
     ultimoErro: null, ultimoErroEm: null,
   };
@@ -178,6 +186,8 @@ export async function getReadStatus(
       recebidas: rec.totalRecebidas,
       duplicadas: rec.totalDuplicadas,
       rejeitadas: rec.totalRejeitadas,
+      ultimoMotivoRejeicao: rec.ultimoMotivoRejeicao,
+      ultimaRejeicaoEm: rec.ultimaRejeicaoEm,
       aplicadosNovos: proc.totalNovos,
       aplicadosAtualizados: proc.totalAtualizados,
       falhas: proc.totalFalhas,

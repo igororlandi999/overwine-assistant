@@ -194,6 +194,7 @@ export async function receberNotificacao(
       orderId: null,
       duplicada: false,
       rejeitada: true,
+      motivo: r.motivo,
       waitUntilDisponivel: medicao.waitUntilDisponivel,
     });
     return { aceito: false, motivo: r.motivo };

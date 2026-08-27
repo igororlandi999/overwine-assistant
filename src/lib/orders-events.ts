@@ -96,6 +96,21 @@ export interface ObsRecebimento {
   totalRecebidas: number;
   totalDuplicadas: number;
   totalRejeitadas: number;
+  /**
+   * Por que a última notificação recusada foi recusada.
+   *
+   * Existe porque uma recusa é INVISÍVEL do lado de fora: respondemos 200 para
+   * o ML não reenviar para sempre, então o painel dele mostra entrega bem
+   * sucedida enquanto nada entra na fila. Sem este campo, um `ML_CLIENT_ID` com
+   * um espaço sobrando derrubaria 100% das notificações e o sintoma seria
+   * "o tempo real não funciona", sem nada apontando para a causa.
+   *
+   * É um dos motivos fechados de `interpretarNotificacao` (topico_ignorado,
+   * user_id_divergente, application_id_divergente, resource_invalido,
+   * corpo_invalido) — nunca texto vindo do corpo da notificação.
+   */
+  ultimoMotivoRejeicao: string | null;
+  ultimaRejeicaoEm: string | null;
 }
 
 export interface ObsProcessamento {
@@ -131,6 +146,8 @@ const OBS_RECEBIMENTO_ZERO: ObsRecebimento = {
   totalRecebidas: 0,
   totalDuplicadas: 0,
   totalRejeitadas: 0,
+  ultimoMotivoRejeicao: null,
+  ultimaRejeicaoEm: null,
 };
 
 const OBS_PROCESSAMENTO_ZERO: ObsProcessamento = {
@@ -220,6 +237,7 @@ export async function registrarRecebimento(
     orderId: string | null;
     duplicada: boolean;
     rejeitada: boolean;
+    motivo?: string;
     sent?: string | null;
     ackMs?: number | null;
     waitUntilDisponivel?: boolean | null;
@@ -228,6 +246,8 @@ export async function registrarRecebimento(
   const obs = await lerObsRecebimento(cache);
   if (dados.rejeitada) {
     obs.totalRejeitadas++;
+    obs.ultimoMotivoRejeicao = dados.motivo ?? null;
+    obs.ultimaRejeicaoEm = new Date().toISOString();
   } else if (dados.duplicada) {
     obs.totalDuplicadas++;
   } else {

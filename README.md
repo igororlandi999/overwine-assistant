@@ -190,6 +190,11 @@ atualização, exatamente como antes.
 - `tempoReal.ultimaVersaoPublicada` — versão publicada pelo último upsert;
 - `tempoReal.ultimaLatenciaTotalMs` — do `sent` do ML até a publicação;
 - `tempoReal.pendentes` — eventos na fila (persistentemente > 0 é problema);
+- `tempoReal.rejeitadas` / `ultimoMotivoRejeicao` / `ultimaRejeicaoEm` — uma
+  recusa é invisível do lado do ML, que recebe 200 e considera a entrega boa.
+  **`ultimoMotivoRejeicao: 'application_id_divergente'` com `recebidas: 0` é o
+  sintoma de `ML_CLIENT_ID` errado**, e é a primeira coisa a conferir se o
+  tempo real não der sinal de vida;
 - `tempoReal.falhas` / `ultimoErro` / `ultimoErroEm`;
 - `lastSyncAt` / `lastResult` — continuam sendo da **reconciliação**, e só dela.
 

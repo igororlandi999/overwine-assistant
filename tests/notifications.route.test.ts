@@ -203,6 +203,43 @@ describe('portão — application_id e user_id conferidos antes de enfileirar', 
     expect((await lerObsRecebimento(cache)).totalRejeitadas).toBe(1);
   });
 
+  /**
+   * Uma recusa e INVISIVEL do lado do Mercado Livre: ele recebe 200 e marca a
+   * entrega como boa. Se o motivo nao ficasse gravado, um ML_CLIENT_ID com um
+   * espaco sobrando derrubaria 100% das notificacoes e o sintoma seria "o
+   * tempo real nao funciona", sem nada apontando para a causa.
+   */
+  it('o motivo da recusa fica gravado — recusa nao pode ser silenciosa', async () => {
+    await chamar({ query: { k: SEGREDO }, body: corpo({ application_id: 999999999 }) });
+    const obs = await lerObsRecebimento(cache);
+    expect(obs.ultimoMotivoRejeicao).toBe('application_id_divergente');
+    expect(obs.ultimaRejeicaoEm).toBeTypeOf('string');
+  });
+
+  it('cada motivo de recusa aparece com o proprio nome', async () => {
+    const casos: Array<[Record<string, unknown>, string]> = [
+      [{ user_id: 987654321 }, 'user_id_divergente'],
+      [{ application_id: 5 }, 'application_id_divergente'],
+      [{ topic: 'shipments', resource: '/shipments/1' }, 'topico_ignorado'],
+      [{ resource: '/orders/abc' }, 'resource_invalido'],
+    ];
+    for (const [over, esperado] of casos) {
+      cache.store.delete('orders:evt:obs:notif');
+      await chamar({ query: { k: SEGREDO }, body: corpo(over) });
+      expect((await lerObsRecebimento(cache)).ultimoMotivoRejeicao, esperado).toBe(esperado);
+    }
+  });
+
+  it('o motivo gravado NAO carrega texto vindo do corpo da notificacao', async () => {
+    await chamar({
+      query: { k: SEGREDO },
+      body: corpo({ topic: 'topico-forjado-com-<script>', resource: '/x/1' }),
+    });
+    const obs = await lerObsRecebimento(cache);
+    expect(obs.ultimoMotivoRejeicao).toBe('topico_ignorado');
+    expect(JSON.stringify(obs)).not.toContain('topico-forjado');
+  });
+
   it('application_id ausente NAO reprova — o corpo do ML varia por topico', async () => {
     const sem = corpo();
     delete (sem as Record<string, unknown>).application_id;
