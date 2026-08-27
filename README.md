@@ -126,8 +126,13 @@ um evento fora de ordem não regride estado, porque o conteúdo do evento nunca 
 aplicado. A deduplicação por `_id` da notificação é economia de chamada, não a
 garantia de correção.
 
-O upsert segura o **mesmo lock** da sincronização periódica. Lock ocupado não é
-erro: os eventos ficam na fila para o próximo dreno.
+O upsert segura o **mesmo lock** da sincronização periódica. Um dreno que não
+pega o lock de primeira espera até 1,2 s (3 tentativas) antes de desistir: duas
+vendas no mesmo segundo geram dois drenos, e sem essa espera o evento da segunda
+cairia no job de hora em hora. A espera é gratuita porque o dreno roda em
+segundo plano — o ACK já foi dado e o orçamento de 500 ms não vale ali. Ela não
+tenta vencer uma reconciliação, que segura o lock por muito mais tempo; nesse
+caso o evento fica na fila mesmo, e não é erro.
 
 ### Reconciliação continua existindo
 

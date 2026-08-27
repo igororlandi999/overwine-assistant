@@ -859,3 +859,114 @@ describe('7. portão de pré-merge', () => {
     expect(obs.waitUntilDisponivel).toBe(true);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * A JANELA DE DOIS DRENOS SIMULTANEOS.
+ *
+ * Duas vendas no mesmo segundo produzem dois drenos. O primeiro pega o lock e
+ * esvazia a fila; o segundo chega logo depois e, com uma tentativa unica,
+ * encontraria o lock ocupado e devolveria o evento da segunda venda ao job de
+ * hora em hora — que e exatamente o atraso que esta fase existe para eliminar.
+ *
+ * A espera curta e barata porque o dreno roda em segundo plano: o ACK ja foi
+ * dado e o orcamento de 500 ms do ML nao vale aqui.
+ *
+ * A espera NAO tenta vencer uma reconciliacao. Essa segura o lock por muito
+ * mais tempo que 1,2 s, e para ela o comportamento certo continua sendo
+ * desistir e deixar o evento na fila.
+ */
+describe('8. dois drenos concorrentes', () => {
+  function fakeFetch(estado: Map<string, OrderSlim>) {
+    const chamadas: string[] = [];
+    const fn = async (orderId: string): Promise<OrderInput> => {
+      chamadas.push(orderId);
+      const o = estado.get(orderId);
+      if (!o) throw new Error(`pedido ${orderId} inexistente`);
+      return comoInput(o);
+    };
+    return { fn, chamadas };
+  }
+
+  const notif = (id: string, orderId: string) => ({
+    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`,
+    user_id: Number(UID), application_id: Number(APP),
+  });
+
+  async function base() {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    const pagina = async ({ offset, limit }: { offset: number; limit: number }) => ({
+      results: lista.slice(offset, offset + limit) as unknown as OrderInput[],
+      total: lista.length,
+    });
+    await runSyncStep(cache, pagina, { modo: 'full' });
+  }
+
+  it('o dreno espera um lock que esta prestes a ser liberado', async () => {
+    await base();
+    const { fn } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+
+    // Outro dreno segura o lock e libera em 150 ms — dentro da janela de espera.
+    await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'outro-dreno', 120);
+    setTimeout(() => { void cache.del(ORDERS_SYNC_LOCK_KEY); }, 150);
+
+    const r = await drenarFila(cache, fn);
+
+    expect(r.novos).toBe(1);
+    expect(r.motivo).toBeUndefined();
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+
+  it('lock preso alem da janela ainda desiste, preservando o evento', async () => {
+    await base();
+    const { fn, chamadas } = fakeFetch(new Map([['5000', pedido('5000', -1)]]));
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+    // Uma reconciliacao de verdade: segura por muito mais que 1,2 s.
+    await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'reconciliacao', 120);
+
+    const r = await drenarFila(cache, fn);
+
+    expect(r.motivo).toBe('sync_em_andamento');
+    expect(r.ok).toBe(true);
+    expect(chamadas).toHaveLength(0);
+    expect(await tamanhoFila(cache)).toBe(1);
+    expect(await cache.get(ORDERS_SYNC_LOCK_KEY)).toBe('reconciliacao');
+  });
+
+  it('fila vazia NAO espera pelo lock — nada a drenar, nada a aguardar', async () => {
+    await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'reconciliacao', 120);
+    const { fn } = fakeFetch(new Map());
+
+    const inicio = Date.now();
+    const r = await drenarFila(cache, fn);
+    const decorrido = Date.now() - inicio;
+
+    expect(r.motivo).toBe('sync_em_andamento');
+    expect(decorrido).toBeLessThan(300);   // desistiu na primeira tentativa
+  });
+
+  it('dois drenos disparados juntos aplicam os DOIS pedidos', async () => {
+    await base();
+    const estado = new Map([
+      ['5000', pedido('5000', -1)],
+      ['5001', pedido('5001', -2)],
+    ]);
+    const { fn, chamadas } = fakeFetch(estado);
+
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+    await receberNotificacao(cache, notif('b', '5001'), ESPERADO);
+
+    // Simultaneos, como duas notificacoes no mesmo segundo.
+    const [um, dois] = await Promise.all([drenarFila(cache, fn), drenarFila(cache, fn)]);
+
+    expect(um.novos + dois.novos).toBe(2);
+    expect(await tamanhoFila(cache)).toBe(0);
+    expect(chamadas.sort()).toEqual(['5000', '5001']);
+
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.some(o => String(o.id) === '5000')).toBe(true);
+    expect(snap.some(o => String(o.id) === '5001')).toBe(true);
+    expect(snap).toHaveLength(52);
+  });
+});

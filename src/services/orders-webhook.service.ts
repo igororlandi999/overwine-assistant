@@ -422,6 +422,34 @@ export interface ResultadoDreno {
   motivo?: string;
 }
 
+/**
+ * Tentativas de pegar o lock antes de desistir do dreno.
+ *
+ * Uma tentativa só bastaria se os drenos nunca se cruzassem. Eles se cruzam:
+ * duas vendas no mesmo segundo geram dois drenos, o primeiro segura o lock por
+ * algumas centenas de milissegundos, e o segundo chegaria depois de o primeiro
+ * já ter esvaziado a fila — deixando o evento da segunda venda esperando o job
+ * de hora em hora. Uma espera curta cobre essa janela.
+ *
+ * A espera é barata porque o dreno roda em SEGUNDO PLANO: o ACK já foi dado, e
+ * o orçamento de 500 ms do Mercado Livre não se aplica aqui. O teto total
+ * (3 x 400 ms = 1,2 s) fica muito abaixo do maxDuration da função, e não tenta
+ * vencer uma reconciliação — essa segura o lock por muito mais tempo, e para
+ * ela o caminho certo é mesmo deixar o evento na fila.
+ */
+const LOCK_TENTATIVAS = 3;
+const LOCK_ESPERA_MS = 400;
+
+async function tentarLock(cache: Cache, dono: string, ttlS: number): Promise<boolean> {
+  for (let i = 0; i < LOCK_TENTATIVAS; i++) {
+    if (await cache.setNX(ORDERS_SYNC_LOCK_KEY, dono, ttlS)) return true;
+    // Nada a drenar? Não vale esperar por um lock que não vamos usar.
+    if ((await tamanhoFila(cache)) === 0) return false;
+    if (i < LOCK_TENTATIVAS - 1) await new Promise(r => setTimeout(r, LOCK_ESPERA_MS));
+  }
+  return false;
+}
+
 const DRENO_ZERO: ResultadoDreno = {
   ok: true, processados: 0, novos: 0, atualizados: 0, semMudanca: 0, falhas: 0, restantes: 0,
 };
@@ -443,7 +471,7 @@ export async function drenarFila(
   const max = opts.max ?? env.ORDERS_WEBHOOK_MAX_DRENO;
 
   const dono = randomBytes(16).toString('hex');
-  const pegou = await cache.setNX(ORDERS_SYNC_LOCK_KEY, dono, env.ORDERS_SYNC_LOCK_TTL_S);
+  const pegou = await tentarLock(cache, dono, env.ORDERS_SYNC_LOCK_TTL_S);
   if (!pegou) {
     return { ...DRENO_ZERO, restantes: await tamanhoFila(cache), motivo: 'sync_em_andamento' };
   }
