@@ -151,6 +151,30 @@ describe('POST /api/notifications/ml — o ML sempre recebe 200 no que não é a
     expect(res.json().ignorada).toBe(true);
   });
 
+  /**
+   * Regressao encontrada no smoke test do Preview, nao aqui: com
+   * Content-Type: application/json e corpo invalido, o helper do @vercel/node
+   * LANCA na primeira leitura de req.body — antes de qualquer linha nossa. O
+   * resultado era HTTP 500, e 500 e a unica resposta que faz o Mercado Livre
+   * reenviar para sempre.
+   *
+   * O mock deste arquivo entrega a string crua e nunca passa pelo parser da
+   * plataforma, entao o teste antigo nao podia pegar. Este reproduz o
+   * comportamento real: a propriedade `body` lanca ao ser lida.
+   */
+  it('req.body que LANCA ao ser lido ainda responde 200', async () => {
+    const req = mockReq({ query: { k: SEGREDO } });
+    Object.defineProperty(req, 'body', {
+      get() { throw new SyntaxError('Unexpected token i in JSON at position 0'); },
+    });
+    const res = mockRes();
+    await handler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ignorada).toBe(true);
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+
   it('pedido de OUTRA conta: 200 e nada na fila', async () => {
     const res = await chamar({ query: { k: SEGREDO }, body: corpo({ user_id: 987654321 }) });
     expect(res.statusCode).toBe(200);

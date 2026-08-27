@@ -59,9 +59,26 @@ import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import { receberNotificacao, drenarFila } from '../../src/services/orders-webhook.service.js';
 import { registrarDrenoPedido } from '../../src/lib/orders-events.js';
 
-/** O corpo pode chegar já parseado pela Vercel ou como string bruta. */
+/**
+ * O corpo pode chegar já parseado pela Vercel ou como string bruta.
+ *
+ * O ACESSO a `req.body` está dentro do try de propósito. O helper do
+ * `@vercel/node` faz o parse na PRIMEIRA leitura da propriedade, e com
+ * `Content-Type: application/json` e corpo inválido ele LANÇA ali — antes de
+ * qualquer linha nossa rodar. Sem este try, um corpo malformado virava HTTP
+ * 500, e 500 é a única resposta que faz o Mercado Livre reenviar para sempre:
+ * o protocolo desta rota manda responder 200 e ignorar.
+ *
+ * Encontrado no smoke test do Preview. O teste unitário não pegava porque o
+ * mock entrega a string crua e nunca passa pelo parser da plataforma.
+ */
 function lerCorpo(req: VercelRequest): unknown {
-  const b: unknown = req.body;
+  let b: unknown;
+  try {
+    b = req.body;
+  } catch {
+    return null; // corpo ilegível → tratado como notificação a ignorar
+  }
   if (typeof b === 'string') {
     try {
       return JSON.parse(b);
