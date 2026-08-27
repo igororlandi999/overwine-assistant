@@ -74,10 +74,11 @@ export interface OrdersRealtimeStatus {
    */
   ultimoAckMs: number | null;
   /**
-   * O runtime ofereceu waitUntil? `false` significa que o dreno NÃO roda junto
-   * da notificação e a fila espera o job de hora em hora.
+   * Quando a rota PEDIU o dreno em segundo plano. Compare com `ultimoDrenoEm`:
+   * se este avança, aquele não, e `pendentes` fica acima de zero, o trabalho
+   * de fundo não está sobrevivendo à resposta.
    */
-  waitUntilDisponivel: boolean | null;
+  ultimoDrenoPedidoEm: string | null;
   ultimoPedidoAtualizadoId: string | null;
   ultimoPedidoAtualizadoEm: string | null;
   ultimaAcao: 'novo' | 'atualizado' | 'sem_mudanca' | null;
@@ -152,7 +153,7 @@ export async function getReadStatus(
   let tempoReal: OrdersRealtimeStatus = {
     habilitado: false,
     ultimaNotificacaoEm: null, ultimaNotificacaoTopico: null, ultimaNotificacaoPedido: null,
-    ultimaNotificacaoSent: null, ultimoAckMs: null, waitUntilDisponivel: null,
+    ultimaNotificacaoSent: null, ultimoAckMs: null, ultimoDrenoPedidoEm: null,
     ultimoPedidoAtualizadoId: null, ultimoPedidoAtualizadoEm: null, ultimaAcao: null,
     ultimaVersaoPublicada: null, ultimaLatenciaTotalMs: null,
     ultimoDrenoEm: null, pendentes: 0,
@@ -175,7 +176,7 @@ export async function getReadStatus(
       ultimaNotificacaoPedido: rec.ultimaNotificacaoPedido,
       ultimaNotificacaoSent: rec.ultimaNotificacaoSent,
       ultimoAckMs: rec.ultimoAckMs,
-      waitUntilDisponivel: rec.waitUntilDisponivel,
+      ultimoDrenoPedidoEm: rec.ultimoDrenoPedidoEm,
       ultimoPedidoAtualizadoId: proc.ultimoPedidoAtualizadoId,
       ultimoPedidoAtualizadoEm: proc.ultimoPedidoAtualizadoEm,
       ultimaAcao: proc.ultimaAcao,

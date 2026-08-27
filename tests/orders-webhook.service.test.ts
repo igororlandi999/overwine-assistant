@@ -40,7 +40,7 @@ import {
   drenarFila,
   TOPICOS_DE_PEDIDO,
 } from '../src/services/orders-webhook.service.js';
-import { tamanhoFila, lerObsProcessamento, lerObsRecebimento } from '../src/lib/orders-events.js';
+import { tamanhoFila, retirar, lerObsProcessamento, lerObsRecebimento } from '../src/lib/orders-events.js';
 
 const UID = TEST_ENV.ML_USER_ID;
 const APP = TEST_ENV.ML_CLIENT_ID;
@@ -851,12 +851,9 @@ describe('7. portão de pré-merge', () => {
   });
 
   it('o ack registra ackMs quando recebe o inicio da medicao', async () => {
-    await receberNotificacao(
-      cache, notif(), ESPERADO, { inicioMs: Date.now() - 30, waitUntilDisponivel: true }
-    );
+    await receberNotificacao(cache, notif(), ESPERADO, { inicioMs: Date.now() - 30 });
     const obs = await lerObsRecebimento(cache);
     expect(obs.ultimoAckMs).toBeGreaterThanOrEqual(30);
-    expect(obs.waitUntilDisponivel).toBe(true);
   });
 });
 
@@ -968,5 +965,120 @@ describe('8. dois drenos concorrentes', () => {
     expect(snap.some(o => String(o.id) === '5000')).toBe(true);
     expect(snap.some(o => String(o.id) === '5001')).toBe(true);
     expect(snap).toHaveLength(52);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * A JANELA DE PERDA DO LPOP, E QUEM A COBRE.
+ *
+ * `retirar` usa LPOP: o evento sai da fila atomicamente e passa a existir só na
+ * memoria da funcao. Se a funcao morrer entre o LPOP e a conclusao, aquele
+ * evento some — e com ele a atualizacao RAPIDA daquele pedido.
+ *
+ * A documentacao em src/lib/orders-events.ts afirma que a reconciliacao cobre
+ * esse caso. Estes testes tornam a afirmacao carregavel: se o incremental
+ * parar de recuperar um pedido cujo evento se perdeu, eles quebram, e a
+ * decisao de nao construir fila com lease deixa de ser justificada.
+ */
+describe('9. evento perdido na janela do LPOP', () => {
+  const notif = (id: string, orderId: string) => ({
+    _id: id, topic: 'orders_v2', resource: `/orders/${orderId}`,
+    user_id: Number(UID), application_id: Number(APP),
+  });
+
+  function paginaDe(lista: OrderSlim[]) {
+    return async ({ offset, limit }: { offset: number; limit: number }) => ({
+      results: lista.slice(offset, offset + limit) as unknown as OrderInput[],
+      total: lista.length,
+    });
+  }
+
+  it('o LPOP tira o evento da fila ANTES de o pedido ser aplicado', async () => {
+    // Esta e a janela, demonstrada: com o ML fora do ar, o evento ja saiu da
+    // fila e o pedido ainda nao entrou. Uma morte da funcao exatamente aqui
+    // perderia o evento — o reenfileiramento so acontece porque sobrevivemos.
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    await runSyncStep(cache, paginaDe(lista), { modo: 'full' });
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+    expect(await tamanhoFila(cache)).toBe(1);
+
+    let filaDuranteABusca = -1;
+    const fn = async (): Promise<OrderInput> => {
+      filaDuranteABusca = await tamanhoFila(cache);
+      throw new Error('ML fora do ar');
+    };
+    await drenarFila(cache, fn);
+
+    expect(filaDuranteABusca).toBe(0);          // ja saiu da fila
+    expect(await tamanhoFila(cache)).toBe(1);   // voltou porque sobrevivemos
+  });
+
+  it('a reconciliacao recupera o pedido cujo evento se perdeu por completo', async () => {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    await runSyncStep(cache, paginaDe(lista), { modo: 'full' });
+
+    // Simula a morte: o evento foi retirado e nunca voltou.
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+    const retirados = await retirar(cache, 10);
+    expect(retirados).toHaveLength(1);
+    expect(await tamanhoFila(cache)).toBe(0);   // perdido de vez
+
+    const venda = pedido('5000', -1);
+    expect((await readSnapshot(cache, 'ativos')).some(o => String(o.id) === '5000')).toBe(false);
+
+    // O cron roda. O ML lista a venda, e ela entra sem ninguem reprocessar
+    // evento nenhum.
+    const r = await runSyncStep(cache, paginaDe([venda, ...lista]), { modo: 'incremental' });
+
+    expect(r.concluido).toBe(true);
+    expect(r.novosPedidos).toBe(1);
+    expect((await readSnapshot(cache, 'ativos')).some(o => String(o.id) === '5000')).toBe(true);
+  });
+
+  it('a reconciliacao tambem recupera MUDANCA DE STATUS de evento perdido', async () => {
+    // O caso mais facil de esquecer: nao e so pedido novo que se perde na
+    // janela. Um paid -> cancelled tambem, e a janela de revisao do
+    // incremental (250 conhecidos mais recentes) e o que o resgata.
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    await runSyncStep(cache, paginaDe(lista), { modo: 'full' });
+
+    await receberNotificacao(cache, notif('a', '7'), ESPERADO);
+    await retirar(cache, 10);   // evento perdido
+    expect(await tamanhoFila(cache)).toBe(0);
+
+    const cancelado = pedido(7, 6, { status: 'cancelled', paid_amount: 0 });
+    const atual = lista.map(o => (String(o.id) === '7' ? cancelado : o));
+    await runSyncStep(cache, paginaDe(atual), { modo: 'incremental' });
+
+    const gravado = (await readSnapshot(cache, 'ativos')).find(o => String(o.id) === '7');
+    expect(gravado?.status).toBe('cancelled');
+  });
+
+  it('um lote parcialmente processado perde so o que sobrou, e nao corrompe o resto', async () => {
+    const lista = Array.from({ length: 50 }, (_, i) => pedido(i + 1, i));
+    await runSyncStep(cache, paginaDe(lista), { modo: 'full' });
+
+    const estado = new Map([
+      ['5000', pedido('5000', -1)],
+      ['5001', pedido('5001', -2)],
+    ]);
+    await receberNotificacao(cache, notif('a', '5000'), ESPERADO);
+    await receberNotificacao(cache, notif('b', '5001'), ESPERADO);
+
+    // O primeiro aplica; o segundo morre no meio (a busca lanca).
+    const fn = async (id: string): Promise<OrderInput> => {
+      if (id === '5001') throw new Error('funcao morreu aqui');
+      return comoInput(estado.get(id)!);
+    };
+    await drenarFila(cache, fn);
+
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.some(o => String(o.id) === '5000')).toBe(true);   // aplicado
+    expect(snap.some(o => String(o.id) === '5001')).toBe(false);  // nao
+    expect(snap).toHaveLength(51);                                // sem corromper
+    // O que falhou voltou para a fila; se nem isso tivesse acontecido, a
+    // reconciliacao ainda o recuperaria.
+    expect(await tamanhoFila(cache)).toBe(1);
   });
 });

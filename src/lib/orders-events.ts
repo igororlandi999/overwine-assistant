@@ -28,6 +28,50 @@
  * essa corrida.
  *
  * ─────────────────────────────────────────────────────────────────────────
+ * JANELA DE PERDA CONHECIDA: LPOP NÃO É LEASE
+ *
+ * `retirar` usa LPOP. O evento sai da fila ATOMICAMENTE e passa a existir só
+ * na memória da função. Se a função morrer entre o LPOP e a conclusão (ou o
+ * reenfileiramento), aquele evento SOME. Isto é uma escolha consciente, não um
+ * descuido, e vale escrever exatamente o que ela custa.
+ *
+ * QUANDO ACONTECE
+ *   - a instância é congelada ou recuperada antes de o trabalho de fundo
+ *     terminar (o `waitUntil` pede, não garante);
+ *   - maxDuration estourado, falta de memória, troca de deploy no meio do voo.
+ *   A janela é o tempo entre o LPOP e o fim do upsert: algo entre 300 ms e 1 s
+ *   por lote. Um lote pode levar até ORDERS_WEBHOOK_MAX_DRENO eventos junto.
+ *
+ * O QUE SE PERDE
+ *   Nada de dado: o evento carrega só um id de pedido. Perde-se a ATUALIZAÇÃO
+ *   RÁPIDA daquele pedido. O pedido continua existindo no Mercado Livre e
+ *   entra no snapshot pela reconciliação.
+ *
+ * PIOR CASO DE LATÊNCIA
+ *   Até a próxima reconciliação publicar: o cron de hora em hora (`17 * * * *`)
+ *   mais o atraso do agendador do GitHub Actions (minutos a dezenas de
+ *   minutos) mais a execução, mais os 45 s do poll do dashboard. Na prática,
+ *   de 60 a 90 minutos — exatamente o comportamento de antes desta fase, e só
+ *   para o pedido que caiu na janela.
+ *
+ * POR QUE NÃO UMA FILA COM LEASE AGORA
+ *   A correção clássica é não remover na leitura: LMOVE para uma lista
+ *   `processing` com LREM na conclusão e um varredor devolvendo o que passou
+ *   do prazo; ou Redis Streams com consumer group (XREADGROUP/XACK/XAUTOCLAIM),
+ *   que é a ferramenta feita para isso.
+ *
+ *   Qualquer um dos dois exige métodos novos na interface Cache, um GATILHO
+ *   NOVO para varrer leases vencidos, e uma decisão de prazo — curto demais
+ *   reprocessa em paralelo, longo demais atrasa a recuperação. Isso é
+ *   infraestrutura de fila de verdade para proteger uma janela de
+ *   sub-segundo cujo pior caso a reconciliação já cobre.
+ *
+ *   O gatilho para revisitar é medido, não achado: se `tempoReal` mostrar
+ *   pedidos aparecendo só na reconciliação de forma recorrente, ou se o
+ *   negócio passar a exigir teto de latência garantido mesmo em falha, aí a
+ *   fila com lease se paga.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
  * A TELEMETRIA É BEST-EFFORT, DE PROPÓSITO
  *
  * Os dois blobs de observabilidade são lidos-e-regravados sem lock. Uma
@@ -85,14 +129,15 @@ export interface ObsRecebimento {
    */
   ultimoAckMs: number | null;
   /**
-   * O runtime ofereceu waitUntil na última notificação?
+   * Quando a rota PEDIU um dreno em segundo plano, na última notificação.
    *
-   * `false` significa que o processamento pesado NÃO foi agendado e a fila
-   * depende do job de hora em hora. Não é falha silenciosa por decisão: sem
-   * este campo, um runtime sem waitUntil se manifestaria como "às vezes o
-   * pedido demora uma hora", que é indistinguível de dez outras coisas.
+   * Existe para ser comparado com `ultimoDrenoEm` (do outro blob, escrito
+   * quando o dreno TERMINA). O `waitUntil` público devolve `void` e não diz se
+   * a extensão foi aceita, então não há sonda de capacidade honesta a fazer —
+   * mas "pedimos às 09:00:01 e nenhum dreno terminou depois disso, com fila
+   * pendente" é uma medida do resultado, e é o sintoma que importa.
    */
-  waitUntilDisponivel: boolean | null;
+  ultimoDrenoPedidoEm: string | null;
   totalRecebidas: number;
   totalDuplicadas: number;
   totalRejeitadas: number;
@@ -142,7 +187,7 @@ const OBS_RECEBIMENTO_ZERO: ObsRecebimento = {
   ultimaNotificacaoPedido: null,
   ultimaNotificacaoSent: null,
   ultimoAckMs: null,
-  waitUntilDisponivel: null,
+  ultimoDrenoPedidoEm: null,
   totalRecebidas: 0,
   totalDuplicadas: 0,
   totalRejeitadas: 0,
@@ -240,7 +285,6 @@ export async function registrarRecebimento(
     motivo?: string;
     sent?: string | null;
     ackMs?: number | null;
-    waitUntilDisponivel?: boolean | null;
   }
 ): Promise<void> {
   const obs = await lerObsRecebimento(cache);
@@ -258,9 +302,16 @@ export async function registrarRecebimento(
     obs.ultimaNotificacaoSent = dados.sent ?? null;
     obs.ultimoAckMs = typeof dados.ackMs === 'number' ? dados.ackMs : null;
   }
-  if (dados.waitUntilDisponivel !== undefined) {
-    obs.waitUntilDisponivel = dados.waitUntilDisponivel;
-  }
+  await cache.set(CHAVE_OBS_NOTIF, JSON.stringify(obs));
+}
+
+/**
+ * Marca que a rota pediu um dreno em segundo plano. Escrito DEPOIS de o
+ * trabalho começar e ANTES da resposta — é o "pedimos" do par pedimos/terminou.
+ */
+export async function registrarDrenoPedido(cache: Cache): Promise<void> {
+  const obs = await lerObsRecebimento(cache);
+  obs.ultimoDrenoPedidoEm = new Date().toISOString();
   await cache.set(CHAVE_OBS_NOTIF, JSON.stringify(obs));
 }
 

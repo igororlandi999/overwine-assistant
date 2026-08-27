@@ -110,12 +110,49 @@ continua sendo lido pela conta antiga.
 
 ### O orçamento de 500 ms é inviolável
 
-Nada no caminho da resposta chama a API do ML, lê chunk ou publica manifesto —
-nem como exceção. Se o runtime não oferecer `waitUntil`, o evento **fica na
-fila** e o job `notificacoes` do workflow o processa; drenar ali estouraria os
-500 ms e faria o ML contar entrega falha, trocando um atraso conhecido por
-reenvios e risco de a callback ser desligada. `tempoReal.waitUntilDisponivel`
-denuncia esse estado em vez de deixá-lo virar "às vezes o pedido demora".
+Nada no caminho da resposta é **aguardado**: nem chamada ao ML, nem leitura de
+chunk, nem publicação de manifesto. O dreno começa e a resposta sai sem esperar
+por ele.
+
+Quem mantém a instância viva é o `waitUntil` de **`@vercel/functions`** — o
+mecanismo público da plataforma. Uma versão anterior lia o contexto de
+requisição direto de `Symbol.for('@vercel/request-context')`; era API interna,
+e uma mudança de formato ali derrubaria o tempo real em silêncio, porque o ACK
+continuaria respondendo 200.
+
+`waitUntil` devolve `void` e não informa se a extensão foi aceita, e o pacote
+não exporta `getContext` — então não existe sonda de capacidade honesta. Em vez
+de fingir uma, medimos o resultado: `tempoReal.ultimoDrenoPedidoEm` (quando a
+rota pediu) contra `tempoReal.ultimoDrenoEm` (quando o dreno terminou). O
+primeiro avançando, o segundo não, e `pendentes` acima de zero significa
+trabalho de fundo que não está sobrevivendo à resposta.
+
+### Janela de perda conhecida: LPOP não é lease
+
+A fila usa LPOP. O evento sai dela atomicamente e passa a existir só na memória
+da função. **Se a função morrer entre o LPOP e a conclusão, aquele evento
+some.** É escolha consciente, e custa o seguinte:
+
+- **o que se perde**: nada de dado — o evento carrega só um id. Perde-se a
+  atualização *rápida* daquele pedido;
+- **quando**: instância congelada antes de o trabalho terminar, maxDuration
+  estourado, falta de memória, troca de deploy no meio do voo. A janela é de
+  ~300 ms a 1 s por lote;
+- **pior caso de latência**: até a próxima reconciliação publicar — cron de hora
+  em hora, mais o atraso do agendador do GitHub Actions, mais a execução, mais
+  os 45 s do poll. Na prática **60 a 90 minutos**, e só para o pedido que caiu
+  na janela;
+- **cobertura**: a reconciliação recupera tanto pedido novo quanto mudança de
+  status perdida. Há teste para os dois — a documentação não fica sozinha.
+
+**Vale uma fila com lease no futuro?** A correção clássica é LMOVE para uma
+lista `processing` com LREM na conclusão e um varredor devolvendo o que passou
+do prazo, ou Redis Streams com consumer group. Qualquer uma exige métodos novos
+na interface `Cache`, um gatilho novo para varrer leases vencidos e uma decisão
+de prazo. É infraestrutura de fila de verdade para proteger uma janela de
+sub-segundo cujo pior caso a reconciliação já cobre — não agora. O gatilho para
+revisitar é medido: pedidos aparecendo só na reconciliação de forma recorrente,
+ou um teto de latência exigido mesmo em falha.
 
 ### Idempotência
 
@@ -190,8 +227,9 @@ atualização, exatamente como antes.
 - `tempoReal.ultimaNotificacaoSent` — o `sent` do ML, para medir latência;
 - `tempoReal.ultimoAckMs` — milissegundos do caminho da resposta. O ML exige
   HTTP 200 em menos de 500 ms; é aqui que se confere o orçamento;
-- `tempoReal.waitUntilDisponivel` — se `false`, o dreno **não** roda junto da
-  notificação e a fila espera o job de hora em hora;
+- `tempoReal.ultimoDrenoPedidoEm` — quando a rota pediu o dreno de fundo.
+  Compare com `ultimoDrenoEm`: divergência persistente com `pendentes > 0`
+  significa que o trabalho de fundo não sobrevive à resposta;
 - `tempoReal.ultimaVersaoPublicada` — versão publicada pelo último upsert;
 - `tempoReal.ultimaLatenciaTotalMs` — do `sent` do ML até a publicação;
 - `tempoReal.pendentes` — eventos na fila (persistentemente > 0 é problema);

@@ -7,87 +7,55 @@
  * o pedido na API e publicar o manifesto leva mais que isso.
  *
  * ─────────────────────────────────────────────────────────────────────────
- * POR QUE NÃO O PACOTE @vercel/functions
+ * O MECANISMO É O `waitUntil` PÚBLICO DA VERCEL
  *
- * `waitUntil` do pacote oficial faz exatamente o que está aqui: lê o contexto
- * de requisição que o runtime da Vercel publica num símbolo global. Este
- * projeto tem duas dependências de runtime, e a função abaixo é literalmente
- * a implementação — não vale uma dependência a mais nem uma linha nova de
- * lockfile.
+ * Uma versão anterior deste arquivo lia o contexto de requisição direto de
+ * `Symbol.for('@vercel/request-context')` para não acrescentar dependência.
+ * Isso é API interna: nada garante o formato entre versões do runtime, e uma
+ * mudança silenciosa ali derrubaria justamente o caminho de tempo real dos
+ * pedidos — que quebra sem barulho, porque o ACK continuaria respondendo 200.
+ * Não é lugar para economizar uma dependência.
+ *
+ * Agora usamos `waitUntil` de `@vercel/functions`, que é o que a documentação
+ * da Vercel manda usar para continuar processando depois de responder.
  *
  * ─────────────────────────────────────────────────────────────────────────
- * O QUE ACONTECE QUANDO O RUNTIME NÃO OFERECE waitUntil
+ * O TRABALHO SEMPRE COMEÇA; O `waitUntil` SÓ IMPEDE O CONGELAMENTO
  *
- * `agendar` devolve false e QUEM CHAMA decide. Não engolimos o trabalho: no
- * endpoint de notificações, o caminho sem waitUntil é responder 200 na hora e
- * deixar o processamento para os outros dois gatilhos do dreno (o passo de
- * reconciliação e a chamada explícita ao endpoint admin). Perder velocidade é
- * aceitável; perder o evento não seria.
+ * A API pública recebe uma PROMESSA, não uma fábrica — então o trabalho já
+ * começou quando pedimos a extensão. `waitUntil` não dispara nada: ele pede ao
+ * runtime que não congele a instância antes de a promessa terminar.
+ *
+ * Corolário para a observabilidade: a função devolve `void` e não informa se a
+ * extensão foi aceita; `getContext` não é exportado pelo pacote, então não há
+ * como perguntar "este runtime tem waitUntil?" pela API pública. Não fingimos
+ * saber. O que registramos é QUANDO pedimos (na rota) e QUANDO o trabalho
+ * terminou (no dreno). Se o primeiro avança, o segundo não, e a fila fica
+ * pendente, então o trabalho de fundo não está sobrevivendo — uma medida do
+ * resultado real, melhor que uma sonda de capacidade.
  */
-
-type Trabalho = Promise<unknown>;
-
-interface ContextoRequisicao {
-  waitUntil?: (p: Trabalho) => void;
-}
-
-const SIMBOLO = Symbol.for('@vercel/request-context');
-
-function contexto(): ContextoRequisicao | null {
-  const g = globalThis as Record<symbol, unknown>;
-  const holder = g[SIMBOLO] as { get?: () => ContextoRequisicao | undefined } | undefined;
-  if (!holder || typeof holder.get !== 'function') return null;
-  try {
-    return holder.get() ?? null;
-  } catch {
-    return null;
-  }
-}
+import { waitUntil } from '@vercel/functions';
 
 /**
- * O runtime oferece waitUntil? Consulta PURA — não agenda nada, não faz I/O.
+ * Pede ao runtime que mantenha a função viva até `trabalho` terminar.
  *
- * Existe para a telemetria: sem waitUntil o dreno não roda no caminho da
- * notificação, e a fila fica esperando o job de hora em hora. Isso não pode
- * ser descoberto por dedução meses depois; a rota de status precisa dizer.
+ * NUNCA lança. Quem chama está no caminho da resposta de uma notificação do
+ * Mercado Livre: uma exceção aqui viraria HTTP 500 e um reenvio, para um
+ * trabalho que já está rodando de qualquer forma.
+ *
+ * Uma rejeição de `trabalho` também nunca escapa: o cliente já recebeu a
+ * resposta e não há para quem propagar, então vira log. Sem este `catch` a
+ * rejeição ficaria sem tratamento.
  */
-export function suportaWaitUntil(): boolean {
-  const ctx = contexto();
-  return !!ctx && typeof ctx.waitUntil === 'function';
-}
-
-/**
- * Pede ao runtime que mantenha a função viva até o trabalho terminar.
- * Retorna true se o runtime aceitou; false se não há suporte.
- *
- * Recebe uma FÁBRICA, não uma promessa: sem waitUntil o trabalho não pode ter
- * começado, senão quem chama acabaria com duas execuções concorrentes — a que
- * já disparou e a que ele mesmo vai rodar no lugar.
- *
- * Uma rejeição NUNCA sobe daqui: o cliente já recebeu a resposta e não há para
- * quem propagar. O erro vira log.
- */
-export function agendar(fabrica: () => Trabalho, etiqueta: string): boolean {
-  const ctx = contexto();
-  if (!ctx || typeof ctx.waitUntil !== 'function') return false;
-  let trabalho: Trabalho;
-  try {
-    trabalho = fabrica();
-  } catch (e) {
-    console.error(`[${etiqueta}]`, e instanceof Error ? e.message : e);
-    return true; // o trabalho foi tentado; quem chama não deve repeti-lo
-  }
+export function agendarEmSegundoPlano(trabalho: Promise<unknown>, etiqueta: string): void {
   const seguro = trabalho.catch((e: unknown) => {
     console.error(`[${etiqueta}]`, e instanceof Error ? e.message : e);
   });
   try {
-    ctx.waitUntil(seguro);
-    return true;
-  } catch {
-    // O runtime anunciou waitUntil mas recusou. O trabalho JÁ ESTÁ rodando e
-    // não dá para desfazê-lo; dizemos que foi agendado para quem chama não
-    // disparar um segundo em paralelo. Pode não terminar — a reconciliação
-    // periódica cobre.
-    return true;
+    waitUntil(seguro);
+  } catch (e) {
+    // O trabalho continua rodando; só não temos a garantia de que a instância
+    // fica viva até o fim. A reconciliação periódica cobre o que não terminar.
+    console.error(`[${etiqueta}] waitUntil recusou o agendamento`, e instanceof Error ? e.message : e);
   }
 }

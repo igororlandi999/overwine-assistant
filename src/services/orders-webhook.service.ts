@@ -182,7 +182,7 @@ export async function receberNotificacao(
   cache: Cache,
   body: unknown,
   esperado: { mlUserId: string; applicationId: string },
-  medicao: { inicioMs?: number; waitUntilDisponivel?: boolean } = {}
+  medicao: { inicioMs?: number } = {}
 ): Promise<ResultadoRecebimento> {
   const decorrido = () =>
     typeof medicao.inicioMs === 'number' ? Math.max(0, Math.round(Date.now() - medicao.inicioMs)) : null;
@@ -195,7 +195,6 @@ export async function receberNotificacao(
       duplicada: false,
       rejeitada: true,
       motivo: r.motivo,
-      waitUntilDisponivel: medicao.waitUntilDisponivel,
     });
     return { aceito: false, motivo: r.motivo };
   }
@@ -208,7 +207,6 @@ export async function receberNotificacao(
       orderId: r.evento.orderId,
       duplicada: true,
       rejeitada: false,
-      waitUntilDisponivel: medicao.waitUntilDisponivel,
     });
     return { aceito: true, duplicada: true, orderId: r.evento.orderId, fila };
   }
@@ -221,7 +219,6 @@ export async function receberNotificacao(
     rejeitada: false,
     sent: r.evento.sent,
     ackMs: decorrido(),
-    waitUntilDisponivel: medicao.waitUntilDisponivel,
   });
   return { aceito: true, duplicada: false, orderId: r.evento.orderId, fila };
 }

@@ -17,11 +17,16 @@
  *
  * O orçamento de 500 ms é INVIOLÁVEL neste arquivo. Nenhuma chamada à API do
  * Mercado Livre, nenhuma leitura de chunk e nenhuma publicação de manifesto
- * pode entrar no caminho da resposta, nem como "só desta vez, quando o runtime
- * não tiver waitUntil". Sem waitUntil o evento fica na fila e o job de hora em
- * hora o drena — e `tempoReal.waitUntilDisponivel` em /api/orders/status diz
- * exatamente que foi isso que aconteceu, em vez de deixar o sintoma virar
- * "às vezes o pedido demora".
+ * pode ser AGUARDADA no caminho da resposta.
+ *
+ * O dreno começa aqui e a resposta sai sem esperar por ele; `waitUntil` de
+ * `@vercel/functions` — o mecanismo público da plataforma — só pede que a
+ * instância não seja congelada antes de ele terminar. Ele devolve `void` e não
+ * informa se a extensão foi aceita, então a rota registra QUANDO pediu
+ * (`tempoReal.ultimoDrenoPedidoEm`) e o dreno registra quando terminou
+ * (`tempoReal.ultimoDrenoEm`). Os dois divergindo, com fila pendente, é o
+ * sintoma de trabalho de fundo que não está sobrevivendo — melhor que uma
+ * sonda de capacidade, porque mede o resultado.
  *
  * Corolário: qualquer coisa que não seja um problema de autenticação responde
  * 200. Tópico que não interessa, corpo estranho, pedido de outra conta: tudo
@@ -49,9 +54,10 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
-import { agendar, suportaWaitUntil } from '../../src/lib/wait-until.js';
+import { agendarEmSegundoPlano } from '../../src/lib/wait-until.js';
 import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import { receberNotificacao, drenarFila } from '../../src/services/orders-webhook.service.js';
+import { registrarDrenoPedido } from '../../src/lib/orders-events.js';
 
 /** O corpo pode chegar já parseado pela Vercel ou como string bruta. */
 function lerCorpo(req: VercelRequest): unknown {
@@ -95,11 +101,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 401, { error: 'unauthorized' });
     }
 
-    // Consulta PURA, sem I/O: só para a telemetria saber se o dreno pôde ser
-    // agendado. Precisa vir antes do registro do recebimento, que é a única
-    // escrita de telemetria do caminho da resposta.
-    const comWaitUntil = suportaWaitUntil();
-
     const r = await receberNotificacao(
       cache,
       lerCorpo(req),
@@ -108,7 +109,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // desde a primeira versão do backend, e é o mesmo número que aparece no
       // corpo da notificação.
       { mlUserId: env.ML_USER_ID, applicationId: env.ML_CLIENT_ID },
-      { inicioMs, waitUntilDisponivel: comWaitUntil }
+      { inicioMs }
     );
 
     if (!r.aceito) {
@@ -122,30 +123,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 200, { ok: true, duplicada: true });
     }
 
-    // Trabalho pesado FORA do caminho da resposta. Fábrica, não promessa: se
-    // o runtime não tiver waitUntil, o dreno NÃO pode já ter começado.
-    const agendado = agendar(
-      () =>
-        drenarFila(cache, criarFetchOrder(cache)).then(d => {
-          console.info(
-            `[ml-notif] dreno processados=${d.processados} novos=${d.novos} ` +
-            `atualizados=${d.atualizados} falhas=${d.falhas} restantes=${d.restantes}`
-          );
-        }),
+    // Trabalho pesado FORA do caminho da resposta: o dreno COMEÇA aqui e não é
+    // aguardado. `waitUntil` recebe a promessa já em andamento e só pede ao
+    // runtime que não congele a instância antes de ela terminar — a resposta
+    // sai poucas linhas abaixo, sem depender disso.
+    agendarEmSegundoPlano(
+      drenarFila(cache, criarFetchOrder(cache)).then(d => {
+        console.info(
+          `[ml-notif] dreno processados=${d.processados} novos=${d.novos} ` +
+          `atualizados=${d.atualizados} falhas=${d.falhas} restantes=${d.restantes}`
+        );
+      }),
       'ml-notif'
     );
-
-    if (!agendado) {
-      // Sem waitUntil NÃO drenamos aqui. Drenar no caminho da resposta
-      // estouraria os 500 ms e faria o ML contar entrega falha — trocaríamos
-      // um atraso conhecido por reenvios e risco de a callback ser desligada.
-      // O evento está na fila e o job `notificacoes` do workflow o processa.
-      console.warn('[ml-notif] runtime sem waitUntil: evento fica na fila ate o dreno agendado');
-    }
+    await registrarDrenoPedido(cache);
 
     console.info(
-      `[ml-notif] enfileirada pedido=${r.orderId} fila=${r.fila} ` +
-      `dreno=${agendado ? 'agendado' : 'adiado'} ackMs=${Date.now() - inicioMs}`
+      `[ml-notif] enfileirada pedido=${r.orderId} fila=${r.fila} ackMs=${Date.now() - inicioMs}`
     );
     return json(res, 200, { ok: true });
   } catch (e) {
