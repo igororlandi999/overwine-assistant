@@ -14,6 +14,11 @@ import { FakeCache, TEST_ENV } from './fake-cache.js';
 import { setCacheForTests } from '../src/lib/cache/cache.js';
 import { resetEnvForTests } from '../src/config/env.js';
 import { tamanhoFila, lerObsRecebimento, CHAVE_OBS_NOTIF, CHAVE_OBS_PROC } from '../src/lib/orders-events.js';
+import {
+  type OrdersManifest, readManifest, readSnapshot, writeChunk, publishManifest,
+} from '../src/lib/orders-store.js';
+import { ORDERS_SYNC_LOCK_KEY } from '../src/services/orders-sync.service.js';
+import type { OrderSlim } from '../src/services/orders.service.js';
 import handler from '../api/notifications/ml.js';
 
 const SEGREDO = 'segredo-de-webhook-bem-longo';
@@ -337,6 +342,278 @@ describe('portão — o corpo nunca vira estado do pedido', () => {
       const res = await chamar({ query: { k: SEGREDO }, body: corpo({ _id: resource, resource }) });
       expect(res.json().ignorada, resource).toBe(true);
     }
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * O QUE DISPARA O PROCESSAMENTO DEPOIS DO ACK.
+ *
+ * Este bloco existe para responder uma pergunta específica com prova, e não
+ * com afirmação: tirar o dreno do caminho da resposta transformou a fila numa
+ * fila que só o GitHub Actions drena?
+ *
+ * Não. O contrato é:
+ *   notificação → ACK 200 em menos de 500 ms → dreno IMEDIATO em segundo
+ *   plano, agendado no `waitUntil` do runtime.
+ *
+ * O GitHub Actions é rede de segurança — para o evento que falhou, para o que
+ * esbarrou no lock, e para o runtime que não oferece `waitUntil`. Nunca é o
+ * caminho normal.
+ *
+ * Os testes abaixo instalam o MESMO contexto de requisição que a Vercel
+ * publica (`Symbol.for('@vercel/request-context')`), porque é exatamente daí
+ * que `src/lib/wait-until.ts` lê. Sem isso o ambiente de teste é,
+ * legitimamente, um runtime sem `waitUntil` — e é assim que os testes do bloco
+ * anterior conseguem exercitar o outro caminho.
+ */
+describe('portão — o que processa o pedido depois do ACK', () => {
+  const SIMBOLO_CONTEXTO = Symbol.for('@vercel/request-context');
+
+  /** Instala um waitUntil de mentira que COLETA, sem aguardar. */
+  function instalarWaitUntil(): Promise<unknown>[] {
+    const agendados: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[SIMBOLO_CONTEXTO] = {
+      get: () => ({ waitUntil: (p: Promise<unknown>) => { agendados.push(p); } }),
+    };
+    return agendados;
+  }
+  function removerWaitUntil() {
+    delete (globalThis as Record<symbol, unknown>)[SIMBOLO_CONTEXTO];
+  }
+  afterEach(removerWaitUntil);
+
+  /** Snapshot base mínimo: sem ele o upsert recusa e não há o que provar. */
+  async function publicarBase(): Promise<OrdersManifest> {
+    const pedidos: OrderSlim[] = Array.from({ length: 3 }, (_, i) => ({
+      id: i + 1, status: 'paid', date_created: `2026-08-2${i}T10:00:00.000Z`,
+      paid_amount: 100, total_amount: 100,
+      order_items: [{ quantity: 1, unit_price: 100, item: { id: 'MLB1', title: 'V', seller_sku: 'S', variation_id: null } }],
+    }));
+    const chave = await writeChunk(cache, 'ativos', 1, 0, pedidos);
+    const man: OrdersManifest = {
+      versao: 1, chunks: [chave], totalRegistros: 3,
+      newestDate: pedidos[0].date_created, oldestDate: pedidos[2].date_created,
+      chunkSize: 500, updatedAt: '2026-08-20T12:00:00.000Z', origem: 'full',
+      chunkCounts: [3],
+    };
+    await publishManifest(cache, 'ativos', man);
+    return man;
+  }
+
+  /** Token válido em cache: o dreno não deve gastar o teste em OAuth. */
+  async function semearToken() {
+    await cache.set('ml:access_token', JSON.stringify({
+      token: 'token-de-teste', expiresAt: Date.now() + 3600_000,
+    }));
+  }
+
+  const PEDIDO_CRU = {
+    id: 2000012345, status: 'paid', date_created: '2026-08-27T09:00:00.000Z',
+    paid_amount: 250, total_amount: 250,
+    order_items: [{ quantity: 1, unit_price: 250, item: { id: 'MLB9', title: 'Vinho', seller_sku: 'SKU9', variation_id: null } }],
+    buyer: { nickname: 'comprador' },
+    shipping: { id: 77, logistic_type: 'fulfillment' },
+  };
+
+  function respostaDoPedido() {
+    return new Response(JSON.stringify(PEDIDO_CRU), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('o HTTP 200 sai ANTES de o GET /orders/{id} terminar', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+
+    // A busca do pedido fica PRESA até liberarmos. Se a resposta esperasse por
+    // ela, o handler não retornaria e o teste travaria no próprio await.
+    let liberar!: () => void;
+    const preso = new Promise<void>(r => { liberar = r; });
+    let buscaTerminou = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      await preso;
+      buscaTerminou = true;
+      return respostaDoPedido();
+    });
+
+    const res = await chamar({ query: { k: SEGREDO }, body: corpo() });
+
+    // Já respondemos, e a busca do pedido AINDA não terminou.
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(buscaTerminou).toBe(false);
+
+    // ...e o trabalho está agendado, não perdido.
+    expect(agendados).toHaveLength(1);
+
+    liberar();
+    await Promise.all(agendados);
+    expect(buscaTerminou).toBe(true);
+  });
+
+  it('o processamento e AGENDADO no waitUntil do runtime', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+
+    expect(agendados).toHaveLength(1);
+    expect((await lerObsRecebimento(cache)).waitUntilDisponivel).toBe(true);
+  });
+
+  it('o pedido e atualizado pelo dreno de fundo, SEM depender do cron horario', async () => {
+    const base = await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    const espiao = vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    await Promise.all(agendados);   // é só isto: nenhum passo de sincronizacao
+
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.some(o => String(o.id) === '2000012345')).toBe(true);
+    expect(snap).toHaveLength(4);
+
+    const man = await readManifest(cache, 'ativos');
+    expect(man!.versao).toBe(base.versao + 1);
+    expect(man!.origem).toBe('webhook');
+    expect(await tamanhoFila(cache)).toBe(0);
+
+    // A única chamada ao ML foi a do pedido. Nenhum /orders/search — ou seja,
+    // nada aqui passou pela varredura periódica.
+    const urls = espiao.mock.calls.map(c => String(c[0]));
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toContain('/orders/2000012345');
+    expect(urls.some(u => u.includes('/orders/search'))).toBe(false);
+  });
+
+  it('a latencia medida cobre da notificacao ate a publicacao', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+
+    const sent = new Date(Date.now() - 800).toISOString();
+    await chamar({ query: { k: SEGREDO }, body: corpo({ sent }) });
+    await Promise.all(agendados);
+
+    const b = JSON.parse(cache.store.get('orders:evt:obs:proc')!.v);
+    expect(b.ultimaVersaoPublicada).toBe(2);
+    expect(b.ultimaLatenciaTotalMs).toBeGreaterThanOrEqual(800);
+  });
+
+  it('falha no processamento NAO vira 500: o ACK ja foi dado', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('indisponivel', { status: 500 })
+    );
+
+    const res = await chamar({ query: { k: SEGREDO }, body: corpo() });
+    expect(res.statusCode).toBe(200);
+
+    // O trabalho de fundo tambem NAO pode rejeitar: ninguem esta ouvindo.
+    await expect(Promise.all(agendados)).resolves.toBeDefined();
+  });
+
+  it('falha no processamento REENFILEIRA o evento — nada se perde', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('erro', { status: 500 }));
+
+    await chamar({ query: { k: SEGREDO }, body: corpo() });
+    await Promise.all(agendados);
+
+    expect(await tamanhoFila(cache)).toBe(1);
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.some(o => String(o.id) === '2000012345')).toBe(false);
+  });
+
+  it('o evento reenfileirado e reprocessado quando a busca volta a funcionar', async () => {
+    await publicarBase();
+    await semearToken();
+    const primeira = instalarWaitUntil();
+    const espiao = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('erro', { status: 500 }));
+
+    await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'falha' }) });
+    await Promise.all(primeira);
+    expect(await tamanhoFila(cache)).toBe(1);
+
+    // O ML volta. Uma notificacao nova (ou o job de fallback) drena a fila
+    // inteira — inclusive o evento que tinha falhado.
+    espiao.mockResolvedValue(respostaDoPedido());
+    const segunda = instalarWaitUntil();
+    await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'retorno' }) });
+    await Promise.all(segunda);
+
+    expect(await tamanhoFila(cache)).toBe(0);
+    const snap = await readSnapshot(cache, 'ativos');
+    expect(snap.filter(o => String(o.id) === '2000012345')).toHaveLength(1);
+  });
+
+  it('lock ocupado PRESERVA o evento e nao chama o Mercado Livre', async () => {
+    await publicarBase();
+    await semearToken();
+    const agendados = instalarWaitUntil();
+    const espiao = vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+    // Uma reconciliacao esta publicando agora.
+    await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'sincronizacao-em-andamento', 120);
+
+    const res = await chamar({ query: { k: SEGREDO }, body: corpo() });
+    await Promise.all(agendados);
+
+    expect(res.statusCode).toBe(200);
+    expect(await tamanhoFila(cache)).toBe(1);   // preservado
+    expect(espiao).not.toHaveBeenCalled();
+    // E o lock da sincronizacao continua com o dono dela.
+    expect(await cache.get(ORDERS_SYNC_LOCK_KEY)).toBe('sincronizacao-em-andamento');
+  });
+
+  it('liberado o lock, o proximo dreno aplica o evento que ficou esperando', async () => {
+    await publicarBase();
+    await semearToken();
+    const bloqueado = instalarWaitUntil();
+    const espiao = vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+    await cache.setNX(ORDERS_SYNC_LOCK_KEY, 'dona', 120);
+
+    await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'travado' }) });
+    await Promise.all(bloqueado);
+    expect(await tamanhoFila(cache)).toBe(1);
+
+    await cache.del(ORDERS_SYNC_LOCK_KEY);
+    const livre = instalarWaitUntil();
+    await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'depois' }) });
+    await Promise.all(livre);
+
+    expect(await tamanhoFila(cache)).toBe(0);
+    expect(espiao).toHaveBeenCalled();
+    expect((await readSnapshot(cache, 'ativos')).some(o => String(o.id) === '2000012345')).toBe(true);
+  });
+
+  it('varios eventos do mesmo pedido colapsam numa unica busca', async () => {
+    await publicarBase();
+    await semearToken();
+    const espiao = vi.spyOn(globalThis, 'fetch').mockResolvedValue(respostaDoPedido());
+
+    // Tres notificacoes chegam antes de qualquer dreno rodar (sem waitUntil).
+    removerWaitUntil();
+    for (const id of ['a', 'b', 'c']) await chamar({ query: { k: SEGREDO }, body: corpo({ _id: id }) });
+    expect(await tamanhoFila(cache)).toBe(3);
+    expect(espiao).not.toHaveBeenCalled();
+
+    // O primeiro dreno com waitUntil resolve as tres com UMA chamada.
+    const agendados = instalarWaitUntil();
+    await chamar({ query: { k: SEGREDO }, body: corpo({ _id: 'd' }) });
+    await Promise.all(agendados);
+
+    expect(espiao.mock.calls).toHaveLength(1);
     expect(await tamanhoFila(cache)).toBe(0);
   });
 });
