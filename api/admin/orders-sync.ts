@@ -9,6 +9,14 @@
  * O mlFetch REAL é injetado aqui como FetchOrdersPage; o serviço de sync não
  * conhece rede. Um passo respeita ORDERS_SYNC_MAX_PAGES e é retomável.
  * Body: { alvo?: 'ativos' | 'cancelados', modo?: 'full' | 'incremental' }.
+ *
+ * `{ "acao": "drenar" }` roda o dreno da fila de notificações do Mercado Livre
+ * em vez de um passo de sincronização. É o gatilho de GARANTIA do caminho de
+ * tempo real: se o runtime não ofereceu waitUntil, ou se o dreno da notificação
+ * esbarrou no lock de uma sincronização em andamento, os eventos ficaram na
+ * fila — e esta chamada os processa. Fica no mesmo endpoint de propósito: o
+ * plano gratuito da Vercel limita o número de funções, e a proteção (POST,
+ * x-admin-key, rate limit) é idêntica.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
@@ -16,6 +24,8 @@ import { getCache } from '../../src/lib/cache/cache.js';
 import { mlFetch } from '../../src/lib/ml-auth.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
 import { runSyncStep, type FetchOrdersPage } from '../../src/services/orders-sync.service.js';
+import { drenarFila } from '../../src/services/orders-webhook.service.js';
+import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import type { OrderInput } from '../../src/services/orders.service.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -39,9 +49,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 401, { error: 'Não autorizado.' });
     }
 
-    const body = (req.body ?? {}) as { alvo?: 'ativos' | 'cancelados'; modo?: 'full' | 'incremental' };
+    const body = (req.body ?? {}) as {
+      alvo?: 'ativos' | 'cancelados';
+      modo?: 'full' | 'incremental';
+      acao?: 'sincronizar' | 'drenar';
+      max?: number;
+    };
     const alvo = body.alvo === 'cancelados' ? 'cancelados' : 'ativos';
     const uid = env.ML_USER_ID;
+
+    if (body.acao === 'drenar') {
+      const max = Number.isInteger(body.max) && (body.max as number) > 0 ? (body.max as number) : undefined;
+      console.info(`[orders-sync] dreno ip=${maskIp(ip)} max=${max ?? 'padrao'}`);
+      const dreno = await drenarFila(cache, criarFetchOrder(cache), max === undefined ? {} : { max });
+      return json(res, 200, dreno);
+    }
 
     // Fetcher real: traduz a página em { results, total }; erro NÃO é engolido.
     // paging.total ausente/ inválido NÃO vira 0 (isso mascararia resposta

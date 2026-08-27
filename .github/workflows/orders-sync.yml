@@ -319,3 +319,118 @@ jobs:
           done
 
           echo "::warning::Ainda faltam envios apos $MAX_PASSOS passos. A proxima execucao continua daqui."
+  # ──────────────────────────────────────────────────────────────────────
+  # Fila de notificações do Mercado Livre. Job SEPARADO, e de propósito o
+  # ÚLTIMO: o caminho normal de tempo real não passa por aqui.
+  #
+  # Quando uma notificação chega, o backend responde 200 e processa o pedido
+  # em segundos. Este job é a rede de segurança dos casos em que isso não
+  # aconteceu:
+  #   - o runtime não ofereceu waitUntil e o dreno inline falhou;
+  #   - o dreno esbarrou no lock de uma sincronização em andamento;
+  #   - a busca do pedido na API do ML falhou e o evento foi reenfileirado.
+  #
+  # Em operação normal a fila está vazia e o job termina em um passo,
+  # relatando processados=0. Fila persistentemente > 0 é sinal de problema.
+  #
+  # NÃO substitui o job `sync`: aquele varre a API e recupera notificação que
+  # nunca chegou; este só processa evento que chegou e ficou parado.
+  # ──────────────────────────────────────────────────────────────────────
+  notificacoes:
+    name: Drenar fila de notificacoes (${{ matrix.nome }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: sync
+    # Roda mesmo com a sincronizacao vermelha: sao caminhos independentes.
+    if: always()
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nome: oficial
+            url: https://overwine-assistant.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_ADMIN_KEY
+          - nome: preview
+            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_PREVIEW_ADMIN_KEY
+
+    steps:
+      - name: Drenar a fila
+        shell: bash
+        env:
+          ADMIN_KEY: ${{ secrets[matrix.secret] }}
+          NOME_SECRET: ${{ matrix.secret }}
+          SYNC_URL: ${{ matrix.url }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::O secret $NOME_SECRET nao esta configurado."
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          http_code="$(
+            curl --silent --show-error --location --request POST \
+              --url "$SYNC_URL" \
+              --header "Content-Type: application/json" \
+              --header "x-admin-key: $ADMIN_KEY" \
+              --data '{"acao":"drenar"}' \
+              --connect-timeout 15 --max-time 120 \
+              --output "$response_file" --write-out "%{http_code}"
+          )"
+
+          echo "HTTP: $http_code"
+          cat "$response_file"
+          echo
+
+          # 429 = rate limit do endpoint. Nao e erro: a fila e persistente e a
+          # proxima execucao continua de onde parou.
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Rate limit atingido. A fila continua para a proxima execucao."
+            exit 0
+          fi
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::O endpoint respondeu HTTP $http_code."
+            exit 1
+          fi
+
+          # `ok:false` aqui significa que ALGUM evento falhou e voltou para a
+          # fila. Isso NAO derruba o job: o job `sync` varre a API de qualquer
+          # forma e recupera o pedido. Vira aviso, para aparecer sem virar
+          # ruido vermelho recorrente.
+          python3 - "$response_file" <<'PY'
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1], "r", encoding="utf-8") as arquivo:
+                  resposta = json.load(arquivo)
+          except Exception as erro:
+              print(f"::error::Resposta nao e um JSON valido: {erro}")
+              raise SystemExit(1)
+
+          print(
+              "Resultado: "
+              f"processados={resposta.get('processados')}, "
+              f"novos={resposta.get('novos')}, "
+              f"atualizados={resposta.get('atualizados')}, "
+              f"semMudanca={resposta.get('semMudanca')}, "
+              f"falhas={resposta.get('falhas')}, "
+              f"restantes={resposta.get('restantes')}, "
+              f"motivo={resposta.get('motivo')}"
+          )
+
+          restantes = resposta.get("restantes")
+          if isinstance(restantes, int) and restantes > 0:
+              print(f"::warning::{restantes} evento(s) ainda na fila apos o dreno.")
+
+          if resposta.get("falhas"):
+              print("::warning::Algum evento falhou e voltou para a fila; a sincronizacao periodica cobre o pedido.")
+
+          raise SystemExit(0)
+          PY

@@ -33,6 +33,29 @@ const schema = z.object({
   ORDERS_SYNC_LOCK_TTL_S: z.coerce.number().int().positive().default(120),
   /** Tentativas por página antes de desistir do passo (retomável). */
   ORDERS_PAGE_RETRIES: z.coerce.number().int().min(0).default(2),
+
+  // ── Pedidos em tempo real (notificações do ML) ──────────────────────────
+  /**
+   * Segredo exigido na URL de callback registrada no painel do Mercado Livre
+   * (`?k=<segredo>`). O ML NÃO assina as notificações: não há HMAC, header de
+   * assinatura nem lista de IPs publicada. Um segredo na própria URL é o único
+   * mecanismo disponível para que só o ML consiga entregar aqui.
+   *
+   * OPCIONAL de propósito, e com a mesma razão da GEMINI_API_KEY: getEnv() é
+   * chamada por praticamente toda rota, e torná-la obrigatória derrubaria o
+   * backend inteiro enquanto a variável não estivesse configurada. Ausente =>
+   * o endpoint de notificações responde 503 e NADA MAIS muda: a reconciliação
+   * de hora em hora continua sendo a fonte de atualização, exatamente como
+   * antes desta fase.
+   */
+  ML_WEBHOOK_SECRET: z.string().min(16, 'ML_WEBHOOK_SECRET deve ter no mínimo 16 caracteres').optional(),
+
+  /**
+   * Pedidos processados por dreno. Cada um custa 1 chamada a GET /orders/{id}
+   * mais leituras de chunk; 20 cabe folgado nos 30 s de maxDuration da função
+   * e é muito acima do volume real de eventos por minuto.
+   */
+  ORDERS_WEBHOOK_MAX_DRENO: z.coerce.number().int().positive().default(20),
     // ── Snapshot de catálogo (Onda E) ───────────────────────────
   /** Anúncios por chunk no Redis. */
   ITEMS_CATALOG_CHUNK_SIZE: z.coerce.number().int().positive().default(500),

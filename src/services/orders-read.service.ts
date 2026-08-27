@@ -21,6 +21,7 @@ import {
   readChunkByKey,
 } from '../lib/orders-store.js';
 import { readStatus } from './orders-sync.service.js';
+import { lerObsRecebimento, lerObsProcessamento, tamanhoFila } from '../lib/orders-events.js';
 import type { OrderSlim } from './orders.service.js';
 import { decodeCursor, encodeCursor, InvalidCursorError, type CursorData } from '../lib/orders-cursor.js';
 
@@ -37,10 +38,48 @@ export interface OrdersReadStatus {
   newestDate: string | null;
   oldestDate: string | null;
   updatedAt: string | null;
-  origem: 'full' | 'incremental' | null;
+  origem: 'full' | 'incremental' | 'webhook' | null;
   partial: boolean;
   lastResult: string | null;
   lastSyncAt: string | null;
+  /**
+   * Idade do snapshot em segundos: agora menos `updatedAt`.
+   *
+   * Existe porque `updatedAt` só avança quando uma versão é PUBLICADA. Uma
+   * sincronização que rodou e não achou nada novo é saudável e não republica —
+   * então um `updatedAt` de horas atrás pode significar "nada vendeu desde
+   * então" OU "a atualização parou". Quem distingue os dois é o bloco
+   * `tempoReal` abaixo, junto de `lastSyncAt`.
+   */
+  idadeSegundos: number | null;
+  tempoReal: OrdersRealtimeStatus;
+}
+
+/**
+ * Observabilidade do caminho de tempo real. É PROJEÇÃO: nenhuma decisão do
+ * backend depende destes campos, eles existem para responder "o tempo real
+ * está vivo?" sem abrir log de função.
+ */
+export interface OrdersRealtimeStatus {
+  /** Notificações estão habilitadas? (false = só reconciliação, como antes.) */
+  habilitado: boolean;
+  ultimaNotificacaoEm: string | null;
+  ultimaNotificacaoTopico: string | null;
+  ultimaNotificacaoPedido: string | null;
+  ultimoPedidoAtualizadoId: string | null;
+  ultimoPedidoAtualizadoEm: string | null;
+  ultimaAcao: 'novo' | 'atualizado' | 'sem_mudanca' | null;
+  ultimoDrenoEm: string | null;
+  /** Eventos ainda não processados. Persistentemente > 0 é sinal de problema. */
+  pendentes: number;
+  recebidas: number;
+  duplicadas: number;
+  rejeitadas: number;
+  aplicadosNovos: number;
+  aplicadosAtualizados: number;
+  falhas: number;
+  ultimoErro: string | null;
+  ultimoErroEm: string | null;
 }
 
 export interface OrdersPage {
@@ -63,21 +102,80 @@ export type ReadResult<T> =
 
 // ── STATUS ──────────────────────────────────────────────────────────────────
 
-/** Projeção pública de manifesto + SyncStatus. Nunca devolve os objetos crus. */
-export async function getReadStatus(cache: Cache, alvo: Alvo): Promise<OrdersReadStatus> {
+function idadeEmSegundos(updatedAt: string | null): number | null {
+  if (!updatedAt) return null;
+  const t = Date.parse(updatedAt);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.round((Date.now() - t) / 1000));
+}
+
+/**
+ * Projeção pública de manifesto + SyncStatus + telemetria de tempo real.
+ * Nunca devolve os objetos crus, nem chave, nem chunk, nem credencial.
+ *
+ * O bloco `tempoReal` é lido só para o alvo `ativos`: é o único que a callback
+ * de notificações mantém. Em `cancelados` ele vem zerado e `habilitado: false`,
+ * o que é a verdade — cancelados vivem da reconciliação.
+ */
+export async function getReadStatus(
+  cache: Cache,
+  alvo: Alvo,
+  opts: { notificacoesHabilitadas?: boolean } = {}
+): Promise<OrdersReadStatus> {
   const man = await readManifest(cache, alvo);
   const st = await readStatus(cache, alvo);
+  const updatedAt = man?.updatedAt ?? null;
+
+  let tempoReal: OrdersRealtimeStatus = {
+    habilitado: false,
+    ultimaNotificacaoEm: null, ultimaNotificacaoTopico: null, ultimaNotificacaoPedido: null,
+    ultimoPedidoAtualizadoId: null, ultimoPedidoAtualizadoEm: null, ultimaAcao: null,
+    ultimoDrenoEm: null, pendentes: 0,
+    recebidas: 0, duplicadas: 0, rejeitadas: 0,
+    aplicadosNovos: 0, aplicadosAtualizados: 0, falhas: 0,
+    ultimoErro: null, ultimoErroEm: null,
+  };
+
+  if (alvo === 'ativos') {
+    const [rec, proc, pendentes] = await Promise.all([
+      lerObsRecebimento(cache),
+      lerObsProcessamento(cache),
+      tamanhoFila(cache),
+    ]);
+    tempoReal = {
+      habilitado: opts.notificacoesHabilitadas === true,
+      ultimaNotificacaoEm: rec.ultimaNotificacaoEm,
+      ultimaNotificacaoTopico: rec.ultimaNotificacaoTopico,
+      ultimaNotificacaoPedido: rec.ultimaNotificacaoPedido,
+      ultimoPedidoAtualizadoId: proc.ultimoPedidoAtualizadoId,
+      ultimoPedidoAtualizadoEm: proc.ultimoPedidoAtualizadoEm,
+      ultimaAcao: proc.ultimaAcao,
+      ultimoDrenoEm: proc.ultimoDrenoEm,
+      pendentes,
+      recebidas: rec.totalRecebidas,
+      duplicadas: rec.totalDuplicadas,
+      rejeitadas: rec.totalRejeitadas,
+      aplicadosNovos: proc.totalNovos,
+      aplicadosAtualizados: proc.totalAtualizados,
+      falhas: proc.totalFalhas,
+      ultimoErro: proc.ultimoErro,
+      ultimoErroEm: proc.ultimoErroEm,
+    };
+  }
+
   return {
     alvo,
     versao: man?.versao ?? null,
     totalRegistros: man?.totalRegistros ?? 0,
     newestDate: man?.newestDate ?? null,
     oldestDate: man?.oldestDate ?? null,
-    updatedAt: man?.updatedAt ?? null,
+    updatedAt,
     origem: man?.origem ?? null,
     partial: st?.emAndamento ?? false,
     lastResult: st?.lastResult ?? null,
     lastSyncAt: st?.lastSyncAt ?? null,
+    idadeSegundos: idadeEmSegundos(updatedAt),
+    tempoReal,
   };
 }
 
@@ -127,11 +225,38 @@ async function resolverManifesto(
 }
 
 /**
+ * Localiza (índice do chunk, posição dentro dele) para um offset global.
+ *
+ * Quando o manifesto declara `chunkCounts`, andamos pelos tamanhos REAIS. Isso
+ * é obrigatório desde o upsert por notificação: ele reescreve UM chunk em vez
+ * do snapshot inteiro, e esse chunk fica com um pedido a mais que os demais.
+ * Derivar a posição por `chunkSize` nesse manifesto pularia — ou repetiria — um
+ * pedido a cada página.
+ *
+ * Sem `chunkCounts` (manifestos publicados antes desta fase) mantemos a conta
+ * antiga por `chunkSize`, que vale porque a publicação canônica fatia em blocos
+ * uniformes.
+ */
+function localizar(man: OrdersManifest, offset: number): { chunkIdx: number; posNoChunk: number } {
+  const counts = man.chunkCounts;
+  if (Array.isArray(counts) && counts.length === man.chunks.length) {
+    let restante = offset;
+    for (let i = 0; i < counts.length; i++) {
+      const n = counts[i];
+      if (restante < n) return { chunkIdx: i, posNoChunk: restante };
+      restante -= n;
+    }
+    return { chunkIdx: man.chunks.length, posNoChunk: 0 }; // além do fim
+  }
+  const chunkSize = man.chunkSize > 0 ? man.chunkSize : 1;
+  return { chunkIdx: Math.floor(offset / chunkSize), posNoChunk: offset % chunkSize };
+}
+
+/**
  * Lê os itens em [offset, offset+pageSize) tocando SOMENTE os chunks necessários
  * (1 ou mais, conforme pageSize/chunkSize), via readChunkByKey — nunca readSnapshot.
- * Assume chunks de tamanho `man.chunkSize`, exceto possivelmente o último. Para
- * robustez (não depender do último chunk ter tamanho cheio), avança por chunks
- * consecutivos a partir do índice derivado até preencher a página ou acabar.
+ * Avança por chunks consecutivos a partir do índice localizado até preencher a
+ * página ou acabar, e por isso não depende de o último chunk estar cheio.
  */
 async function lerJanela(
   cache: Cache,
@@ -142,9 +267,7 @@ async function lerJanela(
   const itens: OrderSlim[] = [];
   if (offset >= man.totalRegistros) return itens;
 
-  const chunkSize = man.chunkSize > 0 ? man.chunkSize : 1;
-  let chunkIdx = Math.floor(offset / chunkSize);
-  let posNoChunk = offset % chunkSize;
+  let { chunkIdx, posNoChunk } = localizar(man, offset);
 
   while (itens.length < pageSize && chunkIdx < man.chunks.length) {
     const chunk = await readChunkByKey(cache, man.chunks[chunkIdx]); // 1 GET

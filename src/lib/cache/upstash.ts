@@ -47,4 +47,26 @@ export class UpstashCache implements Cache {
     if (n === 1) await this.redis.expire(key, ttlSeconds);
     return n;
   }
+
+  async rpush(key: string, ...values: string[]): Promise<number> {
+    if (values.length === 0) return this.llen(key);
+    return this.redis.rpush(key, ...values);
+  }
+
+  /**
+   * LPOP com contagem. Chave inexistente devolve null; um item devolve string.
+   * Normalizamos os três casos para string[] — quem chama nunca vê a variação.
+   */
+  async lpopMany(key: string, max: number): Promise<string[]> {
+    if (max <= 0) return [];
+    const r = (await this.redis.lpop<string | string[]>(key, max)) as unknown;
+    if (r === null || r === undefined) return [];
+    if (Array.isArray(r)) return r.map(v => String(v));
+    return [String(r)];
+  }
+
+  async llen(key: string): Promise<number> {
+    const n = await this.redis.llen(key);
+    return typeof n === 'number' && Number.isFinite(n) ? n : 0;
+  }
 }

@@ -43,7 +43,14 @@ import {
   deleteBuildChunks,
 } from '../lib/orders-store.js';
 
-const LOCK_KEY = 'orders:sync:lock';
+/**
+ * Lock ÚNICO da escrita do snapshot de pedidos. Exportado porque o upsert por
+ * notificação (orders-webhook.service) precisa do MESMO lock: um passo de
+ * reconciliação publicando ao mesmo tempo que um webhook sobrescreveria um dos
+ * dois manifestos, e o pedido do lado perdedor sumiria até a próxima varredura.
+ */
+export const ORDERS_SYNC_LOCK_KEY = 'orders:sync:lock';
+const LOCK_KEY = ORDERS_SYNC_LOCK_KEY;
 const jobKey = (alvo: Alvo) => `orders:sync:job:${alvo}`;
 const statusKey = (alvo: Alvo) => `orders:sync:status:${alvo}`;
 const LIMIT = 50;
@@ -233,7 +240,7 @@ function slimCanonico(o: OrderSlim): string {
     })),
   });
 }
-function slimIgual(a: OrderSlim, b: OrderSlim): boolean {
+export function slimIgual(a: OrderSlim, b: OrderSlim): boolean {
   return slimCanonico(a) === slimCanonico(b);
 }
 
@@ -267,6 +274,11 @@ async function publicarSnapshot(
     chunkSize,
     updatedAt: new Date().toISOString(),
     origem,
+    // Aqui as fatias são uniformes, então `chunkCounts` é redundante com
+    // `chunkSize`. Gravamos assim mesmo: é o upsert por notificação que
+    // desiguala os chunks, e a leitura precisa do campo ANTES de o primeiro
+    // upsert acontecer sobre este manifesto.
+    chunkCounts: fatias.map(f => f.length),
   };
   await publishManifest(cache, alvo, manifesto);
   return manifesto;

@@ -9,7 +9,7 @@ fala com o Mercado Livre.** As rotas de leitura nunca chamam a API do ML, e por
 isso abrem rápido, não estouram rate limit e servem o mesmo número para todos os
 consumidores.
 
-## Endpoints (9 funções Vercel)
+## Endpoints (10 funções Vercel)
 
 ### Leitura — só sessão, nunca chamam o Mercado Livre
 
@@ -53,13 +53,20 @@ falha, serve o snapshot completo anterior com `source: 'fallback_stale'`.
 | Rota | Método | Função |
 |---|---|---|
 | `/api/admin/orders-sync` | POST | um passo retomável do snapshot de pedidos |
+| `/api/admin/orders-sync` `{"acao":"drenar"}` | POST | drena a fila de notificações |
 | `/api/admin/shipping-sync` | POST | resolve logística e frete real por envio |
 | `/api/admin/seed` | POST | semeia a cadeia de tokens (`SEED_ENABLED=false` bloqueia) |
 
-Os dois primeiros são **retomáveis**: processam um lote por invocação e devolvem
-o ponto de retomada. Quem os chama de hora em hora é o GitHub Actions
+Os passos de sincronização são **retomáveis**: processam um lote por invocação e
+devolvem o ponto de retomada. Quem os chama de hora em hora é o GitHub Actions
 (`.github/workflows/orders-sync.yml`), não o Vercel Cron — o projeto fica no
 plano gratuito de propósito.
+
+### Notificações do Mercado Livre — sem sessão, segredo na URL
+
+| Rota | Método | Função |
+|---|---|---|
+| `/api/notifications/ml?k=<segredo>` | POST | callback de notificações do ML |
 
 ### Sessão, proxy e diagnóstico
 
@@ -71,6 +78,93 @@ plano gratuito de propósito.
 | `/api/auth/session` | GET | Bearer sess | valida e renova a sessão |
 | `/api/chat` | POST | Bearer sess | assistente de vendas |
 | `/api/ml/<op>` | GET/POST/DELETE | Bearer sess | proxy com allowlist (19 operações) |
+
+## Pedidos em tempo real
+
+**A varredura de hora em hora deixou de ser o caminho de atualização e virou
+reconciliação.** O caminho normal agora é:
+
+```
+venda no Mercado Livre
+  → notificação (tópico orders_v2) em POST /api/notifications/ml
+  → validação + fila no Redis, com HTTP 200 em poucas dezenas de ms
+  → dreno: GET /orders/{id} com o token do backend
+  → toSlim → upsert de UM pedido → manifesto novo
+  → o dashboard vê a versão nova no próximo poll
+```
+
+Latência ponta a ponta: **poucos segundos no backend**, mais o poll de 45 s do
+dashboard. Antes eram até 60 minutos de cron mais até 30 minutos de refresh.
+
+### O upsert é incremental de verdade
+
+O manifesto lista as chaves dos chunks explicitamente, então a versão nova
+**reusa as chaves dos chunks que não mudaram** e aponta para uma chave nova só
+no chunk tocado. Uma venda custa 1 GET + 1 SET, não a reescrita dos ~8 chunks
+do histórico.
+
+O preço disso é que os chunks deixam de ter tamanho uniforme. Por isso o
+manifesto passou a declarar `chunkCounts`, e a paginação anda pelos tamanhos
+reais em vez de derivar a posição de `chunkSize`. Manifesto antigo, sem o campo,
+continua sendo lido pela conta antiga.
+
+### Idempotência
+
+O evento carrega **só o id do pedido**. O estado vem sempre de uma busca nova em
+`GET /orders/{id}`. Daí saem as duas garantias: o mesmo evento duas vezes não
+duplica nada (na segunda o pedido está idêntico e nem publicamos versão nova), e
+um evento fora de ordem não regride estado, porque o conteúdo do evento nunca é
+aplicado. A deduplicação por `_id` da notificação é economia de chamada, não a
+garantia de correção.
+
+O upsert segura o **mesmo lock** da sincronização periódica. Lock ocupado não é
+erro: os eventos ficam na fila para o próximo dreno.
+
+### Reconciliação continua existindo
+
+O workflow de hora em hora não mudou de papel — mudou de nome. Ele recupera
+notificação que nunca chegou, mudança de status fora da janela de eventos e
+qualquer inconsistência; e republica o snapshot em chunks uniformes. Um job novo
+(`notificacoes`) drena a fila ao final, para o caso de o dreno em tempo real ter
+esbarrado no lock ou falhado.
+
+### O que precisa ser configurado no painel do Mercado Livre
+
+Nada disso funciona só com o deploy. É preciso, em
+`https://developers.mercadolivre.com.br` → sua aplicação → **Notificações**:
+
+1. **URL de callback**:
+   `https://overwine-assistant.vercel.app/api/notifications/ml?k=<ML_WEBHOOK_SECRET>`
+2. **Tópico**: `orders_v2`. (`created_orders` é aceito pelo backend por
+   compatibilidade, mas só dispara na criação — `orders_v2` cobre criação e
+   mudanças.)
+3. **Variável** `ML_WEBHOOK_SECRET` no projeto Vercel, com o mesmo valor que
+   está na URL, mínimo de 16 caracteres.
+
+O ML **não assina** as notificações: não há HMAC, header de assinatura nem lista
+de IPs publicada. O segredo na URL é o único mecanismo disponível, e por isso a
+URL registrada no painel é uma credencial. A segunda camada é arquitetural: o
+endpoint nunca acredita no corpo.
+
+Sem `ML_WEBHOOK_SECRET` o endpoint responde `503 notificacoes_desabilitadas` e
+**nada mais muda** — a reconciliação de hora em hora continua sendo a fonte de
+atualização, exatamente como antes.
+
+### Observabilidade
+
+`GET /api/orders/status?alvo=ativos` devolve, além do que já devolvia:
+
+- `idadeSegundos` — idade do snapshot publicado;
+- `tempoReal.habilitado` — se as notificações estão configuradas;
+- `tempoReal.ultimaNotificacaoEm` / `ultimaNotificacaoPedido` / `ultimaNotificacaoTopico`;
+- `tempoReal.ultimoPedidoAtualizadoId` / `ultimoPedidoAtualizadoEm` / `ultimaAcao`;
+- `tempoReal.pendentes` — eventos na fila (persistentemente > 0 é problema);
+- `tempoReal.falhas` / `ultimoErro` / `ultimoErroEm`;
+- `lastSyncAt` / `lastResult` — continuam sendo da **reconciliação**, e só dela.
+
+`updatedAt` só avança quando uma versão é publicada. Um `updatedAt` de horas
+atrás pode significar "nada vendeu" ou "a atualização parou" — quem separa os
+dois é `lastSyncAt` (a reconciliação rodou) junto de `tempoReal`.
 
 ## Assistente (`/api/chat`)
 

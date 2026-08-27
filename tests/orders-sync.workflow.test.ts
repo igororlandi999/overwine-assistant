@@ -54,6 +54,7 @@ function rodar(script: string, resposta: string): { code: number; saida: string 
 
 const PY_SYNC = extrairPython(0);
 const PY_LOGISTICA = extrairPython(1);
+const PY_DRENO = extrairPython(2);
 
 /**
  * Códigos de saída do parser de sincronização:
@@ -163,5 +164,63 @@ describe('workflow orders-sync — parser da logística', () => {
     const r = rodar(PY_LOGISTICA, JSON.stringify({ ok: true, concluido: true }));
     expect(r.code, r.saida).toBe(CONCLUIU);
     expect(r.saida).toContain('cobertura=?');
+  });
+});
+
+
+/**
+ * Parser do dreno da fila de notificações.
+ *
+ * A regra que este bloco existe para travar: um evento que falhou e voltou
+ * para a fila NÃO deixa o job vermelho. Ele é aviso, porque o job `sync` varre
+ * a API do Mercado Livre de qualquer forma e recupera o pedido — marcar
+ * vermelho aqui produziria exatamente o ruído recorrente que já custou 34 de
+ * 60 execuções em agosto/2026, agora por outro caminho.
+ */
+describe('workflow orders-sync — parser do dreno de notificacoes', () => {
+  it('fila vazia é sucesso silencioso — o estado NORMAL do job', () => {
+    const r = rodar(PY_DRENO, JSON.stringify({
+      ok: true, processados: 0, novos: 0, atualizados: 0, semMudanca: 0,
+      falhas: 0, restantes: 0,
+    }));
+    expect(r.code, r.saida).toBe(0);
+    expect(r.saida).not.toContain('::error::');
+    expect(r.saida).not.toContain('::warning::');
+  });
+
+  it('eventos aplicados são reportados e não geram aviso', () => {
+    const r = rodar(PY_DRENO, JSON.stringify({
+      ok: true, processados: 3, novos: 2, atualizados: 1, semMudanca: 0,
+      falhas: 0, restantes: 0,
+    }));
+    expect(r.code, r.saida).toBe(0);
+    expect(r.saida).toContain('novos=2');
+    expect(r.saida).not.toContain('::warning::');
+  });
+
+  it('falha em um evento é AVISO, nunca erro: a sincronizacao periodica cobre', () => {
+    const r = rodar(PY_DRENO, JSON.stringify({
+      ok: false, processados: 1, novos: 0, atualizados: 0, semMudanca: 0,
+      falhas: 1, restantes: 1,
+    }));
+    expect(r.code, r.saida).toBe(0);
+    expect(r.saida).toContain('::warning::');
+    expect(r.saida).not.toContain('::error::');
+  });
+
+  it('lock ocupado (motivo sync_em_andamento) nao derruba o job', () => {
+    const r = rodar(PY_DRENO, JSON.stringify({
+      ok: true, processados: 0, novos: 0, atualizados: 0, semMudanca: 0,
+      falhas: 0, restantes: 2, motivo: 'sync_em_andamento',
+    }));
+    expect(r.code, r.saida).toBe(0);
+    expect(r.saida).toContain('motivo=sync_em_andamento');
+    expect(r.saida).toContain('::warning::');
+  });
+
+  it('resposta que nao e JSON e falha', () => {
+    const r = rodar(PY_DRENO, '<html>502</html>');
+    expect(r.code).toBe(1);
+    expect(r.saida).toContain('::error::');
   });
 });

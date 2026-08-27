@@ -35,6 +35,28 @@ export class FakeCache implements Cache {
     else this.store.get(k)!.v = String(n);
     return n;
   }
+
+  // ── Filas (listas). Espaco SEPARADO do de strings, como no Redis: uma
+  // chave de lista nao e legivel por GET nem sobrescrita por SET.
+  lists = new Map<string, string[]>();
+
+  async rpush(k: string, ...values: string[]) {
+    const l = this.lists.get(k) ?? [];
+    l.push(...values);
+    this.lists.set(k, l);
+    return l.length;
+  }
+  async lpopMany(k: string, max: number) {
+    if (max <= 0) return [];
+    const l = this.lists.get(k);
+    if (!l || l.length === 0) return [];
+    const out = l.splice(0, max);
+    if (l.length === 0) this.lists.delete(k);
+    return out;
+  }
+  async llen(k: string) {
+    return this.lists.get(k)?.length ?? 0;
+  }
 }
 
 export const TEST_ENV = {

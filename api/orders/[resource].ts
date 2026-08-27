@@ -37,6 +37,7 @@
  * Redis, jobId, tokens ou credenciais.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
@@ -79,7 +80,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const alvo = parseAlvo(req.query.alvo);
 
     if (resource === 'status') {
-      const status = await getReadStatus(cache, alvo);
+      // Rota BARATA de propósito: manifesto + status + telemetria, sem tocar
+      // em chunk e sem chamar o Mercado Livre. É ela que o dashboard consulta
+      // a cada poucos dezenas de segundos para decidir se vale repaginar os
+      // milhares de pedidos — a decisão sai de `versao`.
+      const status = await getReadStatus(cache, alvo, {
+        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
+      });
       return json(res, 200, status);
     }
 

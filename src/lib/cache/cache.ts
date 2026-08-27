@@ -17,6 +17,20 @@ export interface Cache {
   delIfEquals(key: string, value: string): Promise<boolean>;
   /** INCR com TTL na primeira escrita — usado para rate limiting. */
   incr(key: string, ttlSeconds: number): Promise<number>;
+
+  /**
+   * FILA (lista Redis). Existe para a fila de notificações do Mercado Livre:
+   * duas notificações podem chegar no mesmo instante, em instâncias
+   * serverless diferentes, e um ciclo get/parse/push/set perderia uma delas.
+   * RPUSH e LPOP são ATÔMICOS no servidor; é por isso que a fila não é um
+   * array em JSON dentro de uma chave comum.
+   */
+  /** Acrescenta valores ao FIM da fila. Retorna o tamanho depois da escrita. */
+  rpush(key: string, ...values: string[]): Promise<number>;
+  /** Remove e devolve, atomicamente, até `max` itens do INÍCIO da fila. */
+  lpopMany(key: string, max: number): Promise<string[]>;
+  /** Tamanho atual da fila (0 se não existir). */
+  llen(key: string): Promise<number>;
 }
 
 import { UpstashCache } from './upstash.js';

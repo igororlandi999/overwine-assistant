@@ -13,6 +13,8 @@ import { publicarMapaEnvios, lerMapaEnvios, type EnvioInfo } from '../src/lib/sh
 import { calcularRanking } from '../src/services/product-ranking.service.js';
 import { readSnapshot } from '../src/lib/orders-store.js';
 import { getReadStatus } from '../src/services/orders-read.service.js';
+import { receberNotificacao } from '../src/services/orders-webhook.service.js';
+import { registrarProcessamento } from '../src/lib/orders-events.js';
 
 /** Mapa de envios a partir de pares [id, logistica] ou [id, logistica, custo]. */
 function envios(...pares: Array<[string, string] | [string, string, number]>) {
@@ -599,5 +601,99 @@ describe('rota /api/orders/margin', () => {
     for (const proibido of ['buyer', 'nickname', 'paid_amount', 'date_created', 'order_items']) {
       expect(bruto, proibido).not.toContain(proibido);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+/**
+ * Observabilidade do tempo real em GET /api/orders/status.
+ *
+ * Esta rota é o único lugar em que dá para responder "o tempo real está vivo?"
+ * sem abrir o log das funções. E precisa continuar BARATA: é ela que o
+ * dashboard consulta a cada poucos dezenas de segundos, e a decisão de
+ * repaginar milhares de pedidos sai do campo `versao` que ela devolve.
+ */
+describe('GET /api/orders/status — telemetria de tempo real', () => {
+  async function pedirStatus(alvo = 'ativos') {
+    const sess = await comSessao();
+    const res = mockRes();
+    await handler(
+      mockReq({ query: { resource: 'status', alvo }, headers: { authorization: `Bearer ${sess}` } }),
+      res
+    );
+    return res;
+  }
+
+  it('sem ML_WEBHOOK_SECRET o bloco vem zerado e habilitado: false', async () => {
+    await publicar(cache, 'ativos', 10, 50);
+    const b = (await pedirStatus()).json();
+    expect(b.tempoReal.habilitado).toBe(false);
+    expect(b.tempoReal.pendentes).toBe(0);
+    expect(b.tempoReal.ultimaNotificacaoEm).toBeNull();
+  });
+
+  it('com o segredo configurado, habilitado: true', async () => {
+    process.env.ML_WEBHOOK_SECRET = 'segredo-de-webhook-bem-longo';
+    resetEnvForTests();
+    await publicar(cache, 'ativos', 10, 50);
+    const b = (await pedirStatus()).json();
+    expect(b.tempoReal.habilitado).toBe(true);
+    delete process.env.ML_WEBHOOK_SECRET;
+    resetEnvForTests();
+  });
+
+  it('reporta a última notificação, o último pedido atualizado e a fila pendente', async () => {
+    await publicar(cache, 'ativos', 10, 50);
+    await receberNotificacao(
+      cache,
+      { _id: 'n1', topic: 'orders_v2', resource: '/orders/4242', user_id: Number(TEST_ENV.ML_USER_ID) },
+      TEST_ENV.ML_USER_ID
+    );
+    await registrarProcessamento(cache, { tipo: 'atualizado', orderId: '4242' });
+
+    const b = (await pedirStatus()).json();
+    expect(b.tempoReal.ultimaNotificacaoPedido).toBe('4242');
+    expect(b.tempoReal.ultimaNotificacaoTopico).toBe('orders_v2');
+    expect(b.tempoReal.ultimoPedidoAtualizadoId).toBe('4242');
+    expect(b.tempoReal.ultimaAcao).toBe('atualizado');
+    expect(b.tempoReal.pendentes).toBe(1);
+    expect(b.lastSyncAt === null || typeof b.lastSyncAt === 'string').toBe(true);
+  });
+
+  it('idadeSegundos distingue "nada vendeu" de "a atualização parou"', async () => {
+    await publicar(cache, 'ativos', 10, 50); // updatedAt fixo em 2026-07-20
+    const b = (await pedirStatus()).json();
+    expect(b.idadeSegundos).toBeGreaterThan(0);
+    expect(b.updatedAt).toBe('2026-07-20T12:00:00.000Z');
+  });
+
+  it('sem snapshot, idadeSegundos é null em vez de um número inventado', async () => {
+    const b = (await pedirStatus()).json();
+    expect(b.versao).toBeNull();
+    expect(b.idadeSegundos).toBeNull();
+  });
+
+  it('em cancelados o bloco vem zerado — só ativos é mantido por notificação', async () => {
+    await publicar(cache, 'cancelados', 5, 50);
+    const b = (await pedirStatus('cancelados')).json();
+    expect(b.tempoReal.habilitado).toBe(false);
+    expect(b.tempoReal.pendentes).toBe(0);
+  });
+
+  it('a telemetria NÃO expõe chave Redis, chunk, token nem segredo', async () => {
+    process.env.ML_WEBHOOK_SECRET = 'segredo-de-webhook-bem-longo';
+    resetEnvForTests();
+    await publicar(cache, 'ativos', 10, 50);
+    await receberNotificacao(
+      cache,
+      { _id: 'n1', topic: 'orders_v2', resource: '/orders/4242', user_id: Number(TEST_ENV.ML_USER_ID) },
+      TEST_ENV.ML_USER_ID
+    );
+    const bruto = String((await pedirStatus()).body);
+    for (const proibido of ['orders:chunk', 'orders:evt', 'orders:manifest', 'segredo-de-webhook', 'access_token']) {
+      expect(bruto, proibido).not.toContain(proibido);
+    }
+    delete process.env.ML_WEBHOOK_SECRET;
+    resetEnvForTests();
   });
 });

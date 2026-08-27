@@ -32,7 +32,22 @@ export interface OrdersManifest {
   oldestDate: string | null;
   chunkSize: number;
   updatedAt: string; // ISO
-  origem: 'full' | 'incremental';
+  origem: 'full' | 'incremental' | 'webhook';
+  /**
+   * Quantos pedidos há em CADA chunk, na mesma ordem de `chunks`.
+   *
+   * OPCIONAL de propósito: manifestos publicados antes desta fase não têm o
+   * campo, e a leitura precisa continuar servindo esses. Quando ausente, o
+   * leitor deriva a posição por `chunkSize` — o que só vale porque a
+   * publicação canônica fatia em blocos uniformes.
+   *
+   * O upsert por notificação QUEBRA essa uniformidade de propósito: ele
+   * reescreve UM chunk em vez dos ~8 do snapshot inteiro, e o chunk reescrito
+   * fica com um pedido a mais. Sem `chunkCounts` o offset da paginação
+   * escorregaria a partir daí. Por isso todo manifesto novo grava o campo,
+   * inclusive os da sincronização periódica.
+   */
+  chunkCounts?: number[];
 }
 
 interface Prefixos {
