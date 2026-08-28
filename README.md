@@ -38,6 +38,47 @@ paridade com o dashboard legado; estoque não tem esse legado e usa a mesma
 janela que o assistente, para que a mesma pergunta não receba duas velocidades
 diferentes. A resposta declara `periodo.dias`.
 
+### Auto-refresh do dashboard — sessão, escreve snapshot
+
+| Rota | Método | Função |
+|---|---|---|
+| `/api/orders/refresh` | POST | um passo incremental, se o snapshot estiver velho |
+
+Existe porque as duas fontes de atualização falharam ao mesmo tempo: o
+agendador do GitHub Actions passou a **descartar quase todos os ticks** (1 a 2
+execuções por dia contra 24 esperadas, em 27–28/08/2026) e a notificação do ML
+ainda não autentica. A aba aberta é o único componente vivo em todos os
+cenários, então virou o **piso de confiabilidade** — não o mecanismo principal.
+
+Autorização é a **sessão normal do dashboard**; `ADMIN_KEY` nunca vai ao
+navegador, e o navegador nunca fala com o Mercado Livre.
+
+**A idade é medida por `lastSyncAt` (quando CHECAMOS), não por `updatedAt`
+(quando MUDOU).** `updatedAt` só avança quando uma versão é publicada, então num
+dia sem vendas ele fica parado para sempre — usá-lo como gatilho faria o
+dashboard pedir sincronização eternamente, para nunca achar nada.
+
+Duas travas, com papéis distintos:
+
+- **cooldown global** (`ORDERS_REFRESH_COOLDOWN_S`, 60 s): dez abas abertas
+  produzem **uma** sincronização. As outras nove recebem `cooldown` e não tocam
+  no ML;
+- **o mesmo lock** de `orders-sync` e do dreno de notificações: impede
+  concorrência real de escrita. Quem o segura é `runSyncStep`, que já devolve
+  `sync_em_andamento` sem publicar nada — não duplicamos essa lógica.
+
+Roda exclusivamente o passo `incremental`, com o mesmo `fetchPage`, a mesma
+normalização e a mesma publicação da reconciliação. Nunca reconstrói o
+histórico; sem manifesto base responde `sem_snapshot` e deixa a carga inicial
+para o endpoint admin. Erro do ML devolve `200 { ok: false }` — o snapshot
+anterior continua válido e servido, e o dashboard não trata isso como falha de
+leitura.
+
+Diferente da callback do ML, esta rota **aguarda** o passo em vez de agendar em
+segundo plano: aqui não há orçamento de 500 ms, quem chama é o poll, e em troca
+de alguns segundos a resposta carrega o resultado real e o trabalho não depende
+de o runtime honrar `waitUntil`.
+
 ### Leitura com reconstrução
 
 | Rota | Método | Função |

@@ -6,7 +6,7 @@
  * - x-admin-key comparada com safeEquals (timing-safe).
  * - Rate limit por IP. Logs com IP mascarado, sem credenciais.
  *
- * O mlFetch REAL é injetado aqui como FetchOrdersPage; o serviço de sync não
+ * O fetcher REAL é injetado aqui como FetchOrdersPage; o serviço de sync não
  * conhece rede. Um passo respeita ORDERS_SYNC_MAX_PAGES e é retomável.
  * Body: { alvo?: 'ativos' | 'cancelados', modo?: 'full' | 'incremental' }.
  *
@@ -21,12 +21,10 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
-import { mlFetch } from '../../src/lib/ml-auth.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
-import { runSyncStep, type FetchOrdersPage } from '../../src/services/orders-sync.service.js';
+import { runSyncStep } from '../../src/services/orders-sync.service.js';
 import { drenarFila } from '../../src/services/orders-webhook.service.js';
-import { criarFetchOrder } from '../../src/lib/ml-orders.js';
-import type { OrderInput } from '../../src/services/orders.service.js';
+import { criarFetchOrder, criarFetchOrdersPage } from '../../src/lib/ml-orders.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
@@ -65,24 +63,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 200, dreno);
     }
 
-    // Fetcher real: traduz a página em { results, total }; erro NÃO é engolido.
-    // paging.total ausente/ inválido NÃO vira 0 (isso mascararia resposta
-    // incompleta como sync concluído) — lança, entrando no retry/erro_parcial.
-    const fetchPage: FetchOrdersPage = async ({ offset, limit, status }) => {
-      let path = `/orders/search?seller=${uid}&sort=date_desc&limit=${limit}&offset=${offset}`;
-      if (status) path += `&order.status=${status}`;
-      const r = await mlFetch(cache, path);
-      if (!r.ok) throw new Error(`ML /orders/search HTTP ${r.status} (offset ${offset}).`);
-      const data = (await r.json()) as { results?: unknown; paging?: { total?: unknown } };
-      if (!Array.isArray(data.results)) {
-        throw new Error(`ML /orders/search sem results[] (offset ${offset}).`);
-      }
-      const total = data.paging?.total;
-      if (typeof total !== 'number' || !Number.isInteger(total) || !Number.isFinite(total) || total < 0) {
-        throw new Error(`ML /orders/search com paging.total inválido: ${String(total)} (offset ${offset}).`);
-      }
-      return { results: data.results as OrderInput[], total };
-    };
+    // O fetcher de página vive em src/lib/ml-orders.ts: o auto-refresh do
+    // dashboard usa exatamente o mesmo, e duas cópias seriam duas chances de
+    // consertar o tratamento de paging.total em uma só.
+    const fetchPage = criarFetchOrdersPage(cache, uid);
 
     console.info(`[orders-sync] passo ip=${maskIp(ip)} alvo=${alvo} modo=${body.modo ?? 'auto'}`);
     const result = await runSyncStep(cache, fetchPage, { alvo, modo: body.modo });

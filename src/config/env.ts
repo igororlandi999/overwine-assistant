@@ -50,6 +50,22 @@ const schema = z.object({
    */
   ML_WEBHOOK_SECRET: z.string().min(16, 'ML_WEBHOOK_SECRET deve ter no mínimo 16 caracteres').optional(),
 
+  // ── Auto-refresh do dashboard ───────────────────────────────────────────
+  /**
+   * Idade (s) de `lastSyncAt` a partir da qual uma aba aberta pode pedir uma
+   * sincronização incremental. Medimos quando CHECAMOS, não quando MUDOU:
+   * `manifest.updatedAt` fica parado num dia sem vendas, e usá-lo aqui faria o
+   * dashboard pedir sincronização para sempre, sem nunca achar nada.
+   */
+  ORDERS_REFRESH_IDADE_MAX_S: z.coerce.number().int().positive().default(90),
+
+  /**
+   * Janela global de cooldown (s) do auto-refresh. É o que impede que N abas
+   * abertas virem N sincronizações: a primeira adquire, as outras recebem
+   * `cooldown` e não tocam no Mercado Livre.
+   */
+  ORDERS_REFRESH_COOLDOWN_S: z.coerce.number().int().positive().default(60),
+
   /**
    * Pedidos processados por dreno. Cada um custa 1 chamada a GET /orders/{id}
    * mais leituras de chunk; 20 cabe folgado nos 30 s de maxDuration da função
