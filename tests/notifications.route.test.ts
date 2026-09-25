@@ -116,6 +116,22 @@ describe('POST /api/notifications/ml — autenticação e método', () => {
     expect(await tamanhoFila(cache)).toBe(0);
   });
 
+  /**
+   * Em setembro/2026 o Mercado Livre entregou dezenas de notificações por
+   * hora com um segredo que não batia — e o status mostrava `recebidas: 0`,
+   * sem nada apontando para a causa. A recusa por segredo agora fica visível
+   * em `tempoReal.ultimoMotivoRejeicao`, sem gravar o segredo tentado.
+   */
+  it('segredo errado fica visível na telemetria como segredo_invalido, sem o valor tentado', async () => {
+    await chamar({ query: { k: 'segredo-errado-de-atacante' }, body: corpo() });
+    const obs = await lerObsRecebimento(cache);
+    expect(obs.totalRejeitadas).toBe(1);
+    expect(obs.ultimoMotivoRejeicao).toBe('segredo_invalido');
+    expect(obs.ultimaRejeicaoEm).not.toBeNull();
+    expect(obs.totalRecebidas).toBe(0);
+    expect(JSON.stringify(obs)).not.toContain('segredo-errado-de-atacante');
+  });
+
   it('sem segredo na URL é 401', async () => {
     const res = await chamar({ query: {}, body: corpo() });
     expect(res.statusCode).toBe(401);

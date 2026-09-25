@@ -74,11 +74,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // sendo servido, e o dashboard não deve tratar isso como falha de leitura.
     // Ele volta a pedir na próxima rodada do poll.
     if (r.acao === 'erro') {
-      console.error(`[orders-refresh] ${r.motivo}`);
-      return json(res, 200, { ok: false, acao: 'erro' });
+      console.error(`[orders-refresh] modo=${r.modo} erro=${r.motivo}`);
+      return json(res, 200, { ok: false, acao: 'erro', modo: r.modo, versao: r.versao });
     }
 
-    console.info(`[orders-refresh] acao=${r.acao} sessao=${sess.id.slice(0, 8)}`);
+    // `versao` vai na resposta de propósito: quando `publicou` é true, o
+    // dashboard recarrega na hora em vez de esperar a próxima rodada do poll.
+    const detalhe = r.acao === 'sincronizado'
+      ? ` modo=${r.modo} publicou=${r.publicou} novos=${r.novosPedidos} atualizados=${r.atualizados} versao=${r.versao} ml=${r.chamadasML} ms=${r.duracaoMs}`
+      : '';
+    console.info(`[orders-refresh] acao=${r.acao}${detalhe} sessao=${sess.id.slice(0, 8)}`);
     return json(res, 200, { ok: true, ...r });
   } catch (e) {
     console.error('[orders-refresh]', e instanceof Error ? e.message : e);

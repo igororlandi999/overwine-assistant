@@ -42,13 +42,15 @@ diferentes. A resposta declara `periodo.dias`.
 
 | Rota | Método | Função |
 |---|---|---|
-| `/api/orders/refresh` | POST | um passo incremental, se o snapshot estiver velho |
+| `/api/orders/refresh` | POST | um passo rápido (ou profundo), se o snapshot estiver velho |
 
 Existe porque as duas fontes de atualização falharam ao mesmo tempo: o
-agendador do GitHub Actions passou a **descartar quase todos os ticks** (1 a 2
-execuções por dia contra 24 esperadas, em 27–28/08/2026) e a notificação do ML
-ainda não autentica. A aba aberta é o único componente vivo em todos os
-cenários, então virou o **piso de confiabilidade** — não o mecanismo principal.
+agendador do GitHub Actions **descarta a maioria dos ticks** (4 a 5 execuções
+por dia contra 24 esperadas, em setembro/2026) e a notificação do ML **chega
+mas é recusada** — o segredo da URL registrada no painel não bate com
+`ML_WEBHOOK_SECRET` (ver `tempoReal.ultimoMotivoRejeicao: 'segredo_invalido'`).
+A aba aberta é o único componente vivo em todos os cenários, então virou o
+**piso de confiabilidade** — e o piso precisa bastar sozinho.
 
 Autorização é a **sessão normal do dashboard**; `ADMIN_KEY` nunca vai ao
 navegador, e o navegador nunca fala com o Mercado Livre.
@@ -56,23 +58,47 @@ navegador, e o navegador nunca fala com o Mercado Livre.
 **A idade é medida por `lastSyncAt` (quando CHECAMOS), não por `updatedAt`
 (quando MUDOU).** `updatedAt` só avança quando uma versão é publicada, então num
 dia sem vendas ele fica parado para sempre — usá-lo como gatilho faria o
-dashboard pedir sincronização eternamente, para nunca achar nada.
+dashboard pedir sincronização eternamente, para nunca achar nada. O dashboard
+mede a idade por `idadeCheckSegundos`, calculada **com o relógio do servidor**:
+o relógio do PC do operador não decide nada.
+
+Dois passos, com papéis diferentes:
+
+- **rápido** (`orders-recent-sync.service`, o comum): lê **uma** página do ML
+  (os 50 pedidos mais recentes) e compara com a assinatura SHA-256 da última
+  página vista (`orders:sync:head`, válida para uma `versao`). Igual → nada
+  mudou, nenhum chunk lido. Diferente → aplica só o que mudou, pedido a pedido,
+  com o mesmo `upsertPedido` do webhook (1 chunk lido, 1 escrito), e publica.
+  Uma checagem sem venda custa 1 chamada ao ML; uma venda custa 1 chamada mais o
+  upsert daquela venda — trabalho proporcional ao pedido novo;
+- **profundo** (`runSyncStep` incremental): 5 páginas, revisita os 250
+  conhecidos mais recentes, captura mudança de status fora da primeira página.
+  Roda a cada `ORDERS_REFRESH_REVISAO_S` (10 min), ou sempre que há um passo
+  parcial pendente para terminar. É o que dispensa o GitHub Actions como fonte
+  de consistência. Com um pedido novo ele não cabe em 5 páginas e termina
+  `parcial`; a chamada seguinte o termina. Antes desta fase esse era o **único**
+  passo do auto-refresh — 5 chamadas por checagem, e duas checagens para uma
+  venda aparecer.
 
 Duas travas, com papéis distintos:
 
-- **cooldown global** (`ORDERS_REFRESH_COOLDOWN_S`, 60 s): dez abas abertas
-  produzem **uma** sincronização. As outras nove recebem `cooldown` e não tocam
-  no ML;
+- **cooldown global** (`ORDERS_REFRESH_COOLDOWN_S`, 15 s; 120 s após um 429 do
+  ML): dez abas abertas produzem **uma** sincronização. As outras nove recebem
+  `cooldown` e não tocam no ML;
 - **o mesmo lock** de `orders-sync` e do dreno de notificações: impede
-  concorrência real de escrita. Quem o segura é `runSyncStep`, que já devolve
-  `sync_em_andamento` sem publicar nada — não duplicamos essa lógica.
+  concorrência real de escrita. Os dois passos o adquirem por conta própria e
+  devolvem `sync_em_andamento` sem publicar nada.
 
-Roda exclusivamente o passo `incremental`, com o mesmo `fetchPage`, a mesma
-normalização e a mesma publicação da reconciliação. Nunca reconstrói o
-histórico; sem manifesto base responde `sem_snapshot` e deixa a carga inicial
-para o endpoint admin. Erro do ML devolve `200 { ok: false }` — o snapshot
-anterior continua válido e servido, e o dashboard não trata isso como falha de
-leitura.
+A resposta carrega `versao`, `modo`, `publicou`, `chamadasML` e `duracaoMs`.
+Quando `publicou` é true, o dashboard **recarrega no ato** em vez de esperar a
+próxima rodada do poll. Nunca reconstrói o histórico; sem manifesto base
+responde `sem_snapshot` e deixa a carga inicial para o endpoint admin. Erro do
+ML devolve `200 { ok: false }` — o snapshot anterior continua válido e servido.
+
+Latência esperada com uma aba visível: poll de 15 s, checagem no ML a cada
+~30 s, recarga imediata ao publicar — **uma venda aparece em ~15 s na média e
+~35 s no pior caso**. Custo: ~120 chamadas ao ML por hora enquanto houver aba
+aberta (uma por checagem), mais ~30/h da revisão profunda.
 
 Diferente da callback do ML, esta rota **aguarda** o passo em vez de agendar em
 segundo plano: aqui não há orçamento de 500 ms, quem chama é o poll, e em troca
@@ -280,7 +306,29 @@ atualização, exatamente como antes.
   sintoma de `ML_CLIENT_ID` errado**, e é a primeira coisa a conferir se o
   tempo real não der sinal de vida;
 - `tempoReal.falhas` / `ultimoErro` / `ultimoErroEm`;
-- `lastSyncAt` / `lastResult` — continuam sendo da **reconciliação**, e só dela.
+- `lastSyncAt` / `lastResult` — de **qualquer** passo que checou o ML
+  (reconciliação, auto-refresh rápido ou profundo); `ultimaRevisaoEm` é só da
+  revisão profunda;
+- `agora` (relógio do servidor) e `idadeCheckSegundos` — a idade do último
+  check, já calculada do lado de cá;
+- `sincronizacao` — telemetria **unificada** de todos os caminhos, para
+  responder "por que a tela parou?" em uma leitura: `ultimoSyncTentadoEm`,
+  `ultimoSyncConcluidoEm`, `ultimaOrigem` (`dashboard_refresh`,
+  `reconciliation`, `webhook`), `ultimoModo` (`rapido`, `incremental`, `full`,
+  `dreno`), `ultimaDuracaoMs`, `ultimasChamadasML`, `ultimosPedidosNovos`,
+  `ultimoPedidoNovoEm`, `ultimaVersaoPublicada` / `Em` / `Origem`,
+  `ultimaFalhaEm` / `Motivo` / `Origem`, contadores e `lockOcupado` /
+  `cooldown` com a última ocorrência. Best-effort, como os blobs de tempo real.
+
+**Diagnóstico em 30 segundos** (`GET /api/orders/status?alvo=ativos`):
+
+| Sintoma | Causa |
+|---|---|
+| `idadeCheckSegundos` cresce sem parar, `sincronizacao.ultimoSyncTentadoEm` parado | nenhuma aba visível está sondando (poll parado, aba em segundo plano) |
+| `ultimoSyncTentadoEm` avança, `ultimoSyncConcluidoEm` não, `ultimaFalhaMotivo` preenchido | o Mercado Livre está falhando (429, 5xx, timeout) |
+| `lockOcupado` subindo | reconciliação ou dreno segurando o lock; normal por alguns segundos |
+| `tempoReal.ultimoMotivoRejeicao: 'segredo_invalido'` com `recebidas: 0` | a URL de callback no painel do ML não bate com `ML_WEBHOOK_SECRET` |
+| `updatedAt` parado mas `idadeCheckSegundos` baixo | não houve venda — o mecanismo está saudável |
 
 `updatedAt` só avança quando uma versão é publicada. Um `updatedAt` de horas
 atrás pode significar "nada vendeu" ou "a atualização parou" — quem separa os

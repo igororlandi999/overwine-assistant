@@ -53,6 +53,7 @@ import { slimIgual, ORDERS_SYNC_LOCK_KEY } from './orders-sync.service.js';
 import {
   type Alvo,
   type OrdersManifest,
+  type OrigemPublicacao,
   readManifest,
   readChunkByKey,
   writeChunk,
@@ -69,6 +70,7 @@ import {
   registrarDreno,
   tamanhoFila,
 } from '../lib/orders-events.js';
+import { registrarConclusaoSync } from '../lib/sync-telemetry.js';
 
 /**
  * Tópicos de notificação do Mercado Livre cujo `resource` é `/orders/{id}`.
@@ -289,7 +291,8 @@ function menorData(a: string | null, b: string | null): string | null {
 export async function upsertPedido(
   cache: Cache,
   pedido: OrderSlim,
-  alvo: Alvo = ALVO
+  alvo: Alvo = ALVO,
+  origem: OrigemPublicacao = 'webhook'
 ): Promise<ResultadoUpsert> {
   const id = String(pedido.id);
   const man = await readManifest(cache, alvo);
@@ -398,7 +401,7 @@ export async function upsertPedido(
     oldestDate: acao === 'novo' ? menorData(man.oldestDate, data) : man.oldestDate,
     chunkSize: man.chunkSize,
     updatedAt: new Date().toISOString(),
-    origem: 'webhook',
+    origem,
     chunkCounts: novosCounts,
   };
   await publishManifest(cache, alvo, manifesto);
@@ -474,6 +477,9 @@ export async function drenarFila(
   }
 
   const r: ResultadoDreno = { ...DRENO_ZERO };
+  const inicio = Date.now();
+  let ultimaVersao: number | null = null;
+  let chamadasML = 0;
   try {
     const eventos = await retirar(cache, max);
     if (eventos.length === 0) {
@@ -489,12 +495,14 @@ export async function drenarFila(
 
     for (const orderId of unicos) {
       try {
+        chamadasML++;
         const bruto = await fetchOrder(orderId);
         if (!bruto || String(bruto.id) !== orderId) {
           throw new Error(`ML devolveu pedido diferente do pedido ${orderId}.`);
         }
         const res = await upsertPedido(cache, toSlim(bruto), ALVO);
         r.processados++;
+        if (res.versao !== null) ultimaVersao = res.versao;
         // Latência ponta a ponta: do relógio do ML até a publicação. Dois
         // relógios diferentes, então vale como ordem de grandeza.
         const sent = porId.get(orderId)?.sent ?? null;
@@ -525,6 +533,12 @@ export async function drenarFila(
 
     r.restantes = await tamanhoFila(cache);
     r.ok = r.falhas === 0;
+    if (r.processados > 0) {
+      await registrarConclusaoSync(cache, {
+        origem: 'webhook', modo: 'dreno', duracaoMs: Date.now() - inicio, chamadasML,
+        novos: r.novos, atualizados: r.atualizados, versaoPublicada: ultimaVersao,
+      });
+    }
     return r;
   } finally {
     await cache.delIfEquals(ORDERS_SYNC_LOCK_KEY, dono);

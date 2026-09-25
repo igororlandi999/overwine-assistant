@@ -57,14 +57,30 @@ const schema = z.object({
    * `manifest.updatedAt` fica parado num dia sem vendas, e usá-lo aqui faria o
    * dashboard pedir sincronização para sempre, sem nunca achar nada.
    */
-  ORDERS_REFRESH_IDADE_MAX_S: z.coerce.number().int().positive().default(90),
+  ORDERS_REFRESH_IDADE_MAX_S: z.coerce.number().int().positive().default(25),
 
   /**
    * Janela global de cooldown (s) do auto-refresh. É o que impede que N abas
    * abertas virem N sincronizações: a primeira adquire, as outras recebem
    * `cooldown` e não tocam no Mercado Livre.
    */
-  ORDERS_REFRESH_COOLDOWN_S: z.coerce.number().int().positive().default(60),
+  ORDERS_REFRESH_COOLDOWN_S: z.coerce.number().int().positive().default(15),
+
+  /**
+   * De quanto em quanto tempo (s) o auto-refresh troca o passo RÁPIDO (uma
+   * página do ML, só os pedidos mais recentes) pela revisão PROFUNDA (o passo
+   * incremental de 5 páginas, que revisita os 250 conhecidos mais recentes e
+   * captura mudança de status fora da primeira página). O rápido é o que dá a
+   * latência de segundos; o profundo é o que garante consistência sem depender
+   * do GitHub Actions.
+   */
+  ORDERS_REFRESH_REVISAO_S: z.coerce.number().int().positive().default(600),
+
+  /**
+   * Cooldown (s) imposto quando o Mercado Livre responde 429. Um rate limit
+   * não se resolve insistindo: a aba aberta pediria de novo em segundos.
+   */
+  ORDERS_REFRESH_COOLDOWN_429_S: z.coerce.number().int().positive().default(120),
 
   /**
    * Pedidos processados por dreno. Cada um custa 1 chamada a GET /orders/{id}

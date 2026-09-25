@@ -16,12 +16,14 @@ import type { Cache } from '../lib/cache/cache.js';
 import {
   type Alvo,
   type OrdersManifest,
+  type OrigemPublicacao,
   readManifest,
   readPreviousManifest,
   readChunkByKey,
 } from '../lib/orders-store.js';
 import { readStatus } from './orders-sync.service.js';
 import { lerObsRecebimento, lerObsProcessamento, tamanhoFila } from '../lib/orders-events.js';
+import { lerObsSync, type ObsSync } from '../lib/sync-telemetry.js';
 import type { OrderSlim } from './orders.service.js';
 import { decodeCursor, encodeCursor, InvalidCursorError, type CursorData } from '../lib/orders-cursor.js';
 
@@ -38,7 +40,7 @@ export interface OrdersReadStatus {
   newestDate: string | null;
   oldestDate: string | null;
   updatedAt: string | null;
-  origem: 'full' | 'incremental' | 'webhook' | null;
+  origem: OrigemPublicacao | null;
   partial: boolean;
   lastResult: string | null;
   lastSyncAt: string | null;
@@ -52,7 +54,22 @@ export interface OrdersReadStatus {
    * `tempoReal` abaixo, junto de `lastSyncAt`.
    */
   idadeSegundos: number | null;
+  /**
+   * Relógio do servidor no momento da resposta. O dashboard mede idade a
+   * partir dele, e não do relógio da máquina do operador: um PC atrasado em
+   * um minuto faria a tela pedir sincronização sem parar, ou nunca.
+   */
+  agora: string;
+  /** Idade, em segundos, do último CHECK (`lastSyncAt`) — a medida de "velho". */
+  idadeCheckSegundos: number | null;
+  /** Quando a última revisão profunda terminou (ver SyncStatus.ultimaRevisaoEm). */
+  ultimaRevisaoEm: string | null;
   tempoReal: OrdersRealtimeStatus;
+  /**
+   * Telemetria unificada da sincronização, de todos os caminhos. É o bloco
+   * para responder "por que a tela parou?" em uma leitura.
+   */
+  sincronizacao: ObsSync;
 }
 
 /**
@@ -149,6 +166,8 @@ export async function getReadStatus(
   const man = await readManifest(cache, alvo);
   const st = await readStatus(cache, alvo);
   const updatedAt = man?.updatedAt ?? null;
+  const agoraMs = Date.now();
+  const sincronizacao = await lerObsSync(cache);
 
   let tempoReal: OrdersRealtimeStatus = {
     habilitado: false,
@@ -209,7 +228,11 @@ export async function getReadStatus(
     lastResult: st?.lastResult ?? null,
     lastSyncAt: st?.lastSyncAt ?? null,
     idadeSegundos: idadeEmSegundos(updatedAt),
+    agora: new Date(agoraMs).toISOString(),
+    idadeCheckSegundos: idadeEmSegundos(st?.lastSyncAt ?? null),
+    ultimaRevisaoEm: st?.ultimaRevisaoEm ?? null,
     tempoReal,
+    sincronizacao,
   };
 }
 

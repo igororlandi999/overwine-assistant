@@ -630,6 +630,12 @@ describe('GET /api/orders/status — telemetria de tempo real', () => {
     expect(b.tempoReal.habilitado).toBe(false);
     expect(b.tempoReal.pendentes).toBe(0);
     expect(b.tempoReal.ultimaNotificacaoEm).toBeNull();
+    // Campos do auto-refresh: relogio do servidor, idade do ultimo check e a
+    // telemetria unificada da sincronizacao — todos presentes mesmo zerados.
+    expect(Number.isFinite(Date.parse(b.agora))).toBe(true);
+    expect(b).toHaveProperty('idadeCheckSegundos');
+    expect(b).toHaveProperty('ultimaRevisaoEm');
+    expect(b.sincronizacao).toMatchObject({ totalTentativas: 0, totalFalhas: 0, ultimaOrigem: null });
   });
 
   it('com o segredo configurado, habilitado: true', async () => {

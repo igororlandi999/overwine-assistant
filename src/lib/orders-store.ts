@@ -23,6 +23,7 @@ import type { Cache } from './cache/cache.js';
 import type { OrderSlim } from '../services/orders.service.js';
 
 export type Alvo = 'ativos' | 'cancelados';
+export type OrigemPublicacao = 'full' | 'incremental' | 'webhook' | 'dashboard_refresh';
 
 export interface OrdersManifest {
   versao: number;
@@ -32,7 +33,12 @@ export interface OrdersManifest {
   oldestDate: string | null;
   chunkSize: number;
   updatedAt: string; // ISO
-  origem: 'full' | 'incremental' | 'webhook';
+  /**
+   * Quem publicou esta versão. `dashboard_refresh` é o passo rápido pedido
+   * por uma aba aberta (orders-recent-sync.service); `webhook` é o dreno de
+   * notificações; os outros dois são a reconciliação.
+   */
+  origem: OrigemPublicacao;
   /**
    * Quantos pedidos há em CADA chunk, na mesma ordem de `chunks`.
    *

@@ -104,9 +104,18 @@ export interface SyncStatus {
   ultimaVersao: number | null;
   totalRegistros: number;
   newestDate: string | null;
+  /** Quando CHECAMOS o Mercado Livre pela última vez — qualquer modo. */
   lastSyncAt: string | null;
   lastResult: 'ok' | 'parcial' | 'erro_parcial' | 'sem_novos' | 'sync_em_andamento' | 'job_em_andamento';
   emAndamento: boolean;
+  /**
+   * Quando a última REVISÃO PROFUNDA (passo incremental ou full) terminou —
+   * a que revisita os 250 pedidos conhecidos mais recentes e captura mudança
+   * de status fora da primeira página. O passo rápido (orders-recent-sync)
+   * atualiza `lastSyncAt`, mas NÃO este campo: é ele que diz ao auto-refresh
+   * quando vale gastar 5 páginas em vez de 1. Ausente em status antigos.
+   */
+  ultimaRevisaoEm?: string | null;
 }
 
 export interface SyncStepResult {
@@ -127,7 +136,12 @@ interface SyncOpts {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 // ── página com retries ──────────────────────────────────────────────────────
-async function fetchPageComRetry(
+/**
+ * Exportada porque o passo rápido (orders-recent-sync.service) lê a primeira
+ * página com a MESMA validação e os MESMOS retries: uma resposta malformada
+ * não pode virar "nada novo" silencioso em nenhum dos dois caminhos.
+ */
+export async function fetchPageComRetry(
   fetchPage: FetchOrdersPage,
   params: FetchOrdersPageParams,
   retries: number
@@ -165,6 +179,10 @@ async function readJob(cache: Cache, alvo: Alvo): Promise<SyncJob | null> {
     return null;
   }
 }
+/** Há um passo retomável (parcial) pendente para o alvo? O auto-refresh usa isto para terminá-lo antes de qualquer outra coisa. */
+export async function existeJobPendente(cache: Cache, alvo: Alvo): Promise<boolean> {
+  return (await readJob(cache, alvo)) !== null;
+}
 async function writeJob(cache: Cache, job: SyncJob): Promise<void> {
   await cache.set(jobKey(job.alvo), JSON.stringify(job));
 }
@@ -173,6 +191,20 @@ async function clearJob(cache: Cache, alvo: Alvo): Promise<void> {
 }
 async function writeStatus(cache: Cache, alvo: Alvo, status: SyncStatus): Promise<void> {
   await cache.set(statusKey(alvo), JSON.stringify(status));
+}
+/**
+ * Mescla um patch sobre o status persistido. Existe para que o passo rápido
+ * atualize `lastSyncAt` sem apagar `ultimaRevisaoEm`, e para que os caminhos
+ * daqui preservem o que o outro escreveu. Sem status anterior, parte do zero.
+ */
+export async function mesclarStatus(cache: Cache, alvo: Alvo, patch: Partial<SyncStatus>): Promise<SyncStatus> {
+  const atual = (await readStatus(cache, alvo)) ?? {
+    ultimaVersao: null, totalRegistros: 0, newestDate: null, lastSyncAt: null,
+    lastResult: 'sem_novos' as const, emAndamento: false, ultimaRevisaoEm: null,
+  };
+  const novo: SyncStatus = { ...atual, ...patch };
+  await writeStatus(cache, alvo, novo);
+  return novo;
 }
 export async function readStatus(cache: Cache, alvo: Alvo): Promise<SyncStatus | null> {
   const raw = await cache.get(statusKey(alvo));
@@ -217,7 +249,7 @@ async function lerBuildChunks(cache: Cache, keys: string[]): Promise<OrderSlim[]
  * mudança em status, paid_amount, total_amount, date_created, buyer, shipping
  * e order_items (e seus campos preservados). Não compara OrderInput cru.
  */
-function slimCanonico(o: OrderSlim): string {
+export function slimCanonico(o: OrderSlim): string {
   return JSON.stringify({
     id: String(o.id),
     status: o.status ?? null,
@@ -523,7 +555,7 @@ async function passoFull(
   await writeStatus(cache, alvo, {
     ultimaVersao: manifesto.versao, totalRegistros: manifesto.totalRegistros,
     newestDate: manifesto.newestDate, lastSyncAt: manifesto.updatedAt,
-    lastResult: 'ok', emAndamento: false,
+    lastResult: 'ok', emAndamento: false, ultimaRevisaoEm: manifesto.updatedAt,
   });
   return { ok: true, concluido: true, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: unicos.length };
 }
@@ -611,10 +643,11 @@ async function passoIncremental(
   if (novosPedidos === 0 && atualizados === 0) {
     await deleteBuildChunks(cache, job.chunkKeys);
     await clearJob(cache, alvo);
+    const agoraIso = new Date().toISOString();
     await writeStatus(cache, alvo, {
       ultimaVersao: manifestoBase.versao, totalRegistros: snapshotBase.length,
-      newestDate: newest(snapshotBase), lastSyncAt: new Date().toISOString(),
-      lastResult: 'sem_novos', emAndamento: false,
+      newestDate: newest(snapshotBase), lastSyncAt: agoraIso,
+      lastResult: 'sem_novos', emAndamento: false, ultimaRevisaoEm: agoraIso,
     });
     return { ok: true, concluido: false, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: 0, motivo: 'sem_novos' };
   }
@@ -628,7 +661,7 @@ async function passoIncremental(
   await writeStatus(cache, alvo, {
     ultimaVersao: manifesto.versao, totalRegistros: manifesto.totalRegistros,
     newestDate: manifesto.newestDate, lastSyncAt: manifesto.updatedAt,
-    lastResult: 'ok', emAndamento: false,
+    lastResult: 'ok', emAndamento: false, ultimaRevisaoEm: manifesto.updatedAt,
   });
   return { ok: true, concluido: true, retomavel: false, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos };
 }
@@ -640,6 +673,7 @@ async function statusResumo(
   emAndamento: boolean
 ): Promise<SyncStatus> {
   const man = await readManifest(cache, alvo);
+  const anterior = await readStatus(cache, alvo);
   return {
     ultimaVersao: man?.versao ?? null,
     totalRegistros: man?.totalRegistros ?? 0,
@@ -647,6 +681,9 @@ async function statusResumo(
     lastSyncAt: new Date().toISOString(),
     lastResult,
     emAndamento,
+    // Um passo parcial ou com erro não é uma revisão concluída: preserva a
+    // última que concluiu, em vez de apagá-la.
+    ultimaRevisaoEm: anterior?.ultimaRevisaoEm ?? null,
   };
 }
 

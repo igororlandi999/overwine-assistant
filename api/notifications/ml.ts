@@ -57,7 +57,7 @@ import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/h
 import { agendarEmSegundoPlano } from '../../src/lib/wait-until.js';
 import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import { receberNotificacao, drenarFila } from '../../src/services/orders-webhook.service.js';
-import { registrarDrenoPedido } from '../../src/lib/orders-events.js';
+import { registrarDrenoPedido, registrarRecebimento } from '../../src/lib/orders-events.js';
 
 /**
  * O corpo pode chegar já parseado pela Vercel ou como string bruta.
@@ -114,7 +114,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const k = typeof req.query.k === 'string' ? req.query.k : '';
     if (!k || !safeEquals(k, env.ML_WEBHOOK_SECRET)) {
+      // Contabilizado como recusa, com motivo próprio: é o sintoma de a URL
+      // registrada no painel do Mercado Livre não bater com ML_WEBHOOK_SECRET,
+      // e antes disto ele só existia no log de função — o status mostrava
+      // `recebidas: 0` e nada mais. Em setembro/2026 o ML entregou dezenas de
+      // notificações por hora aqui, todas recusadas, por semanas.
       console.warn(`[ml-notif] segredo invalido ip=${maskIp(ip)}`);
+      await registrarRecebimento(cache, { topico: '', orderId: null, duplicada: false, rejeitada: true, motivo: 'segredo_invalido' });
       return json(res, 401, { error: 'unauthorized' });
     }
 

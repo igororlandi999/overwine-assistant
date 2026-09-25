@@ -25,6 +25,8 @@ import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/h
 import { runSyncStep } from '../../src/services/orders-sync.service.js';
 import { drenarFila } from '../../src/services/orders-webhook.service.js';
 import { criarFetchOrder, criarFetchOrdersPage } from '../../src/lib/ml-orders.js';
+import { readManifest } from '../../src/lib/orders-store.js';
+import { registrarConclusaoSync, registrarFalhaSync, registrarTentativaSync } from '../../src/lib/sync-telemetry.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
@@ -69,7 +71,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const fetchPage = criarFetchOrdersPage(cache, uid);
 
     console.info(`[orders-sync] passo ip=${maskIp(ip)} alvo=${alvo} modo=${body.modo ?? 'auto'}`);
+    await registrarTentativaSync(cache, 'reconciliation');
+    const inicio = Date.now();
     const result = await runSyncStep(cache, fetchPage, { alvo, modo: body.modo });
+    // Telemetria unificada: só para o alvo que o dashboard lê. Lock ocupado
+    // não é falha nem conclusão — a reconciliação simplesmente tenta depois.
+    if (alvo === 'ativos' && result.motivo !== 'sync_em_andamento' && result.motivo !== 'job_em_andamento') {
+      if (!result.ok) {
+        await registrarFalhaSync(cache, 'reconciliation', result.motivo ?? 'falha');
+      } else {
+        const man = result.concluido ? await readManifest(cache, 'ativos') : null;
+        await registrarConclusaoSync(cache, {
+          origem: 'reconciliation', modo: body.modo === 'full' ? 'full' : 'incremental',
+          duracaoMs: Date.now() - inicio, chamadasML: result.paginasLidas,
+          novos: result.concluido ? result.novosPedidos : 0, atualizados: 0,
+          versaoPublicada: man?.versao ?? null,
+        });
+      }
+    }
     return json(res, 200, result);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Erro interno';
