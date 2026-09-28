@@ -60,6 +60,36 @@ import { receberNotificacao, drenarFila } from '../../src/services/orders-webhoo
 import { registrarDrenoPedido, registrarRecebimento } from '../../src/lib/orders-events.js';
 
 /**
+ * O segredo pode vir de dois lugares:
+ *
+ *   ?k=<segredo>                    forma original, mantida para testes e
+ *                                   compatibilidade;
+ *   /api/notifications/ml/<segredo> forma que o painel do Mercado Livre aceita.
+ *                                   O campo de callback recusa query string
+ *                                   ("O endereço deve ser válido"), então o
+ *                                   segredo só pode viajar no caminho.
+ *
+ * A forma em path chega aqui por um rewrite em vercel.json
+ * (`/api/notifications/ml/:k` → `/api/notifications/ml?k=:k`), sem função
+ * nova — o plano gratuito limita o número de funções. Ainda assim lemos o
+ * path como segundo recurso: se a plataforma entregar a URL original em vez
+ * da reescrita, o segredo continua sendo encontrado. Nunca é registrado em
+ * log nem em telemetria, em nenhuma das formas.
+ */
+function lerSegredo(req: VercelRequest): string {
+  const q = req.query?.k;
+  if (typeof q === 'string' && q !== '') return q;
+  const url = typeof req.url === 'string' ? req.url : '';
+  const m = url.match(/^\/api\/notifications\/ml\/([^/?#]+)/);
+  if (!m) return '';
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return '';
+  }
+}
+
+/**
  * O corpo pode chegar já parseado pela Vercel ou como string bruta.
  *
  * O ACESSO a `req.body` está dentro do try de propósito. O helper do
@@ -112,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
-    const k = typeof req.query.k === 'string' ? req.query.k : '';
+    const k = lerSegredo(req);
     if (!k || !safeEquals(k, env.ML_WEBHOOK_SECRET)) {
       // Contabilizado como recusa, com motivo próprio: é o sintoma de a URL
       // registrada no painel do Mercado Livre não bater com ML_WEBHOOK_SECRET,

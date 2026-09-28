@@ -47,8 +47,8 @@ import handler from '../api/notifications/ml.js';
 const SEGREDO = 'segredo-de-webhook-bem-longo';
 const UID = TEST_ENV.ML_USER_ID;
 
-function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown>; body: unknown }> = {}) {
-  return { method: 'POST', headers: {}, query: {}, body: undefined, ...o } as any;
+function mockReq(o: Partial<{ method: string; headers: Record<string, unknown>; query: Record<string, unknown>; body: unknown; url: string }> = {}) {
+  return { method: 'POST', headers: {}, query: {}, body: undefined, url: '/api/notifications/ml', ...o } as any;
 }
 function mockRes() {
   const r: any = { statusCode: 0, headers: {} as Record<string, string>, body: undefined };
@@ -130,6 +130,55 @@ describe('POST /api/notifications/ml — autenticação e método', () => {
     expect(obs.ultimaRejeicaoEm).not.toBeNull();
     expect(obs.totalRecebidas).toBe(0);
     expect(JSON.stringify(obs)).not.toContain('segredo-errado-de-atacante');
+  });
+
+  /**
+   * O painel do Mercado Livre recusa callback com query string ("O endereço
+   * deve ser válido"), então o segredo precisa poder viajar no path:
+   * /api/notifications/ml/<segredo>. É o MESMO ML_WEBHOOK_SECRET, a mesma
+   * comparação em tempo constante, e nada muda depois da autenticação.
+   */
+  it('segredo no PATH (forma do painel do ML) passa pela autenticação e enfileira', async () => {
+    const res = await chamar({ url: `/api/notifications/ml/${SEGREDO}`, query: {}, body: corpo() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+    expect(await tamanhoFila(cache)).toBe(1);
+  });
+
+  it('segredo no PATH com tópico irrelevante: 200 ignorada — o smoke de produção', async () => {
+    const res = await chamar({ url: `/api/notifications/ml/${SEGREDO}`, query: {}, body: corpo({ topic: 'items', resource: '/items/MLB1' }) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, ignorada: true });
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+
+  it('segredo errado no PATH é 401 e NÃO enfileira', async () => {
+    const res = await chamar({ url: '/api/notifications/ml/segredo-errado-no-path', query: {}, body: corpo() });
+    expect(res.statusCode).toBe(401);
+    expect(await tamanhoFila(cache)).toBe(0);
+  });
+
+  it('PATH com o segredo certo mais lixo depois (subcaminho) é 401', async () => {
+    const res = await chamar({ url: `/api/notifications/ml/${SEGREDO}x`, query: {}, body: corpo() });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('a query ?k= antiga continua funcionando, e tem precedência sobre o path', async () => {
+    const res = await chamar({ url: '/api/notifications/ml/qualquer-coisa', query: { k: SEGREDO }, body: corpo() });
+    expect(res.statusCode).toBe(200);
+    expect(await tamanhoFila(cache)).toBe(1);
+  });
+
+  it('o rewrite do path para query está declarado em vercel.json, sem função nova', async () => {
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const cfg = JSON.parse(readFileSync('vercel.json', 'utf8')) as { rewrites?: { source: string; destination: string }[] };
+    expect(cfg.rewrites).toContainEqual({ source: '/api/notifications/ml/:k', destination: '/api/notifications/ml?k=:k' });
+    // Plano gratuito: 12 funções por deploy. Contamos os arquivos de rota.
+    const contar = (dir: string): number => readdirSync(dir).reduce((n, f) => {
+      const p = `${dir}/${f}`;
+      return n + (statSync(p).isDirectory() ? contar(p) : (f.endsWith('.ts') ? 1 : 0));
+    }, 0);
+    expect(contar('api')).toBeLessThanOrEqual(12);
   });
 
   it('sem segredo na URL é 401', async () => {
@@ -245,6 +294,20 @@ describe('portão — o segredo e a query string não vazam', () => {
     expect(gravado).not.toContain('valor-marcado-xyz');
     expect(gravado).not.toContain('nao-deveria-persistir');
     expect(gravado).not.toContain('k=');
+  });
+
+  it('o segredo no PATH NAO vai para o log, certo ou errado', async () => {
+    const linhas: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation((...a: unknown[]) => { linhas.push(a.map(String).join(' ')); });
+    vi.spyOn(console, 'info').mockImplementation((...a: unknown[]) => { linhas.push(a.map(String).join(' ')); });
+    await chamar({ url: `/api/notifications/ml/${SEGREDO}`, query: {}, body: corpo() });
+    await chamar({ url: '/api/notifications/ml/segredo-errado-no-path-abc', query: {}, body: corpo() });
+    const tudo = linhas.join('\n');
+    expect(tudo).not.toContain(SEGREDO);
+    expect(tudo).not.toContain('segredo-errado-no-path-abc');
+    const gravado = (cache.store.get(CHAVE_OBS_NOTIF)?.v ?? '') + (cache.store.get(CHAVE_OBS_PROC)?.v ?? '');
+    expect(gravado).not.toContain(SEGREDO);
+    expect(gravado).not.toContain('segredo-errado-no-path-abc');
   });
 
   it('o segredo NAO vai para o log, nem quando esta errado', async () => {

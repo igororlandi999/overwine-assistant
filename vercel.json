@@ -1,4 +1,16 @@
 {
-  "regions": ["gru1"],
-  "functions": { "api/**/*.ts": { "maxDuration": 30 } }
+  "regions": [
+    "gru1"
+  ],
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/notifications/ml/:k",
+      "destination": "/api/notifications/ml?k=:k"
+    }
+  ]
 }
