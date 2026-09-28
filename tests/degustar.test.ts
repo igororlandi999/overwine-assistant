@@ -184,6 +184,40 @@ describe('ativação: a Degustar só existe quando o ambiente a liga', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+describe('preparação: semear e carregar a Degustar ANTES de ligá-la', () => {
+  it('conta inativa com credencial: seed e carga inicial (admin) funcionam; leitura, refresh, proxy e webhook continuam fechados', async () => {
+    delete process.env.CONTAS_ATIVAS;   // degustar-ml declarada, inativa
+    await degustar().del('ml:refresh_token'); await degustar().del('ml:access_token');
+
+    const seed = await chamar(seedHandler, { method: 'POST', headers: admin(), body: { code: `code-${DEGUSTAR}`, conta: 'degustar-ml' } });
+    expect(seed.statusCode).toBe(200);
+    expect(await degustar().get('ml:refresh_token')).toBe(`TG-${DEGUSTAR}-novo`);
+
+    const carga = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'degustar-ml', modo: 'incremental' } });
+    expect(carga.statusCode).toBe(200);
+    expect(carga.json().conta).toBe('degustar-ml');
+
+    expect((await chamar(ordersHandler, { query: { resource: 'status', contas: 'degustar-ml' }, headers: auth() })).json().error).toBe('conta_inativa');
+    expect((await chamar(refreshHandler, { method: 'POST', headers: auth(), body: { conta: 'degustar-ml' } })).json().error).toBe('conta_inativa');
+    expect((await chamar(mlHandler, { query: { op: 'reputation', conta: 'degustar-ml' }, headers: auth() })).json().error).toBe('conta_inativa');
+    const n = await chamar(notifHandler, { method: 'POST', query: { k: SEGREDO }, body: { _id: 'n-prep', topic: 'orders_v2', resource: '/orders/901', user_id: Number(DEGUSTAR), application_id: Number(TEST_ENV.ML_CLIENT_ID), attempts: 1, sent: new Date().toISOString() } });
+    expect(n.json()).toEqual({ ok: true, ignorada: true });
+  });
+
+  it('preparação sem a credencial de identidade: recusada (conta_sem_credencial)', async () => {
+    delete process.env.CONTAS_ATIVAS; delete process.env.ML_DEGUSTAR_USER_ID;
+    const seed = await chamar(seedHandler, { method: 'POST', headers: admin(), body: { code: `code-${DEGUSTAR}`, conta: 'degustar-ml' } });
+    expect(seed.statusCode).toBe(400);
+    expect(seed.json().error).toBe('conta_sem_credencial');
+  });
+
+  it('preparação de conta sem adaptador (amazon): conta_sem_suporte', async () => {
+    const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon' } });
+    expect(r.json().error).toBe('conta_sem_suporte');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 describe('pedidos e catálogo separados; nenhuma chamada da Degustar usa seller ou token da Overwine', () => {
   it('status/list de cada conta vêm do snapshot dela', async () => {
     const ow = (await chamar(ordersHandler, { query: { resource: 'status' }, headers: auth() })).json();

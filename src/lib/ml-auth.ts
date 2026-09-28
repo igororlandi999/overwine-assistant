@@ -139,8 +139,11 @@ export async function isChainSeeded(cache: Cache): Promise<boolean> {
  * as leituras seguintes seriam de outra loja. Por isso:
  *  - com `code`, o `user_id` vem na própria resposta do token e é conferido
  *    ANTES de gravar qualquer coisa;
- *  - com `refreshToken`, a resposta do refresh também traz `user_id`; se
- *    divergir, o que foi gravado é DESFEITO e a cadeia anterior restaurada.
+ *  - com `refreshToken`, o token é trocado DIRETO no Mercado Livre (sem
+ *    passar pelo cache) e o `user_id` da resposta é conferido; só então a
+ *    cadeia nova é publicada. Uma requisição concorrente que renove o token
+ *    da conta nesse meio-tempo continua vendo a cadeia anterior, nunca a
+ *    candidata — gravar primeiro e restaurar depois abriria essa janela.
  * Sem `userIdEsperado` (chamadas antigas), vale ML_USER_ID — a legada.
  */
 export async function seedTokens(
@@ -173,35 +176,26 @@ export async function seedTokens(
   }
 
   if (input.refreshToken) {
-    // Guarda a cadeia anterior para restaurar se o vendedor não for o esperado.
-    const refreshAnterior = await cache.get(K.refresh);
-    const accessAnterior = await cache.get(K.access);
-    await cache.set(K.refresh, input.refreshToken, REFRESH_TTL_S);
-    await cache.del(K.access);
-    let userId: number | undefined;
-    try {
-      const data = await mlTokenRequest({
-        grant_type: 'refresh_token',
-        client_id: env.ML_CLIENT_ID,
-        client_secret: env.ML_CLIENT_SECRET,
-        refresh_token: input.refreshToken,
-      });
-      if (!data.access_token) throw new Error(`Falha ao renovar token ML: ${data.message || data.error || 'sem detalhe'}`);
-      if (!data.user_id || String(data.user_id) !== esperado) {
-        throw new Error(`user_id do refresh token (${data.user_id ?? 'ausente'}) difere do vendedor esperado (${esperado}). Semeadura recusada.`);
-      }
-      userId = data.user_id;
-      if (data.refresh_token) await cache.set(K.refresh, data.refresh_token, REFRESH_TTL_S);
-      const expiresIn = data.expires_in ?? 21600;
-      const tok: AccessToken = { token: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
-      await cache.set(K.access, JSON.stringify(tok), Math.max(expiresIn - 60, 60));
-      return { userId, expiresAt: tok.expiresAt };
-    } catch (e) {
-      // Restaura o que havia: uma semeadura errada não pode derrubar a conta.
-      if (refreshAnterior !== null) await cache.set(K.refresh, refreshAnterior, REFRESH_TTL_S); else await cache.del(K.refresh);
-      if (accessAnterior !== null) await cache.set(K.access, accessAnterior, 60); else await cache.del(K.access);
-      throw e;
+    // Troca o refresh token candidato DIRETO no ML, sem tocar no cache: até a
+    // conferência do vendedor passar, a cadeia publicada é a anterior.
+    const data = await mlTokenRequest({
+      grant_type: 'refresh_token',
+      client_id: env.ML_CLIENT_ID,
+      client_secret: env.ML_CLIENT_SECRET,
+      refresh_token: input.refreshToken,
+    });
+    if (!data.access_token) throw new Error(`Falha ao renovar token ML: ${data.message || data.error || 'sem detalhe'}`);
+    if (!data.user_id || String(data.user_id) !== esperado) {
+      throw new Error(`user_id do refresh token (${data.user_id ?? 'ausente'}) difere do vendedor esperado (${esperado}). Semeadura recusada; nada foi gravado.`);
     }
+    // Publica a cadeia nova: o refresh devolvido (o candidato já foi consumido
+    // pelo ML, que os rotaciona) e o access token. Refresh primeiro, como na
+    // renovação normal — o antigo já morreu do lado do ML.
+    await cache.set(K.refresh, data.refresh_token ?? input.refreshToken, REFRESH_TTL_S);
+    const expiresIn = data.expires_in ?? 21600;
+    const tok: AccessToken = { token: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
+    await cache.set(K.access, JSON.stringify(tok), Math.max(expiresIn - 60, 60));
+    return { userId: data.user_id, expiresAt: tok.expiresAt };
   }
 
   throw new Error('Informe { code } ou { refreshToken }.');

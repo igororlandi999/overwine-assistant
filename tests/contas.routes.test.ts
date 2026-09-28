@@ -188,10 +188,15 @@ describe('acoes — uma conta explicita ou a legada', () => {
     const s = mockRes();
     await shippingHandler(mockReq({ method: 'POST', headers: admin(), body: { conta: 'xpto' } }), s);
     expect(s.statusCode).toBe(400);
+    // seed e rota de PREPARACAO: aceita conta declarada e inativa, mas exige a
+    // credencial de identidade (ML_DEGUSTAR_USER_ID) — sem ela, 400.
     const seed = mockRes();
     await seedHandler(mockReq({ method: 'POST', headers: admin(), body: { refreshToken: 'TG-x', conta: 'degustar-ml' } }), seed);
     expect(seed.statusCode).toBe(400);
-    expect(seed.json().error).toBe('conta_inativa');
+    expect(seed.json().error).toBe('conta_sem_credencial');
+    const inexistente = mockRes();
+    await seedHandler(mockReq({ method: 'POST', headers: admin(), body: { refreshToken: 'TG-x', conta: 'xpto' } }), inexistente);
+    expect(inexistente.json().error).toBe('conta_invalida');
   });
 
   it('GET /api/ml/<op>: conta na query e removida dos parametros da operacao; invalida e 400', async () => {

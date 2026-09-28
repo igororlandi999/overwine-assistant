@@ -77,12 +77,40 @@ describe('seedTokens', () => {
     expect(await cache.get('ml:refresh_token')).toBe('TG-2');
   });
 
-  it('refresh token de OUTRO vendedor: recusa e restaura a cadeia anterior', async () => {
+  it('refresh token de OUTRO vendedor: recusa e NADA e gravado — a cadeia anterior nunca saiu do lugar', async () => {
     await cache.set('ml:refresh_token', 'TG-anterior', 3600);
+    await cache.set('ml:access_token', JSON.stringify({ token: 'AT-anterior', expiresAt: Date.now() + 3600_000 }), 3600);
+    const escritas: string[] = [];
+    const setOriginal = cache.set.bind(cache);
+    cache.set = async (k: string, v: string, ttl?: number) => { escritas.push(k); return setOriginal(k, v, ttl); };
     mockML({ access_token: 'AT-x', refresh_token: 'TG-x', expires_in: 21600, user_id: 999 });
     await expect(seedTokens(cache, { refreshToken: 'TG-de-outra-loja' })).rejects.toThrow(/difere do vendedor esperado/);
+    expect(escritas).toEqual([]);                                   // nenhuma escrita, nem transitoria
     expect(await cache.get('ml:refresh_token')).toBe('TG-anterior');
-    expect(await cache.get('ml:access_token')).toBeNull();
+    expect(JSON.parse((await cache.get('ml:access_token'))!).token).toBe('AT-anterior');
+  });
+
+  it('semeadura errada em voo: uma renovacao CONCORRENTE nunca ve o token candidato', async () => {
+    await cache.set('ml:refresh_token', 'TG-anterior', 3600);
+    // access expirando: getAccessToken vai renovar com o refresh que estiver no cache
+    await cache.set('ml:access_token', JSON.stringify({ token: 'AT-velho', expiresAt: Date.now() + 1000 }), 3600);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const p = new URLSearchParams(String(init?.body));
+      const rt = p.get('refresh_token');
+      if (rt === 'TG-de-outra-loja') {
+        await new Promise(r => setTimeout(r, 60));   // a semeadura errada demora
+        return new Response(JSON.stringify({ access_token: 'AT-errado', refresh_token: 'TG-errado', expires_in: 21600, user_id: 999 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ access_token: 'AT-renovado', refresh_token: 'TG-renovado', expires_in: 21600, user_id: Number(TEST_ENV.ML_USER_ID) }), { status: 200 });
+    });
+    const [semente, renovacao] = await Promise.allSettled([
+      seedTokens(cache, { refreshToken: 'TG-de-outra-loja' }),
+      getAccessToken(cache),
+    ]);
+    expect(semente.status).toBe('rejected');
+    expect(renovacao.status).toBe('fulfilled');
+    expect((renovacao as PromiseFulfilledResult<{ token: string }>).value.token).toBe('AT-renovado');
+    expect(await cache.get('ml:refresh_token')).toBe('TG-renovado');   // renovou a partir de TG-anterior, nunca do candidato
   });
 
   it('vendedor esperado explicito (conta nao legada): confere contra ele, nao contra ML_USER_ID', async () => {

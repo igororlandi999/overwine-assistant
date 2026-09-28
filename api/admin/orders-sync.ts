@@ -63,7 +63,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Ação: UMA conta. O GitHub Actions atual não envia conta → legada.
     let conta;
     try {
-      conta = resolverContaDeAcao(body.conta);
+      conta = resolverContaDeAcao(body.conta, { preparacao: true });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;

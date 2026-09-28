@@ -53,7 +53,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Semeadura é AÇÃO: uma conta, e os tokens vão para o espaço dela.
     let conta;
     try {
-      conta = resolverContaDeAcao(contaParam);
+      conta = resolverContaDeAcao(contaParam, { preparacao: true });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;

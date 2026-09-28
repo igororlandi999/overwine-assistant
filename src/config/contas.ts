@@ -203,12 +203,25 @@ export function resolverContaUnicaDeLeitura(param: unknown): Conta {
 /**
  * Ação (escrita, sincronização, proxy, semeadura): `conta` ausente → legada
  * (compatibilidade da transição); lista → erro `conta_unica`; id → validado.
+ *
+ * `preparacao: true` é o modo das rotas de ADMIN (semeadura, carga inicial,
+ * envios), protegidas por ADMIN_KEY: aceita uma conta declarada e AINDA
+ * INATIVA, desde que seja do Mercado Livre e tenha a credencial de identidade
+ * configurada. É o que permite semear os tokens e carregar o histórico da
+ * Degustar ANTES de ligá-la — ligar uma conta sem tokens prontos deixaria o
+ * dashboard e o webhook batendo numa conta vazia. Leituras, refresh do
+ * dashboard, proxy e webhook nunca usam este modo.
  */
-export function resolverContaDeAcao(param: unknown): Conta {
+export function resolverContaDeAcao(param: unknown, opts: { preparacao?: boolean } = {}): Conta {
   const ids = normalizarLista(param);
   if (ids === null) return contaLegada();
   if (ids.length > 1) throw new ContaInvalidaError('conta_unica', ids.join(','));
-  return validarUma(ids[0]);
+  if (!opts.preparacao) return validarUma(ids[0]);
+  const c = contaPorId(ids[0]);
+  if (!c) throw new ContaInvalidaError('conta_invalida', ids[0]);
+  if (c.canal !== 'ml') throw new ContaInvalidaError('conta_sem_suporte', c.id);
+  if (!c.ml || !process.env[c.ml.userIdEnv]) throw new ContaInvalidaError('conta_sem_credencial', c.id);
+  return c;
 }
 
 /** Conta ML cujo `user_id` (do ML) é este. `null` se nenhuma conta ativa o tem. */
