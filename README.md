@@ -441,10 +441,14 @@ webhook só a enxergam depois de `CONTAS_ATIVAS`. Ninguém vê uma conta vazia.
    resposta traz `conta: "degustar-ml"`, `user_id_validado` e a expiração do
    access token; os tokens ficam em `c:degustar-ml:ml:*`, nunca no espaço da
    Overwine. Vendedor diferente do `ML_DEGUSTAR_USER_ID` → 500 e nada gravado.
-4. **Carga inicial** (ainda inativa): `POST /api/admin/orders-sync` com
-   `{ "alvo": "ativos", "conta": "degustar-ml" }`, repetindo até
-   `concluido: true` (5 páginas por chamada; o rate limit do endpoint é 10 por
-   10 min). Opcional: `POST /api/admin/shipping-sync` com `{ "conta": "degustar-ml" }`.
+4. **Carga inicial** (ainda inativa, preparação deliberada):
+   `POST /api/admin/orders-sync` com
+   `{ "alvo": "ativos", "conta": "degustar-ml", "preparacao": true }`,
+   repetindo até `concluido: true` (5 páginas por chamada; o rate limit do
+   endpoint é 10 por 10 min). Opcional: `POST /api/admin/shipping-sync` com
+   `{ "conta": "degustar-ml", "preparacao": true }`. Sem `preparacao: true`
+   a conta inativa responde 400 — é assim que a rotina automática do GitHub
+   Actions a pula até a ativação.
 5. **Ativar**: `CONTAS_ATIVAS=degustar-ml` na Vercel e redeploy. A partir daí
    o webhook aceita o `user_id` da Degustar, o GitHub Actions deixa de pular a
    entrada dela, e `GET /api/orders/status?contas=degustar-ml` responde.

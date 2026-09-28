@@ -31,6 +31,11 @@ jobs:
       # ATIVA no backend (CONTAS_ATIVAS); enquanto não estiver, o endpoint
       # responde 400 conta_inativa e o passo é PULADO, sem sujar o resultado
       # nem atrasar a Overwine, que roda em paralelo na própria entrada.
+      #
+      # Esta rotina NUNCA envia `preparacao: true`: preparar uma conta (seed,
+      # carga inicial antes de ativar) é ato deliberado de quem opera, com a
+      # ADMIN_KEY, e não da automação — uma conta inativa e sem tokens aqui
+      # só produziria falha vermelha de hora em hora.
       matrix:
         include:
           - nome: oficial

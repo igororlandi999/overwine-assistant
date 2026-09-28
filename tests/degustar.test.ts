@@ -193,9 +193,15 @@ describe('preparação: semear e carregar a Degustar ANTES de ligá-la', () => {
     expect(seed.statusCode).toBe(200);
     expect(await degustar().get('ml:refresh_token')).toBe(`TG-${DEGUSTAR}-novo`);
 
-    const carga = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'degustar-ml', modo: 'incremental' } });
+    // a rotina automatica (sem `preparacao`) respeita o estado: inativa = 400, pulada pelo Actions
+    const automatica = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'degustar-ml' } });
+    expect(automatica.statusCode).toBe(400);
+    expect(automatica.json().error).toBe('conta_inativa');
+    // a preparacao deliberada passa
+    const carga = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'degustar-ml', modo: 'incremental', preparacao: true } });
     expect(carga.statusCode).toBe(200);
     expect(carga.json().conta).toBe('degustar-ml');
+    expect((await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'degustar-ml', preparacao: 'true' } })).statusCode).toBe(400);   // so booleano
 
     expect((await chamar(ordersHandler, { query: { resource: 'status', contas: 'degustar-ml' }, headers: auth() })).json().error).toBe('conta_inativa');
     expect((await chamar(refreshHandler, { method: 'POST', headers: auth(), body: { conta: 'degustar-ml' } })).json().error).toBe('conta_inativa');
@@ -212,7 +218,7 @@ describe('preparação: semear e carregar a Degustar ANTES de ligá-la', () => {
   });
 
   it('preparação de conta sem adaptador (amazon): conta_sem_suporte', async () => {
-    const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon' } });
+    const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon', preparacao: true } });
     expect(r.json().error).toBe('conta_sem_suporte');
   });
 });

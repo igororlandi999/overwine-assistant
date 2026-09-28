@@ -57,13 +57,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       acao?: 'sincronizar' | 'drenar';
       max?: number;
       conta?: unknown;
+      /**
+       * `true` = preparação DELIBERADA de uma conta ainda inativa (carga
+       * inicial antes de ligá-la). Sem isto, a rota respeita o estado
+       * operacional: conta inativa é 400, e a rotina automática do GitHub
+       * Actions — que nunca envia esta flag — a pula.
+       */
+      preparacao?: unknown;
     };
     const alvo = body.alvo === 'cancelados' ? 'cancelados' : 'ativos';
 
     // Ação: UMA conta. O GitHub Actions atual não envia conta → legada.
     let conta;
     try {
-      conta = resolverContaDeAcao(body.conta, { preparacao: true });
+      conta = resolverContaDeAcao(body.conta, { preparacao: body.preparacao === true });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;

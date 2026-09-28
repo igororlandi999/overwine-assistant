@@ -56,12 +56,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Lock: dois passos simultâneos leriam o mesmo mapa e o segundo publicaria
     // por cima do primeiro, descartando envios já pagos em chamadas de API.
-    const body = (req.body ?? {}) as { limite?: number; concorrencia?: number; conta?: unknown };
+    const body = (req.body ?? {}) as { limite?: number; concorrencia?: number; conta?: unknown; preparacao?: unknown };
 
     // Ação: UMA conta (ausente = legada, como o GitHub Actions chama hoje).
     let conta;
     try {
-      conta = resolverContaDeAcao(body.conta, { preparacao: true });
+      conta = resolverContaDeAcao(body.conta, { preparacao: body.preparacao === true });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;
