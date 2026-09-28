@@ -251,8 +251,11 @@ esbarrado no lock ou falhado.
 Nada disso funciona só com o deploy. É preciso, em
 `https://developers.mercadolivre.com.br` → sua aplicação → **Notificações**:
 
-1. **URL de callback**:
-   `https://overwine-assistant.vercel.app/api/notifications/ml?k=<ML_WEBHOOK_SECRET>`
+1. **URL de callback**, com o segredo **no path** — o campo do painel recusa
+   query string ("O endereço deve ser válido"):
+   `https://overwine-assistant.vercel.app/api/notifications/ml/<ML_WEBHOOK_SECRET>`
+   (um rewrite em `vercel.json` a transforma em `?k=`, sem função nova; a
+   forma `?k=` continua aceita para testes)
 2. **Tópico**: marque **somente `orders_v2`**. Ele cobre o ciclo inteiro —
    criação, pagamento, cancelamento, reembolso. `created_orders` é aceito pelo
    backend por compatibilidade, mas nada depende dele: só dispara na criação, e
