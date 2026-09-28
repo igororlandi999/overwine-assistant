@@ -1,7 +1,11 @@
 /**
- * POST /api/auth/login   { password } → { session_token, expires_at }
+ * POST /api/auth/login   { password, persistent? } → { session_token, expires_at, persistent }
  * POST /api/auth/logout  (Bearer sess_...) → { ok }
- * GET  /api/auth/session (Bearer sess_...) → { ok, expires_at }
+ * GET  /api/auth/session (Bearer sess_...) → { ok, expires_at, persistent }
+ *
+ * `persistent: true` ("manter conectado neste navegador") cria uma sessão de
+ * 30 dias deslizantes (máximo 90), em vez de 12h/24h. Cada login cria a sua
+ * própria sessão, revogável pelo logout; nenhuma vira eterna.
  *
  * O session_token é um identificador OPACO e aleatório — não contém e não dá
  * acesso a nenhuma credencial do Mercado Livre. Nenhuma resposta deste
@@ -43,9 +47,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return json(res, 401, { error: 'Senha incorreta.' });
       }
 
-      const sess = await createSession(cache);
-      console.info(`[auth] login ok ip=${maskIp(ip)}`);
-      return json(res, 200, { session_token: sess.id, expires_at: sess.expiresAt });
+      const persistente = req.body?.persistent === true;
+      const sess = await createSession(cache, { persistente });
+      console.info(`[auth] login ok ip=${maskIp(ip)} persistente=${persistente}`);
+      return json(res, 200, { session_token: sess.id, expires_at: sess.expiresAt, persistent: sess.persistente });
     }
 
     if (action === 'logout') {
@@ -59,7 +64,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (req.method !== 'GET') return json(res, 405, { error: 'Use GET' });
       const sess = await validateSession(cache, readBearer(req));
       if (!sess) return json(res, 401, { ok: false });
-      return json(res, 200, { ok: true, expires_at: sess.expiresAt });
+      return json(res, 200, { ok: true, expires_at: sess.expiresAt, persistent: sess.persistente });
     }
 
     return json(res, 404, { error: 'Ação desconhecida.' });

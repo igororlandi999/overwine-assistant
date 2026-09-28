@@ -140,7 +140,7 @@ plano gratuito de propósito.
 | Rota | Método | Auth | Função |
 |---|---|---|---|
 | `/api/health` | GET | — (detalhe com `X-Admin-Key`) | `{ ok: true }` |
-| `/api/auth/login` | POST | senha | cria sessão opaca `sess_...` (12h deslizante, máx 24h) |
+| `/api/auth/login` | POST | senha (+ `persistent`) | cria sessão opaca `sess_...` (12h deslizante, máx 24h; com `persistent: true`, 30 dias deslizantes, máx 90) |
 | `/api/auth/logout` | POST | Bearer sess | destrói a sessão |
 | `/api/auth/session` | GET | Bearer sess | valida e renova a sessão |
 | `/api/chat` | POST | Bearer sess | assistente de vendas |

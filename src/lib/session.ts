@@ -7,10 +7,21 @@
  * funcionaria hoje no Chrome/Firefox, mas o Safari (ITP) bloqueia cookies
  * de terceiros por padrão, quebrando o dashboard no iPhone/Mac. Por isso a
  * sessão usa um token opaco enviado via header Authorization: Bearer sess_...
- * mantido EM MEMÓRIA no frontend (nunca em localStorage).
  *
- * - Vida útil: 12h deslizantes (renova a cada uso), máximo absoluto de 24h.
- * - Armazenada no Redis: sess:<id> → { createdAt, lastSeenAt }.
+ * O frontend guarda esse token — e SÓ ele — em localStorage ("manter
+ * conectado") ou sessionStorage. Nunca a senha, nunca token do ML: o id da
+ * sessão não contém nem dá acesso a credencial alguma, e é revogável um a um
+ * (cada login cria a sua; logout apaga a sua).
+ *
+ * Duas vidas úteis, escolhidas no login:
+ * - sessão comum: 12h deslizantes (renova a cada uso), máximo absoluto de 24h;
+ * - sessão persistente ("manter conectado"): 30 dias deslizantes, máximo
+ *   absoluto de 90 dias. Não é eterna: um navegador que ficar 30 dias sem
+ *   abrir o dashboard volta para a senha, e nenhum token vive mais de 90 dias
+ *   desde o login, por mais que seja usado.
+ * - Armazenada no Redis: sess:<id> → { createdAt, lastSeenAt, persistente }.
+ *   O TTL do Redis é a expiração deslizante: sessão sem uso some sozinha.
+ * - 256 bits de entropia (32 bytes aleatórios em hex).
  * - Brute force: rate limit por IP + bloqueio progressivo (ver api/auth).
  */
 import { randomBytes } from 'node:crypto';
@@ -18,24 +29,42 @@ import type { Cache } from './cache/cache.js';
 
 const SLIDING_TTL_S = 12 * 3600;
 const ABSOLUTE_MAX_MS = 24 * 3600 * 1000;
+export const PERSISTENT_SLIDING_TTL_S = 30 * 24 * 3600;
+export const PERSISTENT_ABSOLUTE_MAX_MS = 90 * 24 * 3600 * 1000;
 const PREFIX = 'sess_';
 
 interface SessionData {
   createdAt: number;
   lastSeenAt: number;
+  /** Ausente em sessões criadas antes desta versão → equivale a false. */
+  persistente?: boolean;
 }
 
 export interface SessionInfo {
   id: string;
   expiresAt: number; // estimativa (janela deslizante)
+  persistente: boolean;
 }
 
-export async function createSession(cache: Cache): Promise<SessionInfo> {
+function janela(persistente: boolean): { ttlS: number; maxMs: number; renovarAposMs: number } {
+  return persistente
+    // Renovar o TTL de 30 dias a cada uso seria uma escrita por requisição;
+    // uma por hora basta para a janela deslizante e não muda o resultado.
+    ? { ttlS: PERSISTENT_SLIDING_TTL_S, maxMs: PERSISTENT_ABSOLUTE_MAX_MS, renovarAposMs: 3600_000 }
+    : { ttlS: SLIDING_TTL_S, maxMs: ABSOLUTE_MAX_MS, renovarAposMs: 60_000 };
+}
+
+export async function createSession(
+  cache: Cache,
+  opts: { persistente?: boolean } = {}
+): Promise<SessionInfo> {
+  const persistente = opts.persistente === true;
   const id = PREFIX + randomBytes(32).toString('hex');
   const now = Date.now();
-  const data: SessionData = { createdAt: now, lastSeenAt: now };
-  await cache.set(`sess:${id}`, JSON.stringify(data), SLIDING_TTL_S);
-  return { id, expiresAt: now + SLIDING_TTL_S * 1000 };
+  const data: SessionData = { createdAt: now, lastSeenAt: now, persistente };
+  const { ttlS } = janela(persistente);
+  await cache.set(`sess:${id}`, JSON.stringify(data), ttlS);
+  return { id, expiresAt: now + ttlS * 1000, persistente };
 }
 
 /** Valida e renova (janela deslizante). Retorna null se inválida/expirada. */
@@ -52,18 +81,25 @@ export async function validateSession(cache: Cache, token: string | null): Promi
     return null;
   }
 
+  const persistente = data.persistente === true;
+  const { ttlS, maxMs, renovarAposMs } = janela(persistente);
   const now = Date.now();
-  if (now - data.createdAt > ABSOLUTE_MAX_MS) {
+  if (now - data.createdAt > maxMs) {
     await cache.del(`sess:${token}`);
     return null;
   }
 
-  // Renovação deslizante (regrava com TTL cheio), no máximo 1x/min p/ economizar Redis.
-  if (now - data.lastSeenAt > 60_000) {
+  // Renovação deslizante (regrava com TTL cheio), com um mínimo entre
+  // renovações para economizar Redis.
+  if (now - data.lastSeenAt > renovarAposMs) {
     data.lastSeenAt = now;
-    await cache.set(`sess:${token}`, JSON.stringify(data), SLIDING_TTL_S);
+    await cache.set(`sess:${token}`, JSON.stringify(data), ttlS);
   }
-  return { id: token, expiresAt: Math.min(now + SLIDING_TTL_S * 1000, data.createdAt + ABSOLUTE_MAX_MS) };
+  return {
+    id: token,
+    expiresAt: Math.min(now + ttlS * 1000, data.createdAt + maxMs),
+    persistente,
+  };
 }
 
 export async function destroySession(cache: Cache, token: string): Promise<void> {
