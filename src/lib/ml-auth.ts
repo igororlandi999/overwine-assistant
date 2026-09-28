@@ -129,14 +129,27 @@ export async function isChainSeeded(cache: Cache): Promise<boolean> {
 }
 
 /**
- * Semeia a cadeia. Aceita { code } (exchange OAuth) ou { refreshToken } (TG- válido).
- * Valida que o user_id da cadeia é o da conta OVERWINE.
+ * Semeia a cadeia de UMA conta. Aceita { code } (exchange OAuth) ou
+ * { refreshToken } (TG- válido).
+ *
+ * `userIdEsperado` é o `user_id` do Mercado Livre da conta que o chamador
+ * quer semear. A autorização é feita por uma PESSOA no navegador, e nada
+ * impede que ela entre com o vendedor errado: sem esta conferência, os tokens
+ * da Degustar poderiam parar no espaço da Overwine (ou o contrário) e todas
+ * as leituras seguintes seriam de outra loja. Por isso:
+ *  - com `code`, o `user_id` vem na própria resposta do token e é conferido
+ *    ANTES de gravar qualquer coisa;
+ *  - com `refreshToken`, a resposta do refresh também traz `user_id`; se
+ *    divergir, o que foi gravado é DESFEITO e a cadeia anterior restaurada.
+ * Sem `userIdEsperado` (chamadas antigas), vale ML_USER_ID — a legada.
  */
 export async function seedTokens(
   cache: Cache,
-  input: { code?: string; refreshToken?: string }
+  input: { code?: string; refreshToken?: string },
+  opts: { userIdEsperado?: string } = {}
 ): Promise<{ userId?: number; expiresAt: number }> {
   const env = getEnv();
+  const esperado = opts.userIdEsperado ?? env.ML_USER_ID;
 
   if (input.code) {
     const data = await mlTokenRequest({
@@ -149,8 +162,8 @@ export async function seedTokens(
     if (!data.access_token || !data.refresh_token) {
       throw new Error(`Falha no exchange do code: ${data.message || data.error || 'sem detalhe'}`);
     }
-    if (data.user_id && String(data.user_id) !== env.ML_USER_ID) {
-      throw new Error(`user_id da autorização (${data.user_id}) difere de ML_USER_ID. Semeadura recusada.`);
+    if (!data.user_id || String(data.user_id) !== esperado) {
+      throw new Error(`user_id da autorização (${data.user_id ?? 'ausente'}) difere do vendedor esperado (${esperado}). Semeadura recusada; nada foi gravado.`);
     }
     await cache.set(K.refresh, data.refresh_token, REFRESH_TTL_S);
     const expiresIn = data.expires_in ?? 21600;
@@ -160,10 +173,35 @@ export async function seedTokens(
   }
 
   if (input.refreshToken) {
+    // Guarda a cadeia anterior para restaurar se o vendedor não for o esperado.
+    const refreshAnterior = await cache.get(K.refresh);
+    const accessAnterior = await cache.get(K.access);
     await cache.set(K.refresh, input.refreshToken, REFRESH_TTL_S);
     await cache.del(K.access);
-    const tok = await getAccessToken(cache); // valida a cadeia imediatamente
-    return { expiresAt: tok.expiresAt };
+    let userId: number | undefined;
+    try {
+      const data = await mlTokenRequest({
+        grant_type: 'refresh_token',
+        client_id: env.ML_CLIENT_ID,
+        client_secret: env.ML_CLIENT_SECRET,
+        refresh_token: input.refreshToken,
+      });
+      if (!data.access_token) throw new Error(`Falha ao renovar token ML: ${data.message || data.error || 'sem detalhe'}`);
+      if (!data.user_id || String(data.user_id) !== esperado) {
+        throw new Error(`user_id do refresh token (${data.user_id ?? 'ausente'}) difere do vendedor esperado (${esperado}). Semeadura recusada.`);
+      }
+      userId = data.user_id;
+      if (data.refresh_token) await cache.set(K.refresh, data.refresh_token, REFRESH_TTL_S);
+      const expiresIn = data.expires_in ?? 21600;
+      const tok: AccessToken = { token: data.access_token, expiresAt: Date.now() + expiresIn * 1000 };
+      await cache.set(K.access, JSON.stringify(tok), Math.max(expiresIn - 60, 60));
+      return { userId, expiresAt: tok.expiresAt };
+    } catch (e) {
+      // Restaura o que havia: uma semeadura errada não pode derrubar a conta.
+      if (refreshAnterior !== null) await cache.set(K.refresh, refreshAnterior, REFRESH_TTL_S); else await cache.del(K.refresh);
+      if (accessAnterior !== null) await cache.set(K.access, accessAnterior, 60); else await cache.del(K.access);
+      throw e;
+    }
   }
 
   throw new Error('Informe { code } ou { refreshToken }.');

@@ -67,14 +67,31 @@ describe('seedTokens', () => {
 
   it('RECUSA semeadura de user_id diferente do ML_USER_ID', async () => {
     mockML({ access_token: 'AT-1', refresh_token: 'TG-1', expires_in: 21600, user_id: 999 });
-    await expect(seedTokens(cache, { code: 'TG-code' })).rejects.toThrow(/difere de ML_USER_ID/);
+    await expect(seedTokens(cache, { code: 'TG-code' })).rejects.toThrow(/difere do vendedor esperado/);
     expect(await cache.get('ml:refresh_token')).toBeNull();
   });
 
   it('semeia via refresh token direto e valida a cadeia na hora', async () => {
-    mockML({ access_token: 'AT-2', refresh_token: 'TG-2', expires_in: 21600 });
+    mockML({ access_token: 'AT-2', refresh_token: 'TG-2', expires_in: 21600, user_id: Number(TEST_ENV.ML_USER_ID) });
     await seedTokens(cache, { refreshToken: 'TG-inicial' });
     expect(await cache.get('ml:refresh_token')).toBe('TG-2');
+  });
+
+  it('refresh token de OUTRO vendedor: recusa e restaura a cadeia anterior', async () => {
+    await cache.set('ml:refresh_token', 'TG-anterior', 3600);
+    mockML({ access_token: 'AT-x', refresh_token: 'TG-x', expires_in: 21600, user_id: 999 });
+    await expect(seedTokens(cache, { refreshToken: 'TG-de-outra-loja' })).rejects.toThrow(/difere do vendedor esperado/);
+    expect(await cache.get('ml:refresh_token')).toBe('TG-anterior');
+    expect(await cache.get('ml:access_token')).toBeNull();
+  });
+
+  it('vendedor esperado explicito (conta nao legada): confere contra ele, nao contra ML_USER_ID', async () => {
+    mockML({ access_token: 'AT-d', refresh_token: 'TG-d', expires_in: 21600, user_id: 111 });
+    await expect(seedTokens(cache, { code: 'code-degustar' })).rejects.toThrow(/difere do vendedor esperado/);
+    mockML({ access_token: 'AT-d', refresh_token: 'TG-d', expires_in: 21600, user_id: 111 });   // Response nova: a anterior ja foi lida
+    const r = await seedTokens(cache, { code: 'code-degustar' }, { userIdEsperado: '111' });
+    expect(r.userId).toBe(111);
+    expect(await cache.get('ml:refresh_token')).toBe('TG-d');
   });
 });
 

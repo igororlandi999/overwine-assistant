@@ -25,14 +25,30 @@ jobs:
     strategy:
       # Um backend fora do ar NAO pode impedir a sincronizacao do outro.
       fail-fast: false
+      # Uma execução por backend E por conta. A conta viaja no corpo
+      # (`conta`); a legada (Overwine) continua sem conta, exatamente como
+      # antes — o backend a assume. A Degustar só sincroniza quando estiver
+      # ATIVA no backend (CONTAS_ATIVAS); enquanto não estiver, o endpoint
+      # responde 400 conta_inativa e o passo é PULADO, sem sujar o resultado
+      # nem atrasar a Overwine, que roda em paralelo na própria entrada.
       matrix:
         include:
           - nome: oficial
             url: https://overwine-assistant.vercel.app/api/admin/orders-sync
             secret: OVERWINE_ADMIN_KEY
+            conta: ''
+          - nome: oficial · degustar-ml
+            url: https://overwine-assistant.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_ADMIN_KEY
+            conta: degustar-ml
           - nome: preview
             url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
             secret: OVERWINE_PREVIEW_ADMIN_KEY
+            conta: ''
+          - nome: preview · degustar-ml
+            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
+            secret: OVERWINE_PREVIEW_ADMIN_KEY
+            conta: degustar-ml
 
     steps:
       - name: Validar configuração
@@ -53,6 +69,7 @@ jobs:
         env:
           ADMIN_KEY: ${{ secrets[matrix.secret] }}
           SYNC_URL: ${{ matrix.url }}
+          CONTA: ${{ matrix.conta }}
           # O endpoint lê no máximo ORDERS_SYNC_MAX_PAGES (5) páginas por
           # invocação e devolve committedOffset para retomar. Repetimos até
           # concluir em vez de esperar a próxima hora: uma chamada por hora
@@ -64,6 +81,12 @@ jobs:
 
           response_file="$(mktemp)"
           trap 'rm -f "$response_file"' EXIT
+
+          if [ -n "${CONTA:-}" ]; then
+            corpo="{\"alvo\":\"ativos\",\"conta\":\"$CONTA\"}"
+          else
+            corpo='{"alvo":"ativos"}'
+          fi
 
           passo=1
           while [ "$passo" -le "$MAX_PASSOS" ]; do
@@ -78,7 +101,7 @@ jobs:
                 --url "$SYNC_URL" \
                 --header "Content-Type: application/json" \
                 --header "x-admin-key: $ADMIN_KEY" \
-                --data '{"alvo":"ativos"}' \
+                --data "$corpo" \
                 --connect-timeout 15 \
                 --max-time 120 \
                 --output "$response_file" \
@@ -92,6 +115,13 @@ jobs:
 
             if [ "$http_code" = "429" ]; then
               echo "::warning::Rate limit atingido no passo $passo. O offset confirmado está salvo; a próxima execução continua daqui."
+              exit 0
+            fi
+
+            # Conta declarada mas ainda não ativada/credenciada no backend:
+            # não é falha da sincronização — é a Degustar esperando a conexão.
+            if [ "$http_code" = "400" ] && grep -qE '"error":"conta_(inativa|nao_habilitada|sem_credencial)"' "$response_file"; then
+              echo "::notice::Conta '$CONTA' ainda não está ativa no backend; passo pulado."
               exit 0
             fi
 

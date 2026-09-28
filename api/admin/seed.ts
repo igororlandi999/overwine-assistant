@@ -67,7 +67,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     console.info(`[seed] tentativa ip=${maskIp(ip)} conta=${conta.id} via=${code ? 'code' : 'refreshToken'}`);
-    const result = await seedTokens(cacheDados, { code, refreshToken });
+    const result = await seedTokens(cacheDados, { code, refreshToken }, { userIdEsperado: mlUserIdDaConta(conta) });
 
     return json(res, 200, {
       ok: true,

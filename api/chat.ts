@@ -1372,6 +1372,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = req.body;
     if (!isObj(body)) return erro(res, 400, 'invalid_request', 'Payload invalido.');
 
+    // Multi-conta (etapa 1): o assistente AINDA e mono-conta — le o snapshot
+    // legado (Overwine). Uma selecao de outra conta, ou de varias, e recusada
+    // de forma explicita: responder com os numeros da Overwine como se fossem
+    // da Degustar seria pior que nao responder. A adaptacao e a etapa 4.
+    const contasPedidas = (body as Record<string, unknown>).contas ?? (body as Record<string, unknown>).conta;
+    if (contasPedidas !== undefined) {
+      const lista = Array.isArray(contasPedidas) ? contasPedidas.map(String) : String(contasPedidas).split(',');
+      const ids = Array.from(new Set(lista.map(s => s.trim()).filter(Boolean)));
+      if (ids.length !== 1 || ids[0] !== 'overwine-ml') {
+        return erro(res, 400, 'assistente_mono_conta', 'O assistente responde apenas pela conta overwine-ml por enquanto; a selecao de outras contas ou de varias contas ainda nao e suportada.');
+      }
+      // A legada explicita e o mesmo que a ausente: segue como sempre.
+      delete (body as Record<string, unknown>).contas;
+      delete (body as Record<string, unknown>).conta;
+    }
+
     // Tamanho total do body medido em BYTES (utf8).
     let bodyBytes: number;
     try {

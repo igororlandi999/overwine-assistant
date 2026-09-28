@@ -25,25 +25,25 @@ function mockML(resposta: unknown, status = 200) {
 
 describe('allowlist do proxy', () => {
   it('rejeita operação desconhecida (sem proxy genérico)', async () => {
-    const r = await runOp(cache, 'qualquer-url', {});
+    const r = await runOp(cache, 'qualquer-url', {}, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(404);
   });
 
   it('valida parâmetros com zod (status inválido)', async () => {
-    const r = await runOp(cache, 'items-search', { status: 'hackeado', offset: 0 });
+    const r = await runOp(cache, 'items-search', { status: 'hackeado', offset: 0 }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(400);
     expect(String((r.data as any).error)).toMatch(/Parâmetros inválidos/);
   });
 
   it('impõe limites: máximo 20 ids por lote', async () => {
     const ids = Array.from({ length: 21 }, (_, i) => `MLB12345${String(i).padStart(2, '0')}`).join(',');
-    const r = await runOp(cache, 'items', { ids });
+    const r = await runOp(cache, 'items', { ids }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(400);
   });
 
   it('monta a URL no servidor e usa Bearer (nunca query string)', async () => {
     const spy = mockML({ results: ['MLB1'], paging: { total: 1, offset: 0, limit: 100 } });
-    const r = await runOp(cache, 'items-search', { status: 'active', offset: '0' });
+    const r = await runOp(cache, 'items-search', { status: 'active', offset: '0' }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(200);
     const [url, init] = spy.mock.calls[0];
     expect(String(url)).toBe('https://api.mercadolibre.com/users/2329718196/items/search?status=active&limit=100&offset=0');
@@ -60,7 +60,7 @@ describe('allowlist do proxy', () => {
       }],
       paging: { total: 1, offset: 0, limit: 50 },
     });
-    const r = await runOp(cache, 'orders', {});
+    const r = await runOp(cache, 'orders', {}, TEST_ENV.ML_USER_ID);
     const o = (r.data as any).results[0];
     expect(o.paid_amount).toBe(100);
     expect(o.internal_ml_field).toBeUndefined();
@@ -72,7 +72,7 @@ describe('allowlist do proxy', () => {
   it('nenhuma resposta de operação contém access token', async () => {
     mockML({ results: [], paging: { total: 0 } });
     for (const opName of ['orders', 'promotions', 'reputation'] as const) {
-      const r = await runOp(cache, opName, {});
+      const r = await runOp(cache, opName, {}, TEST_ENV.ML_USER_ID);
       expect(JSON.stringify(r.data)).not.toContain('AT-teste');
       expect(JSON.stringify(r.data)).not.toContain('access_token');
     }
@@ -83,7 +83,7 @@ describe('allowlist do proxy', () => {
     const r = await runOp(cache, 'promotion-item-set', {
       id: 'MLB5345213082', deal_price: 129.9, stock: 5,
       promotion_type: 'LIGHTNING', promotion_id: 'P-123',
-    });
+    }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(200);
     const [url, init] = spy.mock.calls[0];
     expect(String(url)).toContain('/seller-promotions/items/MLB5345213082');
@@ -97,7 +97,7 @@ describe('allowlist do proxy', () => {
     const r = await runOp(cache, 'promotion-item-set', {
       id: 'MLB5345213082', deal_price: -5, stock: 5,
       promotion_type: 'LIGHTNING', promotion_id: 'P-123',
-    });
+    }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(400);
   });
 
@@ -106,7 +106,7 @@ describe('allowlist do proxy', () => {
     const r = await runOp(cache, 'promotion-item-set', {
       id: 'MLB5345213082', deal_price: 10, stock: 1,
       promotion_type: 'LIGHTNING', promotion_id: 'P-1',
-    });
+    }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(409);
     expect(JSON.stringify(r.data)).not.toContain('AT-teste');
     expect((r.data as any).cause[0].error_message).toBe('duplicado');
@@ -235,9 +235,9 @@ describe('allowlist do proxy', () => {
   });
 
   it('pub-campanhas valida os parametros', async () => {
-    expect((await runOp(cache, 'pub-campanhas', { date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
-    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 'abc', date_from: '2026-07-01', date_to: '2026-07-31' })).status).toBe(400);
-    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 671874, date_from: 'ontem', date_to: '2026-07-31' })).status).toBe(400);
+    expect((await runOp(cache, 'pub-campanhas', { date_from: '2026-07-01', date_to: '2026-07-31' }, TEST_ENV.ML_USER_ID)).status).toBe(400);
+    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 'abc', date_from: '2026-07-01', date_to: '2026-07-31' }, TEST_ENV.ML_USER_ID)).status).toBe(400);
+    expect((await runOp(cache, 'pub-campanhas', { advertiser_id: 671874, date_from: 'ontem', date_to: '2026-07-31' }, TEST_ENV.ML_USER_ID)).status).toBe(400);
   });
 
   it('pub-campanhas: resposta inesperada vira lista vazia, nao quebra', () => {
@@ -281,7 +281,7 @@ describe('allowlist do proxy', () => {
     const r = await runOp(cache, 'pub-metricas', {
       advertiser_id: 671874, campaign_id: 1, date_from: '2026-07-01', date_to: '2026-07-31',
       variante: '../../../qualquer-coisa',
-    });
+    }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(400);
   });
 });

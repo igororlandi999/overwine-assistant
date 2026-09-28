@@ -69,11 +69,33 @@ interface Registro {
 
 const REG = registro as unknown as Registro;
 
-const CONTAS: readonly Conta[] = REG.contas.map(c => ({
+const DECLARADAS: readonly Conta[] = REG.contas.map(c => ({
   ...c,
   canal: c.canal as Canal,
   legada: c.legada === true,
 }));
+
+/**
+ * Ativação por AMBIENTE: `CONTAS_ATIVAS=degustar-ml,alemmar-amazon` liga
+ * contas declaradas no registro sem mudar código nem redeploy do JSON. É o
+ * interruptor de produção: a Degustar fica declarada aqui desde a etapa 1 e
+ * só passa a existir para as rotas quando a variável a nomear — depois da
+ * autorização do vendedor e da semeadura dos tokens. Só ids do registro
+ * contam; um id desconhecido na variável é ignorado (e apontado em
+ * `listarContas`, para diagnóstico).
+ */
+function ativasPorAmbiente(): Set<string> {
+  const v = process.env.CONTAS_ATIVAS ?? '';
+  return new Set(v.split(',').map(s => s.trim()).filter(Boolean));
+}
+function comAtivacao(c: Conta): Conta {
+  return c.ativo || !ativasPorAmbiente().has(c.id) ? c : { ...c, ativo: true };
+}
+/** Visão atual (JSON + ambiente). Recalculada a cada chamada: o ambiente pode mudar nos testes. */
+function contasAtuais(): Conta[] {
+  return DECLARADAS.map(comAtivacao);
+}
+const CONTAS = DECLARADAS;
 
 function validarRegistro(): void {
   const ids = new Set<string>();
@@ -95,17 +117,22 @@ function validarRegistro(): void {
 }
 validarRegistro();
 
-/** Todas as contas do registro, ativas ou não (para painel e diagnóstico). */
+/** Todas as contas do registro, com a ativação do ambiente aplicada (para painel e diagnóstico). */
 export function listarContas(): readonly Conta[] {
-  return CONTAS;
+  return contasAtuais();
 }
 
 export function contaLegada(): Conta {
-  return CONTAS.find(c => c.legada)!;
+  return contasAtuais().find(c => c.legada)!;
 }
 
 export function contaPorId(id: string): Conta | null {
-  return CONTAS.find(c => c.id === id) ?? null;
+  return contasAtuais().find(c => c.id === id) ?? null;
+}
+
+/** Contas ATIVAS agora — o que a reconciliação e o diagnóstico percorrem. */
+export function contasAtivas(): Conta[] {
+  return contasAtuais().filter(c => c.ativo);
 }
 
 /** MULTI_CONTA_ENABLED — lida direto do ambiente para não acoplar ao getEnv() de cada rota. */
@@ -187,7 +214,7 @@ export function resolverContaDeAcao(param: unknown): Conta {
 /** Conta ML cujo `user_id` (do ML) é este. `null` se nenhuma conta ativa o tem. */
 export function contaPorMlUserId(userId: string | number): Conta | null {
   const alvo = String(userId);
-  for (const c of CONTAS) {
+  for (const c of contasAtuais()) {
     if (!c.ativo || c.canal !== 'ml' || !c.ml) continue;
     const v = process.env[c.ml.userIdEnv];
     if (v && String(v) === alvo) return c;

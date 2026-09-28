@@ -374,6 +374,64 @@ exige igualdade com `tests/fixtures/legado-golden.json`, gerada pelo código
 anterior à etapa 0 (`5e76642`). Regerar só com `GOLDEN_UPDATE=1`, e só quando
 uma mudança de comportamento for intencional e revisada.
 
+### Etapa 1 — Mercado Livre da Degustar
+
+A Degustar (`degustar-ml`) está declarada no registro e **desativada**. Nada
+dela existe para as rotas até duas variáveis de produção serem definidas:
+
+| variável | valor | efeito |
+|---|---|---|
+| `ML_DEGUSTAR_USER_ID` | `user_id` do vendedor Degustar no Mercado Livre | credencial de identidade da conta (sem ela: `conta_sem_credencial`) |
+| `CONTAS_ATIVAS` | `degustar-ml` | liga a conta neste ambiente (sem ela: `conta_inativa`) |
+| `MULTI_CONTA_ENABLED` | `true` | permite contas além da legada (sem ela: `conta_nao_habilitada`) |
+
+O que a etapa 1 garante, com testes de duas contas simuladas
+(`tests/degustar.test.ts`):
+
+- **tokens por conta**: a cadeia `ml:*` vive no prefixo `c:degustar-ml:`;
+  renovação simultânea das duas contas produz tokens de vendedores diferentes;
+- **nenhuma chamada da Degustar usa o seller ou o token da Overwine**: o proxy
+  (`runOp` recebe o vendedor da conta), o catálogo, os pedidos, os envios e a
+  sincronização montam o path com o `user_id` da conta e usam o cache dela;
+- **webhook roteado pelo `user_id`**: fila, dedup, lock, dreno e snapshot da
+  conta correspondente; vendedor sem conta ativa continua recusado
+  (`user_id_divergente`), com a recusa registrada no espaço legado;
+- **refresh e reconciliação por conta**: a Degustar tem lock, cooldown e
+  telemetria próprios; a frequência da Overwine não muda. O workflow do GitHub
+  Actions ganhou uma entrada por conta e **pula** (`notice`) a Degustar
+  enquanto o backend responder `conta_inativa`;
+- **semeadura confere o vendedor**: `POST /api/admin/seed` com
+  `{ "code": …, "conta": "degustar-ml" }` recusa (e não grava nada) se o
+  `user_id` devolvido pelo Mercado Livre não for o da conta; com refresh token,
+  uma cadeia errada é desfeita e a anterior restaurada;
+- **assistente**: ainda mono-conta; `contas`/`conta` diferente de
+  `overwine-ml` responde `400 assistente_mono_conta`.
+
+**Como conectar a Degustar (sem segredo neste README nem em chat):**
+
+1. **Autorização pelo vendedor.** O Leandro, logado na conta Degustar do
+   Mercado Livre, abre a URL de autorização do app OVERWINE
+   (`https://auth.mercadolivre.com.br/authorization?response_type=code&client_id=<ML_CLIENT_ID>&redirect_uri=<ML_REDIRECT_URI>`)
+   e aceita. O navegador é redirecionado para a `ML_REDIRECT_URI` com
+   `?code=TG-…` na barra de endereço. **O `code` vale poucos minutos** e é de
+   uso único.
+2. **Variáveis na Vercel** (projeto `overwine-assistant`, ambiente Production,
+   pelo painel ou por `vercel env add … production --sensitive`):
+   `ML_DEGUSTAR_USER_ID`, `CONTAS_ATIVAS=degustar-ml`,
+   `MULTI_CONTA_ENABLED=true`. Redeploy.
+3. **Semeadura**, da máquina de quem tem a `ADMIN_KEY` (nunca pelo chat):
+   `POST https://overwine-assistant.vercel.app/api/admin/seed` com header
+   `x-admin-key` e corpo `{ "code": "<code>", "conta": "degustar-ml" }`. A
+   resposta traz `conta: "degustar-ml"` e `user_id_validado`; um vendedor
+   diferente é recusado com 500 e nada é gravado.
+4. **Carga inicial**: `POST /api/admin/orders-sync` com
+   `{ "alvo": "ativos", "conta": "degustar-ml" }` até `concluido: true`
+   (o GitHub Actions também faz isso na próxima execução).
+5. **Validação de uma venda real**: com uma venda na Degustar, o log de
+   produção mostra `[ml-notif] enfileirada conta=degustar-ml pedido=…` e
+   `dreno conta=degustar-ml … novos=1`; `GET /api/orders/status?contas=degustar-ml`
+   avança de versão, e `GET /api/orders/status` (Overwine) **não** muda.
+
 ## Assistente (`/api/chat`)
 
 Não é um wrapper de prompt em cima do dashboard. O caminho é:

@@ -10,7 +10,7 @@
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getCache } from '../../src/lib/cache/cache.js';
-import { resolverContaDeAcao, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
 import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { runOp, OPS } from '../../src/ml/ops.js';
@@ -51,7 +51,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const rawParams = op.method === 'POST' ? (req.body === undefined ? {} : corpo) : query;
 
-    const result = await runOp(cacheDaConta(cache, conta), opName, rawParams);
+    const result = await runOp(cacheDaConta(cache, conta), opName, rawParams, mlUserIdDaConta(conta));
     return json(res, result.status, result.data);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Erro interno';

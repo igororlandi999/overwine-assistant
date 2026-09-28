@@ -410,8 +410,13 @@ export interface OpResult {
   data: unknown;
 }
 
-/** Executa uma operação da allowlist. Erros do ML voltam sem headers/tokens. */
-export async function runOp(cache: Cache, opName: string, rawParams: unknown): Promise<OpResult> {
+/**
+ * Executa uma operação da allowlist EM NOME DE UM VENDEDOR. `sellerId` é o
+ * `user_id` da conta cujo `cache` (e portanto token) foi passado — a rota
+ * resolve os dois juntos, então uma conta nunca chama o ML com o id de outra.
+ * Erros do ML voltam sem headers/tokens.
+ */
+export async function runOp(cache: Cache, opName: string, rawParams: unknown, sellerId: string): Promise<OpResult> {
   const op = OPS[opName];
   if (!op) return { status: 404, data: { error: `Operação desconhecida: ${opName}` } };
 
@@ -421,8 +426,8 @@ export async function runOp(cache: Cache, opName: string, rawParams: unknown): P
     return { status: 400, data: { error: `Parâmetros inválidos — ${detalhe}` } };
   }
 
-  const env = getEnv();
-  const path = op.path(parsed.data, env.ML_USER_ID);
+  if (!/^\d+$/.test(sellerId)) return { status: 500, data: { error: 'seller_id_invalido' } };
+  const path = op.path(parsed.data, sellerId);
 
   const init: RequestInit = { method: op.method };
   const headers: Record<string, string> = { ...(op.headers ?? {}) };

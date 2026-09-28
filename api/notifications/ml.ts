@@ -58,6 +58,8 @@ import { agendarEmSegundoPlano } from '../../src/lib/wait-until.js';
 import { criarFetchOrder } from '../../src/lib/ml-orders.js';
 import { receberNotificacao, drenarFila } from '../../src/services/orders-webhook.service.js';
 import { registrarDrenoPedido, registrarRecebimento } from '../../src/lib/orders-events.js';
+import { contaPorMlUserId, mlUserIdDaConta } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 
 /**
  * O segredo pode vir de dois lugares:
@@ -154,14 +156,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 401, { error: 'unauthorized' });
     }
 
+    // A notificação é da APLICAÇÃO: todo vendedor que autorizou o app entrega
+    // aqui, e o `user_id` do corpo diz de quem é. Ele escolhe a CONTA — fila,
+    // dedup, lock, snapshot e token são os dela. Vendedor sem conta ativa é
+    // recusado como sempre (`user_id_divergente`), com a telemetria de recusa
+    // no espaço legado, que é onde o diagnóstico já olha.
+    const corpo = lerCorpo(req);
+    const userIdCorpo = (corpo && typeof corpo === 'object' && !Array.isArray(corpo))
+      ? (corpo as { user_id?: unknown }).user_id : undefined;
+    const conta = (typeof userIdCorpo === 'number' || typeof userIdCorpo === 'string')
+      ? contaPorMlUserId(userIdCorpo) : null;
+    const cacheDados = conta ? cacheDaConta(cache, conta) : cache;
+    // Sem conta para o vendedor, o `mlUserId` esperado é o da legada: a
+    // conferência de `receberNotificacao` recusa e registra o motivo.
+    const mlUserId = conta ? mlUserIdDaConta(conta) : env.ML_USER_ID;
+
     const r = await receberNotificacao(
-      cache,
-      lerCorpo(req),
+      cacheDados,
+      corpo,
       // `application_id` do Mercado Livre É o client_id da aplicação. Não há
       // fonte nova nem valor duplicado aqui: ML_CLIENT_ID já é obrigatório
       // desde a primeira versão do backend, e é o mesmo número que aparece no
       // corpo da notificação.
-      { mlUserId: env.ML_USER_ID, applicationId: env.ML_CLIENT_ID },
+      { mlUserId, applicationId: env.ML_CLIENT_ID },
       { inicioMs }
     );
 
@@ -180,19 +197,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // aguardado. `waitUntil` recebe a promessa já em andamento e só pede ao
     // runtime que não congele a instância antes de ela terminar — a resposta
     // sai poucas linhas abaixo, sem depender disso.
+    const contaId = conta ? conta.id : 'legada';
     agendarEmSegundoPlano(
-      drenarFila(cache, criarFetchOrder(cache)).then(d => {
+      drenarFila(cacheDados, criarFetchOrder(cacheDados)).then(d => {
         console.info(
-          `[ml-notif] dreno processados=${d.processados} novos=${d.novos} ` +
+          `[ml-notif] dreno conta=${contaId} processados=${d.processados} novos=${d.novos} ` +
           `atualizados=${d.atualizados} falhas=${d.falhas} restantes=${d.restantes}`
         );
       }),
       'ml-notif'
     );
-    await registrarDrenoPedido(cache);
+    await registrarDrenoPedido(cacheDados);
 
     console.info(
-      `[ml-notif] enfileirada pedido=${r.orderId} fila=${r.fila} ackMs=${Date.now() - inicioMs}`
+      `[ml-notif] enfileirada conta=${contaId} pedido=${r.orderId} fila=${r.fila} ackMs=${Date.now() - inicioMs}`
     );
     return json(res, 200, { ok: true });
   } catch (e) {
