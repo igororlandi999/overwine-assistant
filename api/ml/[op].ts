@@ -10,6 +10,8 @@
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getCache } from '../../src/lib/cache/cache.js';
+import { resolverContaDeAcao, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { runOp, OPS } from '../../src/ml/ops.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
@@ -34,10 +36,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // 3) Params: query para GET/DELETE, body para POST.
-    const { op: _drop, ...query } = req.query as Record<string, unknown>;
-    const rawParams = op.method === 'POST' ? (req.body ?? {}) : query;
+    // O proxy fala com o ML EM NOME DE UMA conta: `conta` sai dos parâmetros
+    // antes da validação da operação e escolhe o token. Ausente = legada.
+    const { op: _drop, conta: contaQuery, ...query } = req.query as Record<string, unknown>;
+    const corpo = (op.method === 'POST' && req.body && typeof req.body === 'object') ? { ...(req.body as Record<string, unknown>) } : {};
+    const contaCorpo = corpo.conta;
+    delete corpo.conta;
+    let conta;
+    try {
+      conta = resolverContaDeAcao(contaQuery ?? contaCorpo);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const rawParams = op.method === 'POST' ? (req.body === undefined ? {} : corpo) : query;
 
-    const result = await runOp(cache, opName, rawParams);
+    const result = await runOp(cacheDaConta(cache, conta), opName, rawParams);
     return json(res, result.status, result.data);
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Erro interno';

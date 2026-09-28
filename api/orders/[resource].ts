@@ -39,6 +39,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
+import { resolverContaUnicaDeLeitura, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import type { Alvo } from '../../src/lib/orders-store.js';
@@ -65,6 +67,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return json(res, 405, { error: 'Use GET' });
   }
 
+  // `cache` é o do backend (sessão, rate limit). `cacheDados` é o da CONTA:
+  // snapshot, mapa de envios, telemetria. Para a conta legada são o mesmo
+  // objeto e as mesmas chaves de sempre.
   const cache = getCache();
 
   try {
@@ -77,6 +82,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
+    // Conta: ausente = legada (compatibilidade da transição); inválida = 400.
+    // Mais de uma conta = 400 `consolidacao_indisponivel` até a etapa 4:
+    // nunca responder pela primeira em silêncio.
+    let conta;
+    try {
+      conta = resolverContaUnicaDeLeitura(req.query.contas);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const cacheDados = cacheDaConta(cache, conta);
+
     const alvo = parseAlvo(req.query.alvo);
 
     if (resource === 'status') {
@@ -84,17 +101,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // em chunk e sem chamar o Mercado Livre. É ela que o dashboard consulta
       // a cada poucos dezenas de segundos para decidir se vale repaginar os
       // milhares de pedidos — a decisão sai de `versao`.
-      const status = await getReadStatus(cache, alvo, {
+      const status = await getReadStatus(cacheDados, alvo, {
         notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
       });
-      return json(res, 200, status);
+      return json(res, 200, { ...status, conta: conta.id });
     }
 
     if (resource === 'logistics') {
       // Agrupado por TIPO: os ~3.500 ids repetiriam a string do tipo em cada
       // entrada, triplicando o payload sem acrescentar informação.
-      const mapa = await lerMapaEnvios(cache);
-      const manifesto = await lerManifesto(cache);
+      const mapa = await lerMapaEnvios(cacheDados);
+      const manifesto = await lerManifesto(cacheDados);
       const porTipo: Record<string, string[]> = {};
       for (const [shipmentId, info] of mapa) {
         (porTipo[info.logisticType] ??= []).push(shipmentId);
@@ -113,20 +130,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const p = resolverPeriodo(req.query as Record<string, unknown>);
       if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
 
-      const status = await getReadStatus(cache, 'ativos');
+      const status = await getReadStatus(cacheDados, 'ativos');
       if (status.versao === null || status.totalRegistros <= 0 || !status.oldestDate || !status.newestDate) {
         return json(res, 409, { error: 'not_ready' });
       }
 
       let pedidos;
       try {
-        pedidos = await readSnapshot(cache, 'ativos');   // UMA leitura por chamada
+        pedidos = await readSnapshot(cacheDados, 'ativos');   // UMA leitura por chamada
       } catch {
         return json(res, 409, { error: 'not_ready' });
       }
       if (pedidos.length === 0) return json(res, 409, { error: 'not_ready' });
 
-      const mapa = await lerMapaEnvios(cache);
+      const mapa = await lerMapaEnvios(cacheDados);
       const r = calcularRanking(
         pedidos,
         { fromYmd: p.periodo.fromYmd, toYmd: p.periodo.toYmd },
@@ -216,14 +233,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const p = resolverPeriodo(req.query as Record<string, unknown>);
       if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
 
-      const status = await getReadStatus(cache, 'ativos');
+      const status = await getReadStatus(cacheDados, 'ativos');
       if (status.versao === null || status.totalRegistros <= 0 || !status.oldestDate || !status.newestDate) {
         return json(res, 409, { error: 'not_ready' });
       }
 
       let pedidos;
       try {
-        pedidos = await readSnapshot(cache, 'ativos');   // UMA leitura por chamada
+        pedidos = await readSnapshot(cacheDados, 'ativos');   // UMA leitura por chamada
       } catch {
         return json(res, 409, { error: 'not_ready' });
       }
@@ -235,7 +252,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // resource === 'list'
     const rawCursor = typeof req.query.cursor === 'string' ? req.query.cursor : null;
     const rawPageSize = req.query.pageSize;
-    const r = await getPage(cache, alvo, rawCursor, rawPageSize);
+    const r = await getPage(cacheDados, alvo, rawCursor, rawPageSize);
 
     if (r.ok) return json(res, 200, r.value);
     switch (r.code) {

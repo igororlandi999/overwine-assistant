@@ -88,6 +88,25 @@ export interface OrderSlim {
   }>;
   buyer?: { nickname: string | null };
   shipping?: { id: number | string | null; logistic_type: string | null };
+  /**
+   * Conta (empresa × canal) dona do pedido e canal de origem — plano
+   * multi-conta, etapa 0. OPCIONAIS e AUSENTES em tudo que `toSlim` grava:
+   * os snapshots publicados hoje não têm o campo e continuam sendo lidos e
+   * escritos no mesmo formato. Só o caminho multi-conta (etapas seguintes)
+   * os preenche; ausente = conta legada.
+   */
+  conta?: string;
+  canal?: string;
+}
+
+/**
+ * Identidade COMPOSTA de um pedido para dedup e consolidação entre contas:
+ * o id externo fica intacto (é o que o operador vê e busca), e a conta
+ * entra na frente. Pedido sem `conta` é da conta legada, identificada pelo
+ * chamador.
+ */
+export function chaveDoPedido(o: Pick<OrderSlim, 'id' | 'conta'>, contaPadrao: string): string {
+  return `${o.conta ?? contaPadrao}:${String(o.id)}`;
 }
 
 /**

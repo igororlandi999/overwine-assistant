@@ -50,6 +50,16 @@ const schema = z.object({
    */
   ML_WEBHOOK_SECRET: z.string().min(16, 'ML_WEBHOOK_SECRET deve ter no mínimo 16 caracteres').optional(),
 
+  // ── Multi-conta (etapa 0) ───────────────────────────────────────────────
+  /**
+   * Liga a aceitação de contas além da legada nas rotas (`contas=`/`conta=`).
+   * Desligada (padrão), o backend se comporta exatamente como antes do plano
+   * multi-conta: só a conta Overwine × Mercado Livre existe para as rotas, e
+   * qualquer outro id responde 400 `conta_nao_habilitada`. Lida em
+   * src/config/contas.ts, não por getEnv(), para não acoplar as rotas.
+   */
+  MULTI_CONTA_ENABLED: z.enum(['true', 'false']).default('false'),
+
   // ── Auto-refresh do dashboard ───────────────────────────────────────────
   /**
    * Idade (s) de `lastSyncAt` a partir da qual uma aba aberta pode pedir uma

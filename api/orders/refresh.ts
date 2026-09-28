@@ -40,8 +40,9 @@
  * invocação interrompida deixa progresso gravado.
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
+import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import { criarFetchOrdersPage } from '../../src/lib/ml-orders.js';
@@ -55,8 +56,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
 
   try {
-    const env = getEnv();
-
     // Sessão obrigatória — mesma regra das rotas de leitura. x-admin-key não
     // vale aqui, e o navegador nunca precisa conhecer a chave de admin.
     const sess = await validateSession(cache, readBearer(req));
@@ -68,14 +67,26 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
-    const r = await refrescarSeVelho(cache, criarFetchOrdersPage(cache, env.ML_USER_ID));
+    // Ação: UMA conta. Ausente = legada (o dashboard atual não envia conta).
+    // O lock, o cooldown, o snapshot e o token do ML são os DA CONTA.
+    let conta;
+    try {
+      const corpo = (req.body && typeof req.body === 'object') ? (req.body as { conta?: unknown }) : {};
+      conta = resolverContaDeAcao(corpo.conta ?? req.query.conta);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const cacheDados = cacheDaConta(cache, conta);
+
+    const r = await refrescarSeVelho(cacheDados, criarFetchOrdersPage(cacheDados, mlUserIdDaConta(conta)));
 
     // Erro da sincronização NÃO vira 5xx: o snapshot anterior continua válido e
     // sendo servido, e o dashboard não deve tratar isso como falha de leitura.
     // Ele volta a pedir na próxima rodada do poll.
     if (r.acao === 'erro') {
       console.error(`[orders-refresh] modo=${r.modo} erro=${r.motivo}`);
-      return json(res, 200, { ok: false, acao: 'erro', modo: r.modo, versao: r.versao });
+      return json(res, 200, { ok: false, acao: 'erro', modo: r.modo, versao: r.versao, conta: conta.id });
     }
 
     // `versao` vai na resposta de propósito: quando `publicou` é true, o
@@ -83,8 +94,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const detalhe = r.acao === 'sincronizado'
       ? ` modo=${r.modo} publicou=${r.publicou} novos=${r.novosPedidos} atualizados=${r.atualizados} versao=${r.versao} ml=${r.chamadasML} ms=${r.duracaoMs}`
       : '';
-    console.info(`[orders-refresh] acao=${r.acao}${detalhe} sessao=${sess.id.slice(0, 8)}`);
-    return json(res, 200, { ok: true, ...r });
+    console.info(`[orders-refresh] conta=${conta.id} acao=${r.acao}${detalhe} sessao=${sess.id.slice(0, 8)}`);
+    return json(res, 200, { ok: true, ...r, conta: conta.id });
   } catch (e) {
     console.error('[orders-refresh]', e instanceof Error ? e.message : e);
     return json(res, 500, { error: 'erro_interno' });

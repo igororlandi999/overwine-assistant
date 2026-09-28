@@ -27,6 +27,8 @@ import { drenarFila } from '../../src/services/orders-webhook.service.js';
 import { criarFetchOrder, criarFetchOrdersPage } from '../../src/lib/ml-orders.js';
 import { readManifest } from '../../src/lib/orders-store.js';
 import { registrarConclusaoSync, registrarFalhaSync, registrarTentativaSync } from '../../src/lib/sync-telemetry.js';
+import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
@@ -54,34 +56,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       modo?: 'full' | 'incremental';
       acao?: 'sincronizar' | 'drenar';
       max?: number;
+      conta?: unknown;
     };
     const alvo = body.alvo === 'cancelados' ? 'cancelados' : 'ativos';
-    const uid = env.ML_USER_ID;
+
+    // Ação: UMA conta. O GitHub Actions atual não envia conta → legada.
+    let conta;
+    try {
+      conta = resolverContaDeAcao(body.conta);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const cacheDados = cacheDaConta(cache, conta);
+    const uid = mlUserIdDaConta(conta);
 
     if (body.acao === 'drenar') {
       const max = Number.isInteger(body.max) && (body.max as number) > 0 ? (body.max as number) : undefined;
-      console.info(`[orders-sync] dreno ip=${maskIp(ip)} max=${max ?? 'padrao'}`);
-      const dreno = await drenarFila(cache, criarFetchOrder(cache), max === undefined ? {} : { max });
-      return json(res, 200, dreno);
+      console.info(`[orders-sync] dreno ip=${maskIp(ip)} conta=${conta.id} max=${max ?? 'padrao'}`);
+      const dreno = await drenarFila(cacheDados, criarFetchOrder(cacheDados), max === undefined ? {} : { max });
+      return json(res, 200, { ...dreno, conta: conta.id });
     }
 
     // O fetcher de página vive em src/lib/ml-orders.ts: o auto-refresh do
     // dashboard usa exatamente o mesmo, e duas cópias seriam duas chances de
     // consertar o tratamento de paging.total em uma só.
-    const fetchPage = criarFetchOrdersPage(cache, uid);
+    const fetchPage = criarFetchOrdersPage(cacheDados, uid);
 
-    console.info(`[orders-sync] passo ip=${maskIp(ip)} alvo=${alvo} modo=${body.modo ?? 'auto'}`);
-    await registrarTentativaSync(cache, 'reconciliation');
+    console.info(`[orders-sync] passo ip=${maskIp(ip)} conta=${conta.id} alvo=${alvo} modo=${body.modo ?? 'auto'}`);
+    await registrarTentativaSync(cacheDados, 'reconciliation');
     const inicio = Date.now();
-    const result = await runSyncStep(cache, fetchPage, { alvo, modo: body.modo });
+    const result = await runSyncStep(cacheDados, fetchPage, { alvo, modo: body.modo });
     // Telemetria unificada: só para o alvo que o dashboard lê. Lock ocupado
     // não é falha nem conclusão — a reconciliação simplesmente tenta depois.
     if (alvo === 'ativos' && result.motivo !== 'sync_em_andamento' && result.motivo !== 'job_em_andamento') {
       if (!result.ok) {
-        await registrarFalhaSync(cache, 'reconciliation', result.motivo ?? 'falha');
+        await registrarFalhaSync(cacheDados, 'reconciliation', result.motivo ?? 'falha');
       } else {
-        const man = result.concluido ? await readManifest(cache, 'ativos') : null;
-        await registrarConclusaoSync(cache, {
+        const man = result.concluido ? await readManifest(cacheDados, 'ativos') : null;
+        await registrarConclusaoSync(cacheDados, {
           origem: 'reconciliation', modo: body.modo === 'full' ? 'full' : 'incremental',
           duracaoMs: Date.now() - inicio, chamadasML: result.paginasLidas,
           novos: result.concluido ? result.novosPedidos : 0, atualizados: 0,
@@ -89,7 +102,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         });
       }
     }
-    return json(res, 200, result);
+    return json(res, 200, { ...result, conta: conta.id });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Erro interno';
     console.error('[orders-sync]', msg);

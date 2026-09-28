@@ -23,12 +23,17 @@ import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/h
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { lerMapaEnvios, publicarMapaEnvios, CHAVE_LOCK } from '../../src/lib/shipping-store.js';
 import { executarPasso, type BuscarLogistica } from '../../src/services/shipping-logistics.service.js';
+import { resolverContaDeAcao, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 
 /** TTL do lock. Um passo cabe folgado nisso; se estourar, o lock expira só. */
 const LOCK_TTL_S = 120;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const cache = getCache();
+  // `cacheGlobal`: rate limit por IP. `cache`: dados da CONTA (snapshot, mapa
+  // de envios, lock, token do ML) — definido depois de resolver a conta.
+  const cacheGlobal = getCache();
+  let cache = cacheGlobal;
   const ip = clientIp(req);
   let lockToken: string | null = null;
 
@@ -39,7 +44,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!String(req.headers['content-type'] || '').includes('application/json')) {
       return json(res, 415, { error: 'Content-Type deve ser application/json.' });
     }
-    if (!(await rateLimitOk(cache, `shipping-sync:${ip}`, 20, 600))) {
+    if (!(await rateLimitOk(cacheGlobal, `shipping-sync:${ip}`, 20, 600))) {
       console.warn(`[shipping-sync] rate limit ip=${maskIp(ip)}`);
       return json(res, 429, { error: 'Muitas requisições.' });
     }
@@ -51,13 +56,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Lock: dois passos simultâneos leriam o mesmo mapa e o segundo publicaria
     // por cima do primeiro, descartando envios já pagos em chamadas de API.
+    const body = (req.body ?? {}) as { limite?: number; concorrencia?: number; conta?: unknown };
+
+    // Ação: UMA conta (ausente = legada, como o GitHub Actions chama hoje).
+    let conta;
+    try {
+      conta = resolverContaDeAcao(body.conta);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    cache = cacheDaConta(cacheGlobal, conta);
+
     lockToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     if (!(await cache.setNX(CHAVE_LOCK, lockToken, LOCK_TTL_S))) {
       lockToken = null;
       return json(res, 409, { error: 'Outro passo em andamento.', code: 'lock_ocupado' });
     }
-
-    const body = (req.body ?? {}) as { limite?: number; concorrencia?: number };
 
     const pedidos = await readSnapshot(cache, 'ativos');
     const mapaAtual = await lerMapaEnvios(cache);

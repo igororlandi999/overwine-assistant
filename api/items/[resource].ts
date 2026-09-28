@@ -31,6 +31,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { getEnv } from '../../src/config/env.js';
+import { resolverContaUnicaDeLeitura, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import { mlFetch } from '../../src/lib/ml-auth.js';
@@ -228,21 +230,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return json(res, 405, { error: 'Use GET' });
   }
 
-  const cache = getCache();
+  // `cacheGlobal`: sessão e rate limit, do backend. `cache`: dados da CONTA
+  // (snapshot de catálogo, lock, cooldown, token do ML). Para a conta legada
+  // são o mesmo objeto e as mesmas chaves de sempre.
+  const cacheGlobal = getCache();
 
   try {
-    const sess = await validateSession(cache, readBearer(req));
+    const sess = await validateSession(cacheGlobal, readBearer(req));
     if (!sess) return json(res, 401, { error: 'unauthorized' });
 
-    if (!(await rateLimitOk(cache, `items-read:${sess.id.slice(0, 24)}`, 600, 60))) {
+    if (!(await rateLimitOk(cacheGlobal, `items-read:${sess.id.slice(0, 24)}`, 600, 60))) {
       return json(res, 429, { error: 'rate_limited' });
     }
+
+    // Conta: ausente = legada; inválida = 400; mais de uma = 400 (sem consolidação até a etapa 4).
+    let conta;
+    try {
+      conta = resolverContaUnicaDeLeitura(req.query.contas);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const cache = cacheDaConta(cacheGlobal, conta);
 
     if (resource === 'inventory') return await responderInventario(req, res, cache);
 
     // Allowlist de parâmetros do `catalog`: 400 determinístico para qualquer outro.
     for (const k of Object.keys(req.query)) {
-      if (k !== 'resource' && k !== 'refresh') {
+      if (k !== 'resource' && k !== 'refresh' && k !== 'contas') {
         return json(res, 400, { error: 'invalid_params', code: 'parametro_desconhecido' });
       }
     }
@@ -310,7 +325,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     try {
-      const { ids, batch } = fetchers(cache, env.ML_USER_ID);
+      const { ids, batch } = fetchers(cache, mlUserIdDaConta(conta));
       const { manifest: novo, resultado } = await reconstruirCatalogo(
         cache, ids, batch, env.ITEMS_CATALOG_CHUNK_SIZE,
         { maxChamadas: env.ITEMS_CATALOG_MAX_CALLS }

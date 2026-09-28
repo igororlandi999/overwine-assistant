@@ -1,0 +1,82 @@
+{
+  "$comment": "Registro de CONTAS (empresa x canal). Não contém segredo: credenciais vivem em variáveis de ambiente, referenciadas aqui só pelo NOME. A conta legada (Overwine no Mercado Livre) tem prefixo vazio no Redis, de propósito: é o snapshot, o catálogo, o mapa de envios e a telemetria que já existem em produção, sem migração. Toda conta nova recebe prefixo próprio (c:<id>:) e nasce inativa; ativar exige credencial configurada e a etapa correspondente do plano multi-conta. Uma conta ausente daqui, ou inativa, é ERRO em qualquer rota — nunca cai na legada.",
+  "versao": 1,
+  "legada": "overwine-ml",
+  "contas": [
+    {
+      "id": "overwine-ml",
+      "empresa": "alemmar",
+      "empresaRotulo": "Além Mar (Overwine)",
+      "canal": "ml",
+      "canalRotulo": "Mercado Livre",
+      "rotulo": "Overwine · Mercado Livre",
+      "ativo": true,
+      "legada": true,
+      "prefixo": "",
+      "ml": { "userIdEnv": "ML_USER_ID" }
+    },
+    {
+      "id": "degustar-ml",
+      "empresa": "degustar",
+      "empresaRotulo": "Degustar",
+      "canal": "ml",
+      "canalRotulo": "Mercado Livre",
+      "rotulo": "Degustar · Mercado Livre",
+      "ativo": false,
+      "prefixo": "c:degustar-ml:",
+      "ml": { "userIdEnv": "ML_DEGUSTAR_USER_ID" }
+    },
+    {
+      "id": "alemmar-amazon",
+      "empresa": "alemmar",
+      "empresaRotulo": "Além Mar (Overwine)",
+      "canal": "amazon",
+      "canalRotulo": "Amazon",
+      "rotulo": "Além Mar · Amazon",
+      "ativo": false,
+      "prefixo": "c:alemmar-amazon:",
+      "amazon": { "marketplaceId": "A2Q3Y263D00KWC", "credenciaisEnv": "AMZ_ALEMMAR" }
+    },
+    {
+      "id": "alemmar-shopee",
+      "empresa": "alemmar",
+      "empresaRotulo": "Além Mar (Overwine)",
+      "canal": "shopee",
+      "canalRotulo": "Shopee",
+      "rotulo": "Além Mar · Shopee",
+      "ativo": false,
+      "prefixo": "c:alemmar-shopee:"
+    },
+    {
+      "id": "alemmar-loja",
+      "empresa": "alemmar",
+      "empresaRotulo": "Além Mar (Overwine)",
+      "canal": "loja",
+      "canalRotulo": "Loja online",
+      "rotulo": "Além Mar · Loja online",
+      "ativo": false,
+      "prefixo": "c:alemmar-loja:"
+    },
+    {
+      "id": "degustar-amazon",
+      "empresa": "degustar",
+      "empresaRotulo": "Degustar",
+      "canal": "amazon",
+      "canalRotulo": "Amazon",
+      "rotulo": "Degustar · Amazon",
+      "ativo": false,
+      "prefixo": "c:degustar-amazon:",
+      "amazon": { "marketplaceId": "A2Q3Y263D00KWC", "credenciaisEnv": "AMZ_DEGUSTAR" }
+    },
+    {
+      "id": "degustar-shopee",
+      "empresa": "degustar",
+      "empresaRotulo": "Degustar",
+      "canal": "shopee",
+      "canalRotulo": "Shopee",
+      "rotulo": "Degustar · Shopee",
+      "ativo": false,
+      "prefixo": "c:degustar-shopee:"
+    }
+  ]
+}

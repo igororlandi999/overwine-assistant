@@ -345,7 +345,9 @@ export function resolverPeriodo(
   agora: Date = new Date(),
   diasPadrao = 7
 ): ParamsResultado {
-  const permitidos = new Set(['resource', 'alvo', 'dias', 'from', 'to']);
+  // `contas` e o seletor de conta das rotas (etapa 0 multi-conta): validado
+  // pela rota, nao por aqui — so nao pode ser tratado como desconhecido.
+  const permitidos = new Set(['resource', 'alvo', 'dias', 'from', 'to', 'contas']);
   for (const k of Object.keys(query)) {
     if (!permitidos.has(k)) return { ok: false, erro: 'parametro_desconhecido' };
   }

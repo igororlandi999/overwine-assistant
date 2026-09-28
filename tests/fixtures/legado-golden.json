@@ -1,0 +1,3060 @@
+{
+ "rotas": {
+  "status_inicial": {
+   "status": 200,
+   "body": {
+    "alvo": "ativos",
+    "versao": 1,
+    "totalRegistros": 300,
+    "newestDate": "2026-09-24T20:25:00.000Z",
+    "oldestDate": "2026-07-30T13:56:00.000Z",
+    "updatedAt": "2026-09-28T14:00:00.000Z",
+    "origem": "full",
+    "partial": false,
+    "lastResult": "ok",
+    "lastSyncAt": "2026-09-28T14:00:00.000Z",
+    "idadeSegundos": 3600,
+    "agora": "2026-09-28T15:00:00.000Z",
+    "idadeCheckSegundos": 3600,
+    "ultimaRevisaoEm": null,
+    "tempoReal": {
+     "habilitado": true,
+     "ultimaNotificacaoEm": null,
+     "ultimaNotificacaoTopico": null,
+     "ultimaNotificacaoPedido": null,
+     "ultimaNotificacaoSent": null,
+     "ultimoAckMs": null,
+     "ultimoDrenoPedidoEm": null,
+     "ultimoPedidoAtualizadoId": null,
+     "ultimoPedidoAtualizadoEm": null,
+     "ultimaAcao": null,
+     "ultimaVersaoPublicada": null,
+     "ultimaLatenciaTotalMs": null,
+     "ultimoDrenoEm": null,
+     "pendentes": 0,
+     "recebidas": 0,
+     "duplicadas": 0,
+     "rejeitadas": 0,
+     "ultimoMotivoRejeicao": null,
+     "ultimaRejeicaoEm": null,
+     "aplicadosNovos": 0,
+     "aplicadosAtualizados": 0,
+     "falhas": 0,
+     "ultimoErro": null,
+     "ultimoErroEm": null
+    },
+    "sincronizacao": {
+     "ultimoSyncTentadoEm": null,
+     "ultimaOrigemTentada": null,
+     "ultimoSyncConcluidoEm": null,
+     "ultimaOrigem": null,
+     "ultimoModo": null,
+     "ultimaDuracaoMs": null,
+     "ultimasChamadasML": null,
+     "ultimosPedidosNovos": null,
+     "ultimosPedidosAtualizados": null,
+     "ultimoPedidoNovoEm": null,
+     "ultimoPedidoNovoOrigem": null,
+     "ultimaVersaoPublicada": null,
+     "ultimaVersaoPublicadaEm": null,
+     "ultimaVersaoPublicadaOrigem": null,
+     "ultimaFalhaEm": null,
+     "ultimaFalhaMotivo": null,
+     "ultimaFalhaOrigem": null,
+     "totalTentativas": 0,
+     "totalConcluidos": 0,
+     "totalPublicacoes": 0,
+     "totalFalhas": 0,
+     "lockOcupado": 0,
+     "ultimoLockOcupadoEm": null,
+     "cooldown": 0,
+     "ultimoCooldownEm": null
+    }
+   }
+  },
+  "metrics_7": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "versao": 1,
+    "updatedAt": "2026-09-28T14:00:00.000Z",
+    "origem": "full",
+    "coverage": {
+     "oldestDate": "2026-07-30T13:56:00.000Z",
+     "newestDate": "2026-09-24T20:25:00.000Z",
+     "dataFromYmd": "2026-07-30",
+     "dataToYmd": "2026-09-24",
+     "partial": false,
+     "totalRegistros": 300,
+     "alvo": "ativos"
+    },
+    "porStatus": {
+     "paid": 287
+    },
+    "cancelados": {
+     "disponivel": false,
+     "total": null,
+     "motivo": "fora_do_escopo_do_snapshot_ativos",
+     "fonte": "carga_sob_demanda_no_dashboard"
+    },
+    "janelas": {
+     "hoje": {
+      "receita": null,
+      "pedidos": null,
+      "unidades": null,
+      "ticketMedio": null,
+      "fromYmd": "2026-09-28",
+      "toYmd": "2026-09-28",
+      "disponivel": false,
+      "cobertura": "indisponivel"
+     },
+     "ultimos7": {
+      "receita": 1990,
+      "pedidos": 14,
+      "unidades": 20,
+      "ticketMedio": 142.14285714285714,
+      "fromYmd": "2026-09-22",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "mesAtual": {
+      "receita": 16910,
+      "pedidos": 121,
+      "unidades": 181,
+      "ticketMedio": 139.7520661157025,
+      "fromYmd": "2026-09-01",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "historico": {
+      "receita": 40165,
+      "pedidos": 287,
+      "unidades": 430,
+      "ticketMedio": 139.94773519163763,
+      "fromYmd": "2026-07-30",
+      "toYmd": "2026-09-24",
+      "disponivel": true,
+      "cobertura": "parcial"
+     }
+    },
+    "periodo": {
+     "fromYmd": "2026-09-21",
+     "toYmd": "2026-09-28",
+     "faturamento": {
+      "bruto": 2600,
+      "tarifaML": -384.79999999999995,
+      "tarifaEnv": -374.4,
+      "liquido": 1840.7999999999997,
+      "estimado": true,
+      "fonte": "dashboard_legado",
+      "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
+     },
+     "porItem": [
+      {
+       "itemId": "MLB100",
+       "pedidos": 4,
+       "unidades": 6,
+       "receita": 620
+      },
+      {
+       "itemId": "MLB104",
+       "pedidos": 4,
+       "unidades": 6,
+       "receita": 590
+      },
+      {
+       "itemId": "MLB101",
+       "pedidos": 4,
+       "unidades": 6,
+       "receita": 545
+      },
+      {
+       "itemId": "MLB102",
+       "pedidos": 4,
+       "unidades": 6,
+       "receita": 470
+      },
+      {
+       "itemId": "MLB103",
+       "pedidos": 3,
+       "unidades": 4,
+       "receita": 375
+      }
+     ]
+    },
+    "reputacao60d": {
+     "fromYmd": "2026-07-30",
+     "toYmd": "2026-09-28",
+     "bruto": 40165
+    },
+    "estoque30d": {
+     "fromYmd": "2026-08-29",
+     "toYmd": "2026-09-28",
+     "porItem": [
+      {
+       "itemId": "MLB102",
+       "unidades": 42
+      },
+      {
+       "itemId": "MLB100",
+       "unidades": 41
+      },
+      {
+       "itemId": "MLB101",
+       "unidades": 41
+      },
+      {
+       "itemId": "MLB104",
+       "unidades": 40
+      },
+      {
+       "itemId": "MLB103",
+       "unidades": 39
+      }
+     ]
+    },
+    "faturamentoMensal": [
+     {
+      "mes": "2026-07",
+      "total": 1105
+     },
+     {
+      "mes": "2026-08",
+      "total": 22150
+     },
+     {
+      "mes": "2026-09",
+      "total": 16910
+     }
+    ],
+    "warnings": [
+     "cobertura_parcial_fim",
+     "cobertura_parcial_inicio"
+    ]
+   }
+  },
+  "metrics_range": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "versao": 1,
+    "updatedAt": "2026-09-28T14:00:00.000Z",
+    "origem": "full",
+    "coverage": {
+     "oldestDate": "2026-07-30T13:56:00.000Z",
+     "newestDate": "2026-09-24T20:25:00.000Z",
+     "dataFromYmd": "2026-07-30",
+     "dataToYmd": "2026-09-24",
+     "partial": false,
+     "totalRegistros": 300,
+     "alvo": "ativos"
+    },
+    "porStatus": {
+     "paid": 287
+    },
+    "cancelados": {
+     "disponivel": false,
+     "total": null,
+     "motivo": "fora_do_escopo_do_snapshot_ativos",
+     "fonte": "carga_sob_demanda_no_dashboard"
+    },
+    "janelas": {
+     "hoje": {
+      "receita": null,
+      "pedidos": null,
+      "unidades": null,
+      "ticketMedio": null,
+      "fromYmd": "2026-09-28",
+      "toYmd": "2026-09-28",
+      "disponivel": false,
+      "cobertura": "indisponivel"
+     },
+     "ultimos7": {
+      "receita": 1990,
+      "pedidos": 14,
+      "unidades": 20,
+      "ticketMedio": 142.14285714285714,
+      "fromYmd": "2026-09-22",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "mesAtual": {
+      "receita": 16910,
+      "pedidos": 121,
+      "unidades": 181,
+      "ticketMedio": 139.7520661157025,
+      "fromYmd": "2026-09-01",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "historico": {
+      "receita": 40165,
+      "pedidos": 287,
+      "unidades": 430,
+      "ticketMedio": 139.94773519163763,
+      "fromYmd": "2026-07-30",
+      "toYmd": "2026-09-24",
+      "disponivel": true,
+      "cobertura": "parcial"
+     }
+    },
+    "periodo": {
+     "fromYmd": "2026-08-01",
+     "toYmd": "2026-09-28",
+     "faturamento": {
+      "bruto": 38905,
+      "tarifaML": -5757.94,
+      "tarifaEnv": -5602.32,
+      "liquido": 27544.739999999998,
+      "estimado": true,
+      "fonte": "dashboard_legado",
+      "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
+     },
+     "porItem": [
+      {
+       "itemId": "MLB100",
+       "pedidos": 57,
+       "unidades": 85,
+       "receita": 7980
+      },
+      {
+       "itemId": "MLB102",
+       "pedidos": 56,
+       "unidades": 84,
+       "receita": 7840
+      },
+      {
+       "itemId": "MLB104",
+       "pedidos": 55,
+       "unidades": 82,
+       "receita": 7730
+      },
+      {
+       "itemId": "MLB103",
+       "pedidos": 55,
+       "unidades": 82,
+       "receita": 7715
+      },
+      {
+       "itemId": "MLB101",
+       "pedidos": 55,
+       "unidades": 83,
+       "receita": 7640
+      }
+     ]
+    },
+    "reputacao60d": {
+     "fromYmd": "2026-07-30",
+     "toYmd": "2026-09-28",
+     "bruto": 40165
+    },
+    "estoque30d": {
+     "fromYmd": "2026-08-29",
+     "toYmd": "2026-09-28",
+     "porItem": [
+      {
+       "itemId": "MLB102",
+       "unidades": 42
+      },
+      {
+       "itemId": "MLB100",
+       "unidades": 41
+      },
+      {
+       "itemId": "MLB101",
+       "unidades": 41
+      },
+      {
+       "itemId": "MLB104",
+       "unidades": 40
+      },
+      {
+       "itemId": "MLB103",
+       "unidades": 39
+      }
+     ]
+    },
+    "faturamentoMensal": [
+     {
+      "mes": "2026-07",
+      "total": 1105
+     },
+     {
+      "mes": "2026-08",
+      "total": 22150
+     },
+     {
+      "mes": "2026-09",
+      "total": 16910
+     }
+    ],
+    "warnings": [
+     "cobertura_parcial_fim",
+     "cobertura_parcial_inicio"
+    ]
+   }
+  },
+  "margin_30": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "periodo": {
+     "fromYmd": "2026-08-29",
+     "toYmd": "2026-09-28"
+    },
+    "cobertura": {
+     "disponivel": true,
+     "tipo": "parcial",
+     "fromYmd": "2026-08-29",
+     "toYmd": "2026-09-28"
+    },
+    "totais": {
+     "receitaProdutos": 28300,
+     "unidades": 203,
+     "skusDistintos": 5,
+     "tarifaML": 0,
+     "tarifaEnvio": 0,
+     "receitaLiquida": 0,
+     "custoTotal": 0,
+     "margem": 0,
+     "margemPct": null,
+     "receitaComCusto": 0
+    },
+    "porSku": [
+     {
+      "sku": "VT-1",
+      "semSku": false,
+      "label": "Vinho 1",
+      "itemIds": [
+       "MLB101"
+      ],
+      "unidades": 41,
+      "pedidos": 27,
+      "receitaProdutos": 5845,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-2",
+      "semSku": false,
+      "label": "Vinho 2",
+      "itemIds": [
+       "MLB102"
+      ],
+      "unidades": 42,
+      "pedidos": 28,
+      "receitaProdutos": 5700,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-0",
+      "semSku": false,
+      "label": "Vinho 0",
+      "itemIds": [
+       "MLB100"
+      ],
+      "unidades": 41,
+      "pedidos": 28,
+      "receitaProdutos": 5635,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-4",
+      "semSku": false,
+      "label": "Vinho 4",
+      "itemIds": [
+       "MLB104"
+      ],
+      "unidades": 40,
+      "pedidos": 27,
+      "receitaProdutos": 5570,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-3",
+      "semSku": false,
+      "label": "Vinho 3",
+      "itemIds": [
+       "MLB103"
+      ],
+      "unidades": 39,
+      "pedidos": 26,
+      "receitaProdutos": 5550,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     }
+    ],
+    "semCusto": {
+     "skus": 5,
+     "receitaProdutos": 28300,
+     "unidades": 203,
+     "fracaoReceita": 1,
+     "titulos": [
+      "Vinho 0",
+      "Vinho 1",
+      "Vinho 2",
+      "Vinho 3",
+      "Vinho 4"
+     ]
+    },
+    "logistica": {
+     "enviosConhecidos": 0,
+     "enviosTotal": 287,
+     "fracao": 0
+    },
+    "frete": {
+     "real": 0,
+     "estimado": 0,
+     "fracaoReceitaReal": 1
+    },
+    "antesDePublicidade": true,
+    "estimado": true,
+    "warnings": [
+     "cobertura_parcial_fim",
+     "antes_de_publicidade",
+     "custo_parcial"
+    ]
+   }
+  },
+  "logistics": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "versao": null,
+    "updatedAt": null,
+    "total": 0,
+    "porTipo": {}
+   }
+  },
+  "list_p1": {
+   "status": 200,
+   "body": {
+    "alvo": "ativos",
+    "versao": 1,
+    "totalRegistros": 300,
+    "pageSize": 50,
+    "items": [
+     {
+      "id": 500020,
+      "status": "paid",
+      "date_created": "2026-09-24T20:25:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540020,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500021,
+      "status": "paid",
+      "date_created": "2026-09-24T15:54:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540021,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500022,
+      "status": "paid",
+      "date_created": "2026-09-24T11:23:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540022,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500023,
+      "status": "cancelled",
+      "date_created": "2026-09-24T06:52:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540023,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500024,
+      "status": "paid",
+      "date_created": "2026-09-24T02:21:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540024,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500025,
+      "status": "paid",
+      "date_created": "2026-09-23T21:50:00.000Z",
+      "paid_amount": 185,
+      "total_amount": 185,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 185,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540025,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500026,
+      "status": "paid",
+      "date_created": "2026-09-23T17:19:00.000Z",
+      "paid_amount": 200,
+      "total_amount": 200,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 200,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540026,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500027,
+      "status": "paid",
+      "date_created": "2026-09-23T12:48:00.000Z",
+      "paid_amount": 80,
+      "total_amount": 80,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 80,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540027,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500028,
+      "status": "paid",
+      "date_created": "2026-09-23T08:17:00.000Z",
+      "paid_amount": 95,
+      "total_amount": 95,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 95,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540028,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500029,
+      "status": "paid",
+      "date_created": "2026-09-23T03:46:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540029,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500030,
+      "status": "paid",
+      "date_created": "2026-09-22T23:15:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540030,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500031,
+      "status": "paid",
+      "date_created": "2026-09-22T18:44:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540031,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500032,
+      "status": "paid",
+      "date_created": "2026-09-22T14:13:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540032,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500033,
+      "status": "paid",
+      "date_created": "2026-09-22T09:42:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540033,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500034,
+      "status": "paid",
+      "date_created": "2026-09-22T05:11:00.000Z",
+      "paid_amount": 185,
+      "total_amount": 185,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 185,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540034,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500035,
+      "status": "paid",
+      "date_created": "2026-09-22T00:40:00.000Z",
+      "paid_amount": 200,
+      "total_amount": 200,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 200,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540035,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500036,
+      "status": "paid",
+      "date_created": "2026-09-21T20:09:00.000Z",
+      "paid_amount": 80,
+      "total_amount": 80,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 80,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540036,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500037,
+      "status": "paid",
+      "date_created": "2026-09-21T15:38:00.000Z",
+      "paid_amount": 95,
+      "total_amount": 95,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 95,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540037,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500038,
+      "status": "paid",
+      "date_created": "2026-09-21T11:07:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540038,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500039,
+      "status": "paid",
+      "date_created": "2026-09-21T06:36:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540039,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500040,
+      "status": "paid",
+      "date_created": "2026-09-21T02:05:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540040,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500041,
+      "status": "paid",
+      "date_created": "2026-09-20T21:34:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540041,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500042,
+      "status": "paid",
+      "date_created": "2026-09-20T17:03:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540042,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500043,
+      "status": "paid",
+      "date_created": "2026-09-20T12:32:00.000Z",
+      "paid_amount": 185,
+      "total_amount": 185,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 185,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540043,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500044,
+      "status": "paid",
+      "date_created": "2026-09-20T08:01:00.000Z",
+      "paid_amount": 200,
+      "total_amount": 200,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 200,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540044,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500045,
+      "status": "paid",
+      "date_created": "2026-09-20T03:30:00.000Z",
+      "paid_amount": 80,
+      "total_amount": 80,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 80,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540045,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500046,
+      "status": "cancelled",
+      "date_created": "2026-09-19T22:59:00.000Z",
+      "paid_amount": 95,
+      "total_amount": 95,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 95,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540046,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500047,
+      "status": "paid",
+      "date_created": "2026-09-19T18:28:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540047,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500048,
+      "status": "paid",
+      "date_created": "2026-09-19T13:57:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540048,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500049,
+      "status": "paid",
+      "date_created": "2026-09-19T09:26:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540049,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500050,
+      "status": "paid",
+      "date_created": "2026-09-19T04:55:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540050,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500051,
+      "status": "paid",
+      "date_created": "2026-09-19T00:24:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540051,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500052,
+      "status": "paid",
+      "date_created": "2026-09-18T19:53:00.000Z",
+      "paid_amount": 185,
+      "total_amount": 185,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 185,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540052,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500053,
+      "status": "paid",
+      "date_created": "2026-09-18T15:22:00.000Z",
+      "paid_amount": 200,
+      "total_amount": 200,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 200,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540053,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500054,
+      "status": "paid",
+      "date_created": "2026-09-18T10:51:00.000Z",
+      "paid_amount": 80,
+      "total_amount": 80,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 80,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540054,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500055,
+      "status": "paid",
+      "date_created": "2026-09-18T06:20:00.000Z",
+      "paid_amount": 95,
+      "total_amount": 95,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 95,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540055,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500056,
+      "status": "paid",
+      "date_created": "2026-09-18T01:49:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540056,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500057,
+      "status": "paid",
+      "date_created": "2026-09-17T21:18:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540057,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500058,
+      "status": "paid",
+      "date_created": "2026-09-17T16:47:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540058,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500059,
+      "status": "paid",
+      "date_created": "2026-09-17T12:16:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540059,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500060,
+      "status": "paid",
+      "date_created": "2026-09-17T07:45:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540060,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500061,
+      "status": "paid",
+      "date_created": "2026-09-17T03:14:00.000Z",
+      "paid_amount": 185,
+      "total_amount": 185,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 185,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540061,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500062,
+      "status": "paid",
+      "date_created": "2026-09-16T22:43:00.000Z",
+      "paid_amount": 200,
+      "total_amount": 200,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 200,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540062,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500063,
+      "status": "paid",
+      "date_created": "2026-09-16T18:12:00.000Z",
+      "paid_amount": 80,
+      "total_amount": 80,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 80,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR4"
+      },
+      "shipping": {
+       "id": 540063,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500064,
+      "status": "paid",
+      "date_created": "2026-09-16T13:41:00.000Z",
+      "paid_amount": 95,
+      "total_amount": 95,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 95,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR5"
+      },
+      "shipping": {
+       "id": 540064,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500065,
+      "status": "paid",
+      "date_created": "2026-09-16T09:10:00.000Z",
+      "paid_amount": 110,
+      "total_amount": 110,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 110,
+        "item": {
+         "id": "MLB100",
+         "title": "Vinho 0",
+         "seller_sku": "VT-0",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR6"
+      },
+      "shipping": {
+       "id": 540065,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500066,
+      "status": "paid",
+      "date_created": "2026-09-16T04:39:00.000Z",
+      "paid_amount": 125,
+      "total_amount": 125,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 125,
+        "item": {
+         "id": "MLB101",
+         "title": "Vinho 1",
+         "seller_sku": "VT-1",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR0"
+      },
+      "shipping": {
+       "id": 540066,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500067,
+      "status": "paid",
+      "date_created": "2026-09-16T00:08:00.000Z",
+      "paid_amount": 140,
+      "total_amount": 140,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 140,
+        "item": {
+         "id": "MLB102",
+         "title": "Vinho 2",
+         "seller_sku": "VT-2",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR1"
+      },
+      "shipping": {
+       "id": 540067,
+       "logistic_type": "fulfillment"
+      }
+     },
+     {
+      "id": 500068,
+      "status": "paid",
+      "date_created": "2026-09-15T19:37:00.000Z",
+      "paid_amount": 155,
+      "total_amount": 155,
+      "order_items": [
+       {
+        "quantity": 1,
+        "unit_price": 155,
+        "item": {
+         "id": "MLB103",
+         "title": "Vinho 3",
+         "seller_sku": "VT-3",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR2"
+      },
+      "shipping": {
+       "id": 540068,
+       "logistic_type": "drop_off"
+      }
+     },
+     {
+      "id": 500069,
+      "status": "cancelled",
+      "date_created": "2026-09-15T15:06:00.000Z",
+      "paid_amount": 170,
+      "total_amount": 170,
+      "order_items": [
+       {
+        "quantity": 2,
+        "unit_price": 170,
+        "item": {
+         "id": "MLB104",
+         "title": "Vinho 4",
+         "seller_sku": "VT-4",
+         "variation_id": null
+        }
+       }
+      ],
+      "buyer": {
+       "nickname": "COMPRADOR3"
+      },
+      "shipping": {
+       "id": 540069,
+       "logistic_type": "drop_off"
+      }
+     }
+    ],
+    "nextCursor": "eyJ2IjoxLCJvIjo1MCwiYSI6ImF0aXZvcyJ9",
+    "servedFrom": "atual"
+   }
+  },
+  "sync_1": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "concluido": false,
+    "retomavel": true,
+    "committedOffset": 250,
+    "paginasLidas": 5,
+    "novosPedidos": 20,
+    "motivo": "parcial"
+   }
+  },
+  "sync_2": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "concluido": true,
+    "retomavel": false,
+    "committedOffset": 300,
+    "paginasLidas": 1,
+    "novosPedidos": 20
+   }
+  },
+  "status_pos_sync": {
+   "status": 200,
+   "body": {
+    "alvo": "ativos",
+    "versao": 2,
+    "totalRegistros": 320,
+    "newestDate": "2026-09-28T14:45:00.000Z",
+    "oldestDate": "2026-07-30T13:56:00.000Z",
+    "updatedAt": "2026-09-28T15:00:00.000Z",
+    "origem": "incremental",
+    "partial": false,
+    "lastResult": "ok",
+    "lastSyncAt": "2026-09-28T15:00:00.000Z",
+    "idadeSegundos": 0,
+    "agora": "2026-09-28T15:00:00.000Z",
+    "idadeCheckSegundos": 0,
+    "ultimaRevisaoEm": "2026-09-28T15:00:00.000Z",
+    "tempoReal": {
+     "habilitado": true,
+     "ultimaNotificacaoEm": null,
+     "ultimaNotificacaoTopico": null,
+     "ultimaNotificacaoPedido": null,
+     "ultimaNotificacaoSent": null,
+     "ultimoAckMs": null,
+     "ultimoDrenoPedidoEm": null,
+     "ultimoPedidoAtualizadoId": null,
+     "ultimoPedidoAtualizadoEm": null,
+     "ultimaAcao": null,
+     "ultimaVersaoPublicada": null,
+     "ultimaLatenciaTotalMs": null,
+     "ultimoDrenoEm": null,
+     "pendentes": 0,
+     "recebidas": 0,
+     "duplicadas": 0,
+     "rejeitadas": 0,
+     "ultimoMotivoRejeicao": null,
+     "ultimaRejeicaoEm": null,
+     "aplicadosNovos": 0,
+     "aplicadosAtualizados": 0,
+     "falhas": 0,
+     "ultimoErro": null,
+     "ultimoErroEm": null
+    },
+    "sincronizacao": {
+     "ultimoSyncTentadoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigemTentada": "reconciliation",
+     "ultimoSyncConcluidoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigem": "reconciliation",
+     "ultimoModo": "incremental",
+     "ultimaDuracaoMs": 0,
+     "ultimasChamadasML": 1,
+     "ultimosPedidosNovos": 20,
+     "ultimosPedidosAtualizados": 0,
+     "ultimoPedidoNovoEm": "2026-09-28T15:00:00.000Z",
+     "ultimoPedidoNovoOrigem": "reconciliation",
+     "ultimaVersaoPublicada": 2,
+     "ultimaVersaoPublicadaEm": "2026-09-28T15:00:00.000Z",
+     "ultimaVersaoPublicadaOrigem": "reconciliation",
+     "ultimaFalhaEm": null,
+     "ultimaFalhaMotivo": null,
+     "ultimaFalhaOrigem": null,
+     "totalTentativas": 2,
+     "totalConcluidos": 2,
+     "totalPublicacoes": 1,
+     "totalFalhas": 0,
+     "lockOcupado": 0,
+     "ultimoLockOcupadoEm": null,
+     "cooldown": 0,
+     "ultimoCooldownEm": null
+    }
+   }
+  },
+  "notif": {
+   "status": 200,
+   "body": {
+    "ok": true
+   }
+  },
+  "dreno": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "processados": 0,
+    "novos": 0,
+    "atualizados": 0,
+    "semMudanca": 0,
+    "falhas": 0,
+    "restantes": 0,
+    "motivo": "sync_em_andamento"
+   }
+  },
+  "status_pos_webhook": {
+   "status": 200,
+   "body": {
+    "alvo": "ativos",
+    "versao": 2,
+    "totalRegistros": 320,
+    "newestDate": "2026-09-28T14:45:00.000Z",
+    "oldestDate": "2026-07-30T13:56:00.000Z",
+    "updatedAt": "2026-09-28T15:00:00.000Z",
+    "origem": "incremental",
+    "partial": false,
+    "lastResult": "ok",
+    "lastSyncAt": "2026-09-28T15:00:00.000Z",
+    "idadeSegundos": 0,
+    "agora": "2026-09-28T15:00:00.000Z",
+    "idadeCheckSegundos": 0,
+    "ultimaRevisaoEm": "2026-09-28T15:00:00.000Z",
+    "tempoReal": {
+     "habilitado": true,
+     "ultimaNotificacaoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaNotificacaoTopico": "orders_v2",
+     "ultimaNotificacaoPedido": "999999",
+     "ultimaNotificacaoSent": "2026-09-28T15:00:00.000Z",
+     "ultimoAckMs": 0,
+     "ultimoDrenoPedidoEm": "2026-09-28T15:00:00.000Z",
+     "ultimoPedidoAtualizadoId": null,
+     "ultimoPedidoAtualizadoEm": null,
+     "ultimaAcao": null,
+     "ultimaVersaoPublicada": null,
+     "ultimaLatenciaTotalMs": null,
+     "ultimoDrenoEm": null,
+     "pendentes": 0,
+     "recebidas": 1,
+     "duplicadas": 0,
+     "rejeitadas": 0,
+     "ultimoMotivoRejeicao": null,
+     "ultimaRejeicaoEm": null,
+     "aplicadosNovos": 0,
+     "aplicadosAtualizados": 0,
+     "falhas": 0,
+     "ultimoErro": null,
+     "ultimoErroEm": null
+    },
+    "sincronizacao": {
+     "ultimoSyncTentadoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigemTentada": "reconciliation",
+     "ultimoSyncConcluidoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigem": "reconciliation",
+     "ultimoModo": "incremental",
+     "ultimaDuracaoMs": 0,
+     "ultimasChamadasML": 1,
+     "ultimosPedidosNovos": 20,
+     "ultimosPedidosAtualizados": 0,
+     "ultimoPedidoNovoEm": "2026-09-28T15:00:00.000Z",
+     "ultimoPedidoNovoOrigem": "reconciliation",
+     "ultimaVersaoPublicada": 2,
+     "ultimaVersaoPublicadaEm": "2026-09-28T15:00:00.000Z",
+     "ultimaVersaoPublicadaOrigem": "reconciliation",
+     "ultimaFalhaEm": null,
+     "ultimaFalhaMotivo": null,
+     "ultimaFalhaOrigem": null,
+     "totalTentativas": 2,
+     "totalConcluidos": 2,
+     "totalPublicacoes": 1,
+     "totalFalhas": 0,
+     "lockOcupado": 0,
+     "ultimoLockOcupadoEm": null,
+     "cooldown": 0,
+     "ultimoCooldownEm": null
+    }
+   }
+  },
+  "refresh": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "acao": "sincronizado",
+    "modo": "rapido",
+    "publicou": true,
+    "novosPedidos": 1,
+    "atualizados": 0,
+    "versao": 4,
+    "chamadasML": 1,
+    "duracaoMs": 0
+   }
+  },
+  "status_pos_refresh": {
+   "status": 200,
+   "body": {
+    "alvo": "ativos",
+    "versao": 4,
+    "totalRegistros": 322,
+    "newestDate": "2026-09-28T15:00:00.000Z",
+    "oldestDate": "2026-07-30T13:56:00.000Z",
+    "updatedAt": "2026-09-28T15:00:00.000Z",
+    "origem": "dashboard_refresh",
+    "partial": false,
+    "lastResult": "ok",
+    "lastSyncAt": "2026-09-28T15:00:00.000Z",
+    "idadeSegundos": 0,
+    "agora": "2026-09-28T15:00:00.000Z",
+    "idadeCheckSegundos": 0,
+    "ultimaRevisaoEm": "2026-09-28T15:00:00.000Z",
+    "tempoReal": {
+     "habilitado": true,
+     "ultimaNotificacaoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaNotificacaoTopico": "orders_v2",
+     "ultimaNotificacaoPedido": "999999",
+     "ultimaNotificacaoSent": "2026-09-28T15:00:00.000Z",
+     "ultimoAckMs": 0,
+     "ultimoDrenoPedidoEm": "2026-09-28T15:00:00.000Z",
+     "ultimoPedidoAtualizadoId": "999999",
+     "ultimoPedidoAtualizadoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaAcao": "novo",
+     "ultimaVersaoPublicada": 3,
+     "ultimaLatenciaTotalMs": 0,
+     "ultimoDrenoEm": "2026-09-28T15:00:00.000Z",
+     "pendentes": 0,
+     "recebidas": 1,
+     "duplicadas": 0,
+     "rejeitadas": 0,
+     "ultimoMotivoRejeicao": null,
+     "ultimaRejeicaoEm": null,
+     "aplicadosNovos": 1,
+     "aplicadosAtualizados": 0,
+     "falhas": 0,
+     "ultimoErro": null,
+     "ultimoErroEm": null
+    },
+    "sincronizacao": {
+     "ultimoSyncTentadoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigemTentada": "dashboard_refresh",
+     "ultimoSyncConcluidoEm": "2026-09-28T15:00:00.000Z",
+     "ultimaOrigem": "dashboard_refresh",
+     "ultimoModo": "rapido",
+     "ultimaDuracaoMs": 0,
+     "ultimasChamadasML": 1,
+     "ultimosPedidosNovos": 1,
+     "ultimosPedidosAtualizados": 0,
+     "ultimoPedidoNovoEm": "2026-09-28T15:00:00.000Z",
+     "ultimoPedidoNovoOrigem": "dashboard_refresh",
+     "ultimaVersaoPublicada": 4,
+     "ultimaVersaoPublicadaEm": "2026-09-28T15:00:00.000Z",
+     "ultimaVersaoPublicadaOrigem": "dashboard_refresh",
+     "ultimaFalhaEm": null,
+     "ultimaFalhaMotivo": null,
+     "ultimaFalhaOrigem": null,
+     "totalTentativas": 3,
+     "totalConcluidos": 4,
+     "totalPublicacoes": 3,
+     "totalFalhas": 0,
+     "lockOcupado": 0,
+     "ultimoLockOcupadoEm": null,
+     "cooldown": 0,
+     "ultimoCooldownEm": null
+    }
+   }
+  },
+  "metrics_pos": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "versao": 4,
+    "updatedAt": "2026-09-28T15:00:00.000Z",
+    "origem": "dashboard_refresh",
+    "coverage": {
+     "oldestDate": "2026-07-30T13:56:00.000Z",
+     "newestDate": "2026-09-28T15:00:00.000Z",
+     "dataFromYmd": "2026-07-30",
+     "dataToYmd": "2026-09-28",
+     "partial": false,
+     "totalRegistros": 322,
+     "alvo": "ativos"
+    },
+    "porStatus": {
+     "paid": 308
+    },
+    "cancelados": {
+     "disponivel": false,
+     "total": null,
+     "motivo": "fora_do_escopo_do_snapshot_ativos",
+     "fonte": "carga_sob_demanda_no_dashboard"
+    },
+    "janelas": {
+     "hoje": {
+      "receita": 675,
+      "pedidos": 4,
+      "unidades": 6,
+      "ticketMedio": 168.75,
+      "fromYmd": "2026-09-28",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "ultimos7": {
+      "receita": 5075,
+      "pedidos": 35,
+      "unidades": 52,
+      "ticketMedio": 145,
+      "fromYmd": "2026-09-22",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "mesAtual": {
+      "receita": 19995,
+      "pedidos": 142,
+      "unidades": 213,
+      "ticketMedio": 140.80985915492957,
+      "fromYmd": "2026-09-01",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     },
+     "historico": {
+      "receita": 43250,
+      "pedidos": 308,
+      "unidades": 462,
+      "ticketMedio": 140.42207792207793,
+      "fromYmd": "2026-07-30",
+      "toYmd": "2026-09-28",
+      "disponivel": true,
+      "cobertura": "parcial"
+     }
+    },
+    "periodo": {
+     "fromYmd": "2026-09-21",
+     "toYmd": "2026-09-28",
+     "faturamento": {
+      "bruto": 5685,
+      "tarifaML": -841.38,
+      "tarifaEnv": -818.64,
+      "liquido": 4024.98,
+      "estimado": true,
+      "fonte": "dashboard_legado",
+      "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
+     },
+     "porItem": [
+      {
+       "itemId": "MLB104",
+       "pedidos": 9,
+       "unidades": 14,
+       "receita": 1410
+      },
+      {
+       "itemId": "MLB101",
+       "pedidos": 8,
+       "unidades": 12,
+       "receita": 1105
+      },
+      {
+       "itemId": "MLB102",
+       "pedidos": 8,
+       "unidades": 12,
+       "receita": 1090
+      },
+      {
+       "itemId": "MLB100",
+       "pedidos": 7,
+       "unidades": 11,
+       "receita": 1040
+      },
+      {
+       "itemId": "MLB103",
+       "pedidos": 8,
+       "unidades": 11,
+       "receita": 1040
+      }
+     ]
+    },
+    "reputacao60d": {
+     "fromYmd": "2026-07-30",
+     "toYmd": "2026-09-28",
+     "bruto": 43250
+    },
+    "estoque30d": {
+     "fromYmd": "2026-08-29",
+     "toYmd": "2026-09-28",
+     "porItem": [
+      {
+       "itemId": "MLB102",
+       "unidades": 48
+      },
+      {
+       "itemId": "MLB104",
+       "unidades": 48
+      },
+      {
+       "itemId": "MLB101",
+       "unidades": 47
+      },
+      {
+       "itemId": "MLB100",
+       "unidades": 46
+      },
+      {
+       "itemId": "MLB103",
+       "unidades": 46
+      }
+     ]
+    },
+    "faturamentoMensal": [
+     {
+      "mes": "2026-07",
+      "total": 1105
+     },
+     {
+      "mes": "2026-08",
+      "total": 22150
+     },
+     {
+      "mes": "2026-09",
+      "total": 19995
+     }
+    ],
+    "warnings": [
+     "cobertura_parcial_fim",
+     "cobertura_parcial_inicio"
+    ]
+   }
+  },
+  "margin_pos": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "periodo": {
+     "fromYmd": "2026-09-21",
+     "toYmd": "2026-09-28"
+    },
+    "cobertura": {
+     "disponivel": true,
+     "tipo": "parcial",
+     "fromYmd": "2026-09-21",
+     "toYmd": "2026-09-28"
+    },
+    "totais": {
+     "receitaProdutos": 8620,
+     "unidades": 60,
+     "skusDistintos": 5,
+     "tarifaML": 0,
+     "tarifaEnvio": 0,
+     "receitaLiquida": 0,
+     "custoTotal": 0,
+     "margem": 0,
+     "margemPct": null,
+     "receitaComCusto": 0
+    },
+    "porSku": [
+     {
+      "sku": "VT-4",
+      "semSku": false,
+      "label": "Vinho 4",
+      "itemIds": [
+       "MLB104"
+      ],
+      "unidades": 14,
+      "pedidos": 9,
+      "receitaProdutos": 2170,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-0",
+      "semSku": false,
+      "label": "Vinho 0",
+      "itemIds": [
+       "MLB100"
+      ],
+      "unidades": 11,
+      "pedidos": 7,
+      "receitaProdutos": 1750,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-2",
+      "semSku": false,
+      "label": "Vinho 2",
+      "itemIds": [
+       "MLB102"
+      ],
+      "unidades": 12,
+      "pedidos": 8,
+      "receitaProdutos": 1650,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-1",
+      "semSku": false,
+      "label": "Vinho 1",
+      "itemIds": [
+       "MLB101"
+      ],
+      "unidades": 12,
+      "pedidos": 8,
+      "receitaProdutos": 1575,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     },
+     {
+      "sku": "VT-3",
+      "semSku": false,
+      "label": "Vinho 3",
+      "itemIds": [
+       "MLB103"
+      ],
+      "unidades": 11,
+      "pedidos": 8,
+      "receitaProdutos": 1475,
+      "receitaComCusto": 0,
+      "custoCobertura": "ausente",
+      "custoTotal": null,
+      "tarifaML": null,
+      "tarifaEnvio": null,
+      "margem": null,
+      "margemPct": null
+     }
+    ],
+    "semCusto": {
+     "skus": 5,
+     "receitaProdutos": 8620,
+     "unidades": 60,
+     "fracaoReceita": 1,
+     "titulos": [
+      "Vinho 0",
+      "Vinho 1",
+      "Vinho 2",
+      "Vinho 3",
+      "Vinho 4"
+     ]
+    },
+    "logistica": {
+     "enviosConhecidos": 0,
+     "enviosTotal": 308,
+     "fracao": 0
+    },
+    "frete": {
+     "real": 0,
+     "estimado": 0,
+     "fracaoReceitaReal": 1
+    },
+    "antesDePublicidade": true,
+    "estimado": true,
+    "warnings": [
+     "cobertura_parcial_fim",
+     "antes_de_publicidade",
+     "custo_parcial"
+    ]
+   }
+  },
+  "catalog": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "versao": 1,
+    "updatedAt": "2026-09-28T15:00:00.000Z",
+    "source": "rebuilt",
+    "complete": true,
+    "freshness": {
+     "ageSeconds": 0,
+     "stale": false,
+     "softTtlSeconds": 900,
+     "hardTtlSeconds": 86400
+    },
+    "counts": {
+     "total": 5,
+     "active": 5,
+     "paused": 0,
+     "closed": 0
+    },
+    "items": [
+     {
+      "id": "MLB100",
+      "title": "Vinho 0",
+      "status": "active",
+      "price": 100,
+      "original_price": null,
+      "available_quantity": 10,
+      "sold_quantity": 5,
+      "listing_type_id": "gold_special",
+      "catalog_listing": null,
+      "inventory_id": null,
+      "permalink": "https://x",
+      "thumbnail": "",
+      "last_updated": null,
+      "seller_custom_field": "VT-0",
+      "seller_sku": null,
+      "tags": null,
+      "shipping": {
+       "logistic_type": "fulfillment"
+      },
+      "attributes": null
+     },
+     {
+      "id": "MLB101",
+      "title": "Vinho 1",
+      "status": "active",
+      "price": 100,
+      "original_price": null,
+      "available_quantity": 11,
+      "sold_quantity": 5,
+      "listing_type_id": "gold_special",
+      "catalog_listing": null,
+      "inventory_id": null,
+      "permalink": "https://x",
+      "thumbnail": "",
+      "last_updated": null,
+      "seller_custom_field": "VT-1",
+      "seller_sku": null,
+      "tags": null,
+      "shipping": {
+       "logistic_type": "fulfillment"
+      },
+      "attributes": null
+     },
+     {
+      "id": "MLB102",
+      "title": "Vinho 2",
+      "status": "active",
+      "price": 100,
+      "original_price": null,
+      "available_quantity": 12,
+      "sold_quantity": 5,
+      "listing_type_id": "gold_special",
+      "catalog_listing": null,
+      "inventory_id": null,
+      "permalink": "https://x",
+      "thumbnail": "",
+      "last_updated": null,
+      "seller_custom_field": "VT-2",
+      "seller_sku": null,
+      "tags": null,
+      "shipping": {
+       "logistic_type": "fulfillment"
+      },
+      "attributes": null
+     },
+     {
+      "id": "MLB103",
+      "title": "Vinho 3",
+      "status": "active",
+      "price": 100,
+      "original_price": null,
+      "available_quantity": 13,
+      "sold_quantity": 5,
+      "listing_type_id": "gold_special",
+      "catalog_listing": null,
+      "inventory_id": null,
+      "permalink": "https://x",
+      "thumbnail": "",
+      "last_updated": null,
+      "seller_custom_field": "VT-3",
+      "seller_sku": null,
+      "tags": null,
+      "shipping": {
+       "logistic_type": "fulfillment"
+      },
+      "attributes": null
+     },
+     {
+      "id": "MLB104",
+      "title": "Vinho 4",
+      "status": "active",
+      "price": 100,
+      "original_price": null,
+      "available_quantity": 14,
+      "sold_quantity": 5,
+      "listing_type_id": "gold_special",
+      "catalog_listing": null,
+      "inventory_id": null,
+      "permalink": "https://x",
+      "thumbnail": "",
+      "last_updated": null,
+      "seller_custom_field": "VT-4",
+      "seller_sku": null,
+      "tags": null,
+      "shipping": {
+       "logistic_type": "fulfillment"
+      },
+      "attributes": null
+     }
+    ],
+    "warnings": []
+   }
+  },
+  "inventory": {
+   "status": 200,
+   "body": {
+    "ok": true,
+    "catalogo": {
+     "versao": 1,
+     "updatedAt": "2026-09-28T15:00:00.000Z",
+     "counts": {
+      "total": 5,
+      "active": 5,
+      "paused": 0,
+      "closed": 0
+     },
+     "stale": false
+    },
+    "periodo": {
+     "fromYmd": "2026-08-30",
+     "toYmd": "2026-09-28",
+     "dias": 30
+    },
+    "modo": "seguro",
+    "escopo": "ambos",
+    "vendas": {
+     "disponivel": true
+    },
+    "limites": {
+     "rupturaDiasMax": 30,
+     "alertaDiasMax": 90,
+     "okDiasMax": 365,
+     "fonte": "dashboard_legado"
+    },
+    "proprio": {
+     "resumo": {
+      "skus": 5,
+      "unidades": 0,
+      "porTipo": {
+       "ruptura": 5,
+       "alerta": 0,
+       "ok": 0,
+       "excesso": 0,
+       "semvenda": 0
+      }
+     },
+     "linhas": [
+      {
+       "sku": "VT-0",
+       "semSku": false,
+       "label": "Vinho 0",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB100"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 10,
+       "estTotal": 10,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 0,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-1",
+       "semSku": false,
+       "label": "Vinho 1",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB101"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 11,
+       "estTotal": 11,
+       "vendasPeriodo": 47,
+       "velocidadeDia": 1.57,
+       "diasCobertura": 0,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-2",
+       "semSku": false,
+       "label": "Vinho 2",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB102"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 12,
+       "estTotal": 12,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 0,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-3",
+       "semSku": false,
+       "label": "Vinho 3",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB103"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 13,
+       "estTotal": 13,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 0,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-4",
+       "semSku": false,
+       "label": "Vinho 4",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB104"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 14,
+       "estTotal": 14,
+       "vendasPeriodo": 46,
+       "velocidadeDia": 1.53,
+       "diasCobertura": 0,
+       "tipo": "ruptura",
+       "alertas": []
+      }
+     ]
+    },
+    "full": {
+     "resumo": {
+      "skus": 5,
+      "unidades": 60,
+      "porTipo": {
+       "ruptura": 5,
+       "alerta": 0,
+       "ok": 0,
+       "excesso": 0,
+       "semvenda": 0
+      }
+     },
+     "linhas": [
+      {
+       "sku": "VT-0",
+       "semSku": false,
+       "label": "Vinho 0",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB100"
+       ],
+       "estClassico": 10,
+       "estPremium": 0,
+       "estTotal": 10,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 7,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-1",
+       "semSku": false,
+       "label": "Vinho 1",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB101"
+       ],
+       "estClassico": 11,
+       "estPremium": 0,
+       "estTotal": 11,
+       "vendasPeriodo": 47,
+       "velocidadeDia": 1.57,
+       "diasCobertura": 7,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-2",
+       "semSku": false,
+       "label": "Vinho 2",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB102"
+       ],
+       "estClassico": 12,
+       "estPremium": 0,
+       "estTotal": 12,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 8,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-3",
+       "semSku": false,
+       "label": "Vinho 3",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB103"
+       ],
+       "estClassico": 13,
+       "estPremium": 0,
+       "estTotal": 13,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 9,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-4",
+       "semSku": false,
+       "label": "Vinho 4",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB104"
+       ],
+       "estClassico": 14,
+       "estPremium": 0,
+       "estTotal": 14,
+       "vendasPeriodo": 46,
+       "velocidadeDia": 1.53,
+       "diasCobertura": 9,
+       "tipo": "ruptura",
+       "alertas": []
+      }
+     ]
+    },
+    "total": {
+     "resumo": {
+      "skus": 5,
+      "unidades": 60,
+      "porTipo": {
+       "ruptura": 5,
+       "alerta": 0,
+       "ok": 0,
+       "excesso": 0,
+       "semvenda": 0
+      }
+     },
+     "linhas": [
+      {
+       "sku": "VT-0",
+       "semSku": false,
+       "label": "Vinho 0",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB100"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 10,
+       "estTotal": 10,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 7,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-1",
+       "semSku": false,
+       "label": "Vinho 1",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB101"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 11,
+       "estTotal": 11,
+       "vendasPeriodo": 47,
+       "velocidadeDia": 1.57,
+       "diasCobertura": 7,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-2",
+       "semSku": false,
+       "label": "Vinho 2",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB102"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 12,
+       "estTotal": 12,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 8,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-3",
+       "semSku": false,
+       "label": "Vinho 3",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB103"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 13,
+       "estTotal": 13,
+       "vendasPeriodo": 45,
+       "velocidadeDia": 1.5,
+       "diasCobertura": 9,
+       "tipo": "ruptura",
+       "alertas": []
+      },
+      {
+       "sku": "VT-4",
+       "semSku": false,
+       "label": "Vinho 4",
+       "anuncios": 1,
+       "itemIds": [
+        "MLB104"
+       ],
+       "preco": 100,
+       "estProprio": 0,
+       "estFull": 14,
+       "estTotal": 14,
+       "vendasPeriodo": 46,
+       "velocidadeDia": 1.53,
+       "diasCobertura": 9,
+       "tipo": "ruptura",
+       "alertas": []
+      }
+     ]
+    },
+    "warnings": []
+   }
+  }
+ },
+ "estado": {
+  "items:catalog:chunk:1:0": "sha256:6cb880c7f69ec495253b480361794244c040b5fa967b2680a7e86510af7d7f85",
+  "items:catalog:manifest": {
+   "versao": 1,
+   "chunks": [
+    "items:catalog:chunk:1:0"
+   ],
+   "counts": {
+    "total": 5,
+    "active": 5,
+    "paused": 0,
+    "closed": 0
+   },
+   "chunkSize": 500,
+   "updatedAt": "2026-09-28T15:00:00.000Z",
+   "complete": true
+  },
+  "ml:access_token": "<token-falso>",
+  "ml:refresh_token": "<token-falso>",
+  "orders:chunk:3:0": "sha256:cd62ba675cc97b555b35df96515730bf11d5ac65f9d114d328d9927b08af2013",
+  "orders:chunk:4:0": "sha256:08152de8fa19618a97b5ad0ccdb1502318a6dfb8142c9d457147b07823208636",
+  "orders:evt:obs:notif": {
+   "ultimaNotificacaoEm": "2026-09-28T15:00:00.000Z",
+   "ultimaNotificacaoTopico": "orders_v2",
+   "ultimaNotificacaoPedido": "999999",
+   "ultimaNotificacaoSent": "2026-09-28T15:00:00.000Z",
+   "ultimoAckMs": 0,
+   "ultimoDrenoPedidoEm": "2026-09-28T15:00:00.000Z",
+   "totalRecebidas": 1,
+   "totalDuplicadas": 0,
+   "totalRejeitadas": 0,
+   "ultimoMotivoRejeicao": null,
+   "ultimaRejeicaoEm": null
+  },
+  "orders:evt:obs:proc": {
+   "ultimoPedidoAtualizadoId": "999999",
+   "ultimoPedidoAtualizadoEm": "2026-09-28T15:00:00.000Z",
+   "ultimaAcao": "novo",
+   "ultimaVersaoPublicada": 3,
+   "ultimaLatenciaTotalMs": 0,
+   "totalNovos": 1,
+   "totalAtualizados": 0,
+   "totalSemMudanca": 0,
+   "totalFalhas": 0,
+   "ultimoErro": null,
+   "ultimoErroEm": null,
+   "ultimoDrenoEm": "2026-09-28T15:00:00.000Z"
+  },
+  "orders:evt:seen:n-gold": 1,
+  "orders:manifest": {
+   "versao": 4,
+   "chunks": [
+    "orders:chunk:4:0"
+   ],
+   "totalRegistros": 322,
+   "newestDate": "2026-09-28T15:00:00.000Z",
+   "oldestDate": "2026-07-30T13:56:00.000Z",
+   "chunkSize": 500,
+   "updatedAt": "2026-09-28T15:00:00.000Z",
+   "origem": "dashboard_refresh",
+   "chunkCounts": [
+    322
+   ]
+  },
+  "orders:manifest:previous": {
+   "versao": 3,
+   "chunks": [
+    "orders:chunk:3:0"
+   ],
+   "totalRegistros": 321,
+   "newestDate": "2026-09-28T14:59:00.000Z",
+   "oldestDate": "2026-07-30T13:56:00.000Z",
+   "chunkSize": 500,
+   "updatedAt": "2026-09-28T15:00:00.000Z",
+   "origem": "webhook",
+   "chunkCounts": [
+    321
+   ]
+  },
+  "orders:sync:head": {
+   "versao": 4,
+   "assinatura": "1f67d5461d6ed09e6b0c887c3a0440b542c77f76e2822737f0fcd4d2b20e9fd1"
+  },
+  "orders:sync:obs": {
+   "ultimoSyncTentadoEm": "2026-09-28T15:00:00.000Z",
+   "ultimaOrigemTentada": "dashboard_refresh",
+   "ultimoSyncConcluidoEm": "2026-09-28T15:00:00.000Z",
+   "ultimaOrigem": "dashboard_refresh",
+   "ultimoModo": "rapido",
+   "ultimaDuracaoMs": 0,
+   "ultimasChamadasML": 1,
+   "ultimosPedidosNovos": 1,
+   "ultimosPedidosAtualizados": 0,
+   "ultimoPedidoNovoEm": "2026-09-28T15:00:00.000Z",
+   "ultimoPedidoNovoOrigem": "dashboard_refresh",
+   "ultimaVersaoPublicada": 4,
+   "ultimaVersaoPublicadaEm": "2026-09-28T15:00:00.000Z",
+   "ultimaVersaoPublicadaOrigem": "dashboard_refresh",
+   "ultimaFalhaEm": null,
+   "ultimaFalhaMotivo": null,
+   "ultimaFalhaOrigem": null,
+   "totalTentativas": 3,
+   "totalConcluidos": 4,
+   "totalPublicacoes": 3,
+   "totalFalhas": 0,
+   "lockOcupado": 0,
+   "ultimoLockOcupadoEm": null,
+   "cooldown": 0,
+   "ultimoCooldownEm": null
+  },
+  "orders:sync:refresh:cooldown": 1790607600000,
+  "orders:sync:status:ativos": {
+   "ultimaVersao": 4,
+   "totalRegistros": 322,
+   "newestDate": "2026-09-28T15:00:00.000Z",
+   "lastSyncAt": "2026-09-28T15:00:00.000Z",
+   "lastResult": "ok",
+   "emAndamento": false,
+   "ultimaRevisaoEm": "2026-09-28T15:00:00.000Z"
+  }
+ }
+}

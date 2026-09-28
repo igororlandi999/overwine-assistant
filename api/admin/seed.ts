@@ -14,6 +14,8 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { seedTokens, isChainSeeded } from '../../src/lib/ml-auth.js';
+import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { safeEquals, rateLimitOk, clientIp, maskIp, json } from '../../src/lib/http.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -41,24 +43,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 401, { error: 'Não autorizado.' });
     }
 
-    const { code, refreshToken, force } = (req.body ?? {}) as {
+    const { code, refreshToken, force, conta: contaParam } = (req.body ?? {}) as {
       code?: string;
       refreshToken?: string;
       force?: boolean;
+      conta?: unknown;
     };
 
-    if ((await isChainSeeded(cache)) && force !== true) {
+    // Semeadura é AÇÃO: uma conta, e os tokens vão para o espaço dela.
+    let conta;
+    try {
+      conta = resolverContaDeAcao(contaParam);
+    } catch (e) {
+      if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
+      throw e;
+    }
+    const cacheDados = cacheDaConta(cache, conta);
+
+    if ((await isChainSeeded(cacheDados)) && force !== true) {
       return json(res, 409, {
         error: 'Cadeia já semeada. Para substituir intencionalmente, envie { "force": true }.',
       });
     }
 
-    console.info(`[seed] tentativa ip=${maskIp(ip)} via=${code ? 'code' : 'refreshToken'}`);
-    const result = await seedTokens(cache, { code, refreshToken });
+    console.info(`[seed] tentativa ip=${maskIp(ip)} conta=${conta.id} via=${code ? 'code' : 'refreshToken'}`);
+    const result = await seedTokens(cacheDados, { code, refreshToken });
 
     return json(res, 200, {
       ok: true,
-      user_id_validado: Number(env.ML_USER_ID),
+      conta: conta.id,
+      user_id_validado: Number(mlUserIdDaConta(conta)),
       access_token_expira_em: new Date(result.expiresAt).toISOString(),
       proximo_passo: 'Defina SEED_ENABLED=false na Vercel e faça redeploy.',
     });

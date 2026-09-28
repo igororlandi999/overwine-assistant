@@ -337,6 +337,43 @@ atualização, exatamente como antes.
 atrás pode significar "nada vendeu" ou "a atualização parou" — quem separa os
 dois é `lastSyncAt` (a reconciliação rodou) junto de `tempoReal`.
 
+## Contas (empresa × canal) — etapa 0 do plano multi-conta
+
+O backend passou a ter a noção de **conta** (`src/config/contas.json`,
+`src/config/contas.ts`), sem mudar o comportamento de nada que existe:
+
+- a conta **legada** é `overwine-ml` (Overwine no Mercado Livre). É a única
+  ativa e a única com **prefixo vazio** no Redis: snapshot, catálogo, mapa de
+  envios, fila, locks, cooldown, telemetria e tokens continuam nas chaves e
+  nos formatos de sempre — nenhuma migração;
+- toda conta nova (`degustar-ml`, `alemmar-amazon`, …) está declarada
+  **inativa** e recebe um prefixo próprio (`c:<id>:`) aplicado por
+  `cacheDaConta` (`src/lib/cache/conta-cache.ts`) a **toda** a interface
+  `Cache` — inclusive `setNX`, o compare-and-delete atômico, `incr` e a fila;
+- **rotas de leitura** (`orders/*`, `items/*`) aceitam `contas=a,b`;
+  **ações** (`orders/refresh`, `admin/*`, `ml/<op>`) aceitam `conta=a`, uma só;
+- **ausente = legada.** É a compatibilidade da transição para os consumidores
+  atuais (dashboard, GitHub Actions, scripts), e é explícita no código;
+- **presente e inválida = 400** (`conta_invalida`, `conta_inativa`,
+  `conta_nao_habilitada`, `conta_unica`). Nunca cai na legada em silêncio;
+- `MULTI_CONTA_ENABLED` (padrão `false`): desligada, só a legada é aceita.
+  O código multi-conta vai para produção desligado.
+
+Sessão do dashboard e rate limit **não** são por conta: são do backend.
+
+`OrderSlim` ganhou `conta`/`canal` **opcionais**; `toSlim` não os grava, então
+os snapshots publicados continuam idênticos. `chaveDoPedido()` é a identidade
+composta (`conta:id`) que a consolidação usará — o id externo fica intacto.
+
+**Recuperação**: código — reverter o commit da etapa 0; dados — nada a
+reverter, porque a conta legada não teve nenhuma chave renomeada ou
+reformatada. A prova fica no repositório: `tests/legado-golden.test.ts`
+refaz um roteiro completo (leituras, sincronização, webhook, refresh,
+catálogo, inventário) com base sintética, ML simulado e relógio congelado, e
+exige igualdade com `tests/fixtures/legado-golden.json`, gerada pelo código
+anterior à etapa 0 (`5e76642`). Regerar só com `GOLDEN_UPDATE=1`, e só quando
+uma mudança de comportamento for intencional e revisada.
+
 ## Assistente (`/api/chat`)
 
 Não é um wrapper de prompt em cima do dashboard. O caminho é:
