@@ -5,3 +5,6 @@ node_modules/
 dist/
 .env*
 .vercel
+e2e/saida/
+e2e/node_modules/
+e2e/package-lock.json

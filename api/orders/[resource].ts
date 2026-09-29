@@ -4,6 +4,12 @@
  * GET /api/orders/metrics?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
  * GET /api/orders/logistics
  * GET /api/orders/margin?dias=7 | ?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * GET /api/orders/contas            — contas que o seletor pode oferecer
+ *
+ * Toda leitura aceita `contas=a` (uma conta) ou `contas=a,b` (consolidado,
+ * etapa 4 do plano multi-conta). Ausente = conta legada, com a resposta de
+ * sempre, byte a byte. A união e o perfil financeiro por conta vivem em
+ * orders-consolidado.service.
  *
  * Rota de LEITURA dos snapshots de pedidos (Fase 4c.1). Uma única função
  * serverless com `resource ∈ {status, list, metrics}` (padrão de
@@ -39,7 +45,14 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
-import { resolverContaUnicaDeLeitura, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import {
+  resolverContasDeLeitura, contaTemFinanceiro, descreverContas,
+  ContaInvalidaError, erroContaParaHttp, type Conta,
+} from '../../src/config/contas.js';
+import {
+  statusConsolidado, paginaConsolidada, lerBases, metricsDaSelecao,
+  logisticaDaSelecao, margemDaSelecao, marcar, type ContaLida,
+} from '../../src/services/orders-consolidado.service.js';
 import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
@@ -59,7 +72,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
 
   const resource = String(req.query.resource || '');
-  const RECURSOS = new Set(['status', 'list', 'metrics', 'logistics', 'margin']);
+  const RECURSOS = new Set(['status', 'list', 'metrics', 'logistics', 'margin', 'contas']);
   if (!RECURSOS.has(resource)) {
     return json(res, 404, { error: `Recurso desconhecido: ${resource}` });
   }
@@ -82,19 +95,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
+    // Só rótulos e capacidades — nenhum dado de conta é lido aqui.
+    if (resource === 'contas') return json(res, 200, { ok: true, ...descreverContas() });
+
     // Conta: ausente = legada (compatibilidade da transição); inválida = 400.
-    // Mais de uma conta = 400 `consolidacao_indisponivel` até a etapa 4:
-    // nunca responder pela primeira em silêncio.
-    let conta;
+    // Mais de uma = consolidado: TODAS precisam ser válidas, senão 400 — nunca
+    // responder só pelas que passaram.
+    let contas: Conta[];
     try {
-      conta = resolverContaUnicaDeLeitura(req.query.contas);
+      contas = resolverContasDeLeitura(req.query.contas);
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;
     }
-    const cacheDados = cacheDaConta(cache, conta);
+    const lidas: ContaLida[] = contas.map(c => ({ conta: c, cache: cacheDaConta(cache, c) }));
+    const varias = contas.length > 1;
+    const conta = contas[0];
+    const cacheDados = lidas[0].cache;
 
     const alvo = parseAlvo(req.query.alvo);
+
+    // ── Seleção que não é "a conta legada sozinha" ──────────────────────────
+    if (varias && resource === 'status') {
+      return json(res, 200, await statusConsolidado(lidas, alvo, {
+        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
+      }));
+    }
+    if (varias && resource === 'logistics') {
+      return json(res, 200, await logisticaDaSelecao(lidas));
+    }
+    if (varias && resource === 'list') {
+      const rawCursor = typeof req.query.cursor === 'string' ? req.query.cursor : null;
+      const r = await paginaConsolidada(lidas, alvo, rawCursor, req.query.pageSize);
+      if (r.ok) return json(res, 200, r.value);
+      switch (r.code) {
+        case 'invalid_cursor': return json(res, 400, { error: 'invalid_cursor' });
+        case 'not_ready': return json(res, 409, { error: 'not_ready' });
+        case 'snapshot_changed':
+          return json(res, 409, { error: 'snapshot_changed', versao: r.versao, totalRegistros: r.totalRegistros });
+        case 'inconsistente':
+          console.error(`[orders-read] snapshot inconsistente alvo=${alvo} contas=${contas.map(c => c.id).join(',')}`);
+          return json(res, 500, { error: 'snapshot_inconsistente' });
+      }
+    }
+    // Métricas e margem: a união (várias) e a conta sem custos/tarifas próprios
+    // passam pelo mesmo caminho, que declara o que é indisponível.
+    const semPerfil = contas.some(c => !contaTemFinanceiro(c));
+    if ((varias || semPerfil) && (resource === 'metrics' || resource === 'margin')) {
+      const p = resolverPeriodo(req.query as Record<string, unknown>);
+      if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
+      // Margem consolidada entre contas COM perfil exigiria fundir custos de
+      // empresas diferentes; não existe, e não se improvisa.
+      if (resource === 'margin' && !semPerfil) {
+        return json(res, 400, { error: 'consolidacao_indisponivel', conta: contas.map(c => c.id).join(',') });
+      }
+      const b = await lerBases(lidas);
+      if (!b.ok) return json(res, 409, { error: 'not_ready', contasNaoProntas: b.contasNaoProntas });
+      if (resource === 'metrics') return json(res, 200, { ok: true, ...metricsDaSelecao(b.bases, p.periodo) });
+      return json(res, 200, await margemDaSelecao(b.bases, p.periodo));
+    }
 
     if (resource === 'status') {
       // Rota BARATA de propósito: manifesto + status + telemetria, sem tocar
@@ -254,7 +313,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const rawPageSize = req.query.pageSize;
     const r = await getPage(cacheDados, alvo, rawCursor, rawPageSize);
 
-    if (r.ok) return json(res, 200, r.value);
+    // Conta não legada: os pedidos saem marcados. A legada segue sem o campo,
+    // com o corpo de sempre.
+    if (r.ok) return json(res, 200, conta.legada ? r.value : { ...r.value, conta: conta.id, items: marcar(r.value.items, conta) });
     switch (r.code) {
       case 'invalid_cursor':
         return json(res, 400, { error: 'invalid_cursor' });

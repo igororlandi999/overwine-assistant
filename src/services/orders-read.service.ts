@@ -252,7 +252,7 @@ export function normalizarPageSize(raw: unknown): number {
  * - cursor.v === previous.versao: previous;
  * - senão: snapshot_changed (aponta a versão atual para o cliente reiniciar).
  */
-async function resolverManifesto(
+export async function resolverManifesto(
   cache: Cache,
   alvo: Alvo,
   cursor: CursorData | null
@@ -315,7 +315,7 @@ function localizar(man: OrdersManifest, offset: number): { chunkIdx: number; pos
  * Avança por chunks consecutivos a partir do índice localizado até preencher a
  * página ou acabar, e por isso não depende de o último chunk estar cheio.
  */
-async function lerJanela(
+export async function lerJanela(
   cache: Cache,
   man: OrdersManifest,
   offset: number,

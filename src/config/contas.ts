@@ -41,6 +41,16 @@ export interface Conta {
   legada: boolean;
   /** Prefixo de toda chave Redis da conta. Vazio SÓ na legada. */
   prefixo: string;
+  /**
+   * Perfil FINANCEIRO da conta: qual conjunto de custos de aquisição
+   * (`custos.json`) e de tarifas médias (`taxas.json`) vale para ela. Hoje só
+   * existe o da Overwine no Mercado Livre, e ele é DELA: foi informado pelo
+   * proprietário da Overwine a partir dos pedidos da Overwine. Conta sem
+   * perfil não tem margem, custo, tarifa estimada nem líquido — esses campos
+   * saem `null` com o motivo declarado, nunca zero e nunca o número de outra
+   * empresa. Ausente no registro = sem perfil.
+   */
+  perfilFinanceiro?: string | null;
   ml?: { userIdEnv: string };
   amazon?: { marketplaceId: string; credenciaisEnv: string };
 }
@@ -51,7 +61,7 @@ export type MotivoContaInvalida =
   | 'conta_nao_habilitada'      // MULTI_CONTA_ENABLED desligada e não é a legada (ou lista com mais de uma)
   | 'conta_sem_suporte'         // canal sem adaptador implementado (amazon, shopee, loja — etapas 2+)
   | 'conta_sem_credencial'      // conta ML cuja variável de user_id não está configurada
-  | 'consolidacao_indisponivel' // leitura com mais de uma conta antes da etapa 4
+  | 'consolidacao_indisponivel' // recurso que não consolida recebeu mais de uma conta
   | 'conta_unica';              // ação recebeu lista
 
 export class ContaInvalidaError extends Error {
@@ -64,7 +74,7 @@ export class ContaInvalidaError extends Error {
 interface Registro {
   versao: number;
   legada: string;
-  contas: Array<Omit<Conta, 'legada' | 'canal'> & { legada?: boolean; canal: string }>;
+  contas: Array<Omit<Conta, 'legada' | 'canal' | 'perfilFinanceiro'> & { legada?: boolean; canal: string; perfilFinanceiro?: string | null }>;
 }
 
 const REG = registro as unknown as Registro;
@@ -73,6 +83,7 @@ const DECLARADAS: readonly Conta[] = REG.contas.map(c => ({
   ...c,
   canal: c.canal as Canal,
   legada: c.legada === true,
+  perfilFinanceiro: typeof c.perfilFinanceiro === 'string' && c.perfilFinanceiro ? c.perfilFinanceiro : null,
 }));
 
 /**
@@ -241,6 +252,51 @@ export function mlUserIdDaConta(conta: Conta): string {
   const v = process.env[conta.ml.userIdEnv];
   if (!v || !/^\d+$/.test(v)) throw new Error(`variável ${conta.ml.userIdEnv} ausente ou inválida para a conta ${conta.id}`);
   return v;
+}
+
+/** Único perfil financeiro implementado: `custos.json` + `taxas.json`. */
+export const PERFIL_FINANCEIRO_OVERWINE = 'overwine-ml';
+
+/** A conta tem custos e tarifas PRÓPRIOS configurados? */
+export function contaTemFinanceiro(c: Pick<Conta, 'perfilFinanceiro'>): boolean {
+  return c.perfilFinanceiro === PERFIL_FINANCEIRO_OVERWINE;
+}
+
+export const MOTIVO_SEM_FINANCEIRO = 'perfil_financeiro_nao_configurado';
+
+/**
+ * Projeção pública das contas para o seletor do dashboard. Só rótulos e
+ * capacidades: nenhum user_id, nome de variável, prefixo Redis ou credencial.
+ * `selecionavel` é a MESMA regra de `validarContaParaUso`, para a tela nunca
+ * oferecer uma conta que a rota recusaria.
+ */
+export interface ContaPublica {
+  id: string;
+  empresa: string;
+  empresaRotulo: string;
+  canal: Canal;
+  canalRotulo: string;
+  rotulo: string;
+  legada: boolean;
+  selecionavel: boolean;
+  motivoIndisponivel: MotivoContaInvalida | null;
+  financeiro: boolean;
+}
+
+export function descreverContas(): { multiConta: boolean; contas: ContaPublica[] } {
+  const contas = contasAtuais().map((c): ContaPublica => {
+    let motivo: MotivoContaInvalida | null = null;
+    try { validarContaParaUso(c); } catch (e) {
+      if (e instanceof ContaInvalidaError) motivo = e.motivo; else throw e;
+    }
+    return {
+      id: c.id, empresa: c.empresa, empresaRotulo: c.empresaRotulo,
+      canal: c.canal, canalRotulo: c.canalRotulo, rotulo: c.rotulo,
+      legada: c.legada, selecionavel: motivo === null, motivoIndisponivel: motivo,
+      financeiro: contaTemFinanceiro(c),
+    };
+  });
+  return { multiConta: multiContaHabilitada(), contas };
 }
 
 /** Corpo padrão de erro 400 para as rotas. Nunca ecoa mais que o id pedido. */

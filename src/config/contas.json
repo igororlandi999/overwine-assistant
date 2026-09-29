@@ -13,6 +13,7 @@
       "ativo": true,
       "legada": true,
       "prefixo": "",
+      "perfilFinanceiro": "overwine-ml",
       "ml": { "userIdEnv": "ML_USER_ID" }
     },
     {

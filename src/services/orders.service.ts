@@ -28,6 +28,8 @@ import taxasConfig from '../config/taxas.json' with { type: 'json' };
 export interface OrderItemInput {
   quantity?: number | null;
   unit_price?: number | null;
+  /** Tarifa de venda do Mercado Livre, POR UNIDADE do item. */
+  sale_fee?: number | null;
   item?: {
     id?: string | null;
     title?: string | null;
@@ -79,6 +81,13 @@ export interface OrderSlim {
   order_items: Array<{
     quantity: number | null;
     unit_price: number | null;
+    /**
+     * Tarifa de venda REAL, por unidade, como o Mercado Livre a devolve no
+     * pedido. OPCIONAL e AUSENTE quando a origem não a traz: os snapshots
+     * publicados antes deste campo não o têm e continuam válidos. Quem apura
+     * trata a ausência como "desconhecida" — nunca como zero.
+     */
+    sale_fee?: number;
     item: {
       id: string | null;
       title: string | null;
@@ -122,16 +131,24 @@ export function toSlim(order: OrderInput): OrderSlim {
     date_created: order.date_created ?? null,
     paid_amount: order.paid_amount ?? null,
     total_amount: order.total_amount ?? null,
-    order_items: (order.order_items ?? []).map(oi => ({
-      quantity: oi.quantity ?? null,
-      unit_price: oi.unit_price ?? null,
-      item: {
-        id: oi.item?.id ?? null,
-        title: oi.item?.title ?? null,
-        seller_sku: oi.item?.seller_sku ?? null,
-        variation_id: oi.item?.variation_id ?? null,
-      },
-    })),
+    order_items: (order.order_items ?? []).map(oi => {
+      const item: OrderSlim['order_items'][number] = {
+        quantity: oi.quantity ?? null,
+        unit_price: oi.unit_price ?? null,
+        item: {
+          id: oi.item?.id ?? null,
+          title: oi.item?.title ?? null,
+          seller_sku: oi.item?.seller_sku ?? null,
+          variation_id: oi.item?.variation_id ?? null,
+        },
+      };
+      // Só grava quando veio um número válido: pedido sem o campo continua
+      // com o formato de sempre, byte a byte.
+      if (typeof oi.sale_fee === 'number' && Number.isFinite(oi.sale_fee) && oi.sale_fee >= 0) {
+        item.sale_fee = oi.sale_fee;
+      }
+      return item;
+    }),
   };
   if (order.buyer) slim.buyer = { nickname: order.buyer.nickname ?? null };
   if (order.shipping) {

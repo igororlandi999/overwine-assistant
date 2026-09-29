@@ -350,7 +350,8 @@ O backend passou a ter a noção de **conta** (`src/config/contas.json`,
   **inativa** e recebe um prefixo próprio (`c:<id>:`) aplicado por
   `cacheDaConta` (`src/lib/cache/conta-cache.ts`) a **toda** a interface
   `Cache` — inclusive `setNX`, o compare-and-delete atômico, `incr` e a fila;
-- **rotas de leitura** (`orders/*`, `items/*`) aceitam `contas=a,b`;
+- **rotas de leitura** (`orders/*`, `items/*`) aceitam `contas=a,b` — uma
+  conta, ou várias consolidadas (etapa 4, abaixo);
   **ações** (`orders/refresh`, `admin/*`, `ml/<op>`) aceitam `conta=a`, uma só;
 - **ausente = legada.** É a compatibilidade da transição para os consumidores
   atuais (dashboard, GitHub Actions, scripts), e é explícita no código;
@@ -459,6 +460,95 @@ webhook só a enxergam depois de `CONTAS_ATIVAS`. Ninguém vê uma conta vazia.
 
 Desfazer: remover `degustar-ml` de `CONTAS_ATIVAS` (a conta some das rotas
 na hora; chaves `c:degustar-ml:*` ficam inertes).
+
+### Etapa 4 — seletores e consolidação das contas
+
+`GET /api/orders/contas` devolve o que o seletor do dashboard pode oferecer:
+rótulos de empresa e marketplace, `selecionavel` (a mesma regra que as rotas
+aplicam) e `financeiro`. Nenhum `user_id`, nome de variável ou prefixo Redis.
+
+As leituras passaram a responder por mais de uma conta:
+
+| seleção | resposta |
+|---|---|
+| ausente ou `contas=overwine-ml` | o corpo de sempre, sem campo novo (`tests/legado-golden.test.ts`) |
+| `contas=degustar-ml` | só os dados dela; pedidos e anúncios marcados com `conta` |
+| `contas=overwine-ml,degustar-ml` | a união das duas bases, `consolidado: true` |
+
+Regras da consolidação (`src/services/orders-consolidado.service.ts`):
+
+- **nada é fundido no Redis.** Cada conta é lida pelo cache dela e a união
+  existe só na resposta. A consolidação não escreve nenhuma chave;
+- **todo pedido e anúncio sai marcado** com `conta`. É o que permite abrir o
+  detalhe de um pedido com o token do vendedor certo;
+- **indicadores são recalculados sobre a união**, pela mesma função da conta
+  única (`montarMetrics`). Ticket médio não é soma de tickets. `porConta`
+  repete os números de cada base, para conferir que a união bate com as partes;
+- **`versao` consolidada é a soma das versões.** Cada versão só cresce, então a
+  soma muda sempre que qualquer conta publica. `versoes` traz o detalhe;
+- **paginação** (`list`) intercala as contas por data com um cursor próprio
+  (versão e offset de cada conta). Cursor de outra seleção é `invalid_cursor`;
+- **`status` traz `porConta`** com o status inteiro de cada conta. O refresh
+  continua sendo ação de UMA conta: a tela pede só as atrasadas;
+- **o mesmo SKU em duas empresas são duas linhas** em `margin` e `inventory`.
+  Saldos e receitas de empresas diferentes nunca se somam por SKU;
+- **conta sem snapshot torna o consolidado `409 not_ready`**, com
+  `contasNaoProntas`. Total parcial não se apresenta como total;
+- **conta inválida na lista derruba a seleção inteira** (`400`).
+
+#### Perfil financeiro, e o que é real
+
+Três coisas diferentes:
+
+| o quê | de onde vem | vale para |
+|---|---|---|
+| tarifa de venda e frete **reais** | `order_items[].sale_fee` do pedido e `custoFrete` do envio (`ship:logi`) | cada conta, a dela |
+| tarifas **estimadas** (14,8% e 14,4%) | `taxas.json`, médias de uma planilha da Overwine | só a Overwine |
+| **custo de produto** | `custos.json`, cadastro manual | só a Overwine, até a Degustar cadastrar o dela |
+
+Cada conta declara em `contas.json` o seu `perfilFinanceiro`; hoje só
+`overwine-ml` tem. Para uma seleção que inclua conta sem perfil
+(`financeiro-apurado.service.ts`):
+
+- `metrics`: tarifa, frete e líquido saem dos valores **reais**. O total só é
+  preenchido com cobertura de 100% dos pedidos do período; abaixo disso sai
+  `null`, e `financeiro.conhecido` traz o **subtotal** com a receita que ele
+  cobre. Um subtotal nunca ocupa o lugar do total;
+- no consolidado, a Overwine entra com a estimativa **dela** e as demais com o
+  apurado. `financeiro.porConta` diz o método de cada uma; o total da seleção
+  é `fonte: "misto"` e só existe quando todas as partes existem;
+- `margin`: receita líquida real quando a cobertura fecha; custo, margem e
+  `semCusto` saem `null` — custo de produto não existe em pedido nem em envio.
+
+`null` significa indisponível. Nunca zero, e nunca o número calculado com a
+tabela de outra empresa — os cenários de teste usam de propósito o mesmo SKU e
+o mesmo título nas duas (`tests/consolidado.routes.test.ts`,
+`tests/financeiro-apurado.test.ts`).
+
+**O snapshot passou a guardar `sale_fee`**, em todas as contas, quando o
+Mercado Livre o envia. É aditivo: pedido sem o campo fica como sempre, e a
+Overwine continua usando a estimativa dela. Pedidos sincronizados ANTES desta
+versão não têm o campo; para a Degustar, rodar uma carga `modo: "full"` depois
+de publicar, senão a cobertura começa em zero.
+
+**`sale_fee` é por UNIDADE** (`sale_fee × quantity`). Conferido em 29/09/2026
+contra pedidos reais das duas contas, lidos pelo proxy: em 85 pedidos com mais
+de uma unidade, `sale_fee / unit_price` caiu na faixa de comissão do Mercado
+Livre (10% a 20%) em 57 e abaixo dela nos demais (tarifa com desconto);
+`sale_fee / (unit_price × quantity)` não caiu na faixa em NENHUM. Exemplo:
+8 unidades de R$ 30,69 com `sale_fee` 4,30 — 14,0% por unidade, 1,75% se
+fosse o total da linha. O que NÃO foi conferido: a fatura do Mercado Livre.
+
+Para dar margem à Degustar: criar a tabela de custos dela, ensinar
+`products.service` a escolher a tabela pelo perfil e declarar o perfil em
+`contas.json`.
+
+Roteiro de navegador e prévia local com dados simulados: `e2e/README.md`.
+
+#### O que continua por conta
+
+Ações não consolidam: `orders/refresh`, `admin/*` e o proxy `ml/<op>` seguem
+exigindo `conta=a`, uma só. O assistente continua mono-conta.
 
 ## Assistente (`/api/chat`)
 

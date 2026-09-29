@@ -31,7 +31,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { getEnv } from '../../src/config/env.js';
-import { resolverContaUnicaDeLeitura, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
+import {
+  resolverContasDeLeitura, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp, type Conta,
+} from '../../src/config/contas.js';
 import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
@@ -145,9 +147,9 @@ function resumir<T extends { tipo: string | null }>(
 async function responderInventario(
   req: VercelRequest,
   res: VercelResponse,
-  cache: ReturnType<typeof getCache>
+  lidas: ReadonlyArray<{ conta: Conta; cache: ReturnType<typeof getCache> }>
 ) {
-  const PERMITIDOS = new Set(['resource', 'dias', 'from', 'to', 'modo', 'escopo']);
+  const PERMITIDOS = new Set(['resource', 'dias', 'from', 'to', 'modo', 'escopo', 'contas']);
   for (const k of Object.keys(req.query)) {
     if (!PERMITIDOS.has(k)) {
       return json(res, 400, { error: 'invalid_params', code: 'parametro_desconhecido' });
@@ -178,12 +180,63 @@ async function responderInventario(
   if (!p.ok) return json(res, 400, { error: 'invalid_params', code: p.erro });
 
   const env = getEnv();
-  const r = await lerInventario(cache, {
-    periodo: p.periodo,
-    modo,
-    escopo,
-    hardTtlS: env.ITEMS_CATALOG_HARD_TTL_S,
-  });
+  const opcoes = { periodo: p.periodo, modo, escopo, hardTtlS: env.ITEMS_CATALOG_HARD_TTL_S };
+
+  // Seleção que não é a conta legada sozinha: estoque por conta, linhas
+  // MARCADAS e nunca fundidas — o mesmo SKU em duas empresas são dois saldos.
+  if (lidas.length > 1 || !lidas[0].conta.legada) {
+    const partes: Array<{ conta: Conta; inv: Inventario }> = [];
+    const naoProntas: Array<{ conta: string; code: string }> = [];
+    for (const l of lidas) {
+      const ri = await lerInventario(l.cache, opcoes);
+      if (ri.ok) partes.push({ conta: l.conta, inv: ri.value });
+      else naoProntas.push({ conta: l.conta.id, code: ri.code });
+    }
+    if (naoProntas.length) {
+      return json(res, 409, { error: 'not_ready', code: naoProntas[0].code, contasNaoProntas: naoProntas });
+    }
+    const juntar = <T extends { tipo: string | null }>(
+      pegar: (i: Inventario) => T[] | null
+    ): Array<T & { conta: string }> | null => {
+      const blocos = partes.map(x => ({ conta: x.conta.id, linhas: pegar(x.inv) }));
+      if (blocos.some(b => b.linhas === null)) return null;
+      return blocos.flatMap(b => b.linhas!.map(l => ({ ...l, conta: b.conta })));
+    };
+    const proprio = juntar(i => i.proprio);
+    const full = juntar(i => i.full);
+    const total = juntar(i => i.total);
+    const counts: Record<string, number> = {};
+    for (const x of partes) {
+      for (const [k, v] of Object.entries(x.inv.catalogo.counts as unknown as Record<string, number>)) {
+        counts[k] = (counts[k] ?? 0) + v;
+      }
+    }
+    const base = partes[0].inv;
+    return json(res, 200, {
+      ok: true,
+      contas: partes.map(x => x.conta.id),
+      consolidado: partes.length > 1,
+      catalogo: {
+        versao: partes.reduce((s, x) => s + x.inv.catalogo.versao, 0),
+        versoes: Object.fromEntries(partes.map(x => [x.conta.id, x.inv.catalogo.versao])),
+        // O mais ANTIGO: o catálogo da seleção só é tão fresco quanto o mais velho.
+        updatedAt: partes.map(x => x.inv.catalogo.updatedAt).sort()[0],
+        counts,
+        stale: partes.some(x => x.inv.catalogo.stale),
+      },
+      periodo: base.periodo,
+      modo: base.modo,
+      escopo: base.escopo,
+      vendas: { disponivel: partes.every(x => x.inv.vendasDisponiveis) },
+      limites: LIMITES_CLASSIFICACAO,
+      proprio: proprio ? { resumo: resumir(proprio, l => l.estProprio), linhas: proprio } : null,
+      full: full ? { resumo: resumir(full, l => l.estTotal), linhas: full } : null,
+      total: total ? { resumo: resumir(total, l => l.estTotal), linhas: total } : null,
+      warnings: Array.from(new Set(partes.flatMap(x => x.inv.warnings))),
+    });
+  }
+
+  const r = await lerInventario(lidas[0].cache, opcoes);
 
   if (!r.ok) {
     // `saldo_invalido_no_modo_legado` é 409 e não 500 de propósito: o pedido
@@ -218,6 +271,105 @@ async function responderInventario(
   });
 }
 
+/** Resultado do catálogo de UMA conta: o status HTTP e o corpo que a rota devolveria. */
+interface RespostaCatalogo {
+  status: number;
+  corpo: Record<string, unknown>;
+}
+
+/**
+ * Catálogo de UMA conta — a lógica de sempre (snapshot, cooldown, lock,
+ * reconstrução, fallback), isolada para que a consolidação chame a MESMA
+ * sequência para cada conta, com o cache, o lock e o vendedor dela.
+ */
+async function catalogoDaConta(
+  cache: ReturnType<typeof getCache>,
+  conta: Conta,
+  refresh: boolean
+): Promise<RespostaCatalogo> {
+  const env = getEnv();
+  const SOFT = env.ITEMS_CATALOG_SOFT_TTL_S;
+  const HARD = env.ITEMS_CATALOG_HARD_TTL_S;
+  const ok = (corpo: object): RespostaCatalogo => ({ status: 200, corpo: { ok: true, ...corpo } });
+
+  let manifest: CatalogManifest | null = null;
+  let manifestoCorrompido = false;
+  try {
+    manifest = await readCatalogManifest(cache);
+  } catch {
+    manifestoCorrompido = true; // trata como ausente; nunca 500 por isso
+  }
+
+  const vencido = precisaReconstruir(manifest, HARD);
+  const warnings: string[] = [];
+  if (manifestoCorrompido) warnings.push('manifesto_anterior_invalido');
+
+  // Caminho rápido: snapshot válido e nenhuma reconstrução pedida.
+  if (manifest && !vencido && !refresh) {
+    const items = await lerCatalogoPublicado(cache, manifest);
+    return ok(montarResposta(manifest, items, 'snapshot', SOFT, HARD, warnings));
+  }
+
+  // Cooldown protege o ML de rajadas de refresh forçado. Não se aplica
+  // quando não há snapshot algum — aí a reconstrução é a única saída.
+  if (refresh && manifest && !vencido) {
+    const livre = await cache.setNX(CATALOG_COOLDOWN_KEY, '1', env.ITEMS_CATALOG_COOLDOWN_S);
+    if (!livre) {
+      const items = await lerCatalogoPublicado(cache, manifest);
+      warnings.push('refresh_em_cooldown');
+      return ok(montarResposta(manifest, items, 'snapshot', SOFT, HARD, warnings));
+    }
+  }
+
+  // Lock: nenhuma reconstrução concorrente duplicada.
+  const dono = donoLock();
+  const gotLock = await cache.setNX(CATALOG_LOCK_KEY, dono, env.ITEMS_CATALOG_LOCK_TTL_S);
+  if (!gotLock) {
+    if (manifest) {
+      const items = await lerCatalogoPublicado(cache, manifest);
+      warnings.push('reconstrucao_em_andamento');
+      return ok(montarResposta(manifest, items, vencido ? 'fallback_stale' : 'snapshot', SOFT, HARD, warnings));
+    }
+    return { status: 409, corpo: { error: 'not_ready', code: 'reconstrucao_em_andamento' } };
+  }
+
+  try {
+    const { ids, batch } = fetchers(cache, mlUserIdDaConta(conta));
+    const { manifest: novo, resultado } = await reconstruirCatalogo(
+      cache, ids, batch, env.ITEMS_CATALOG_CHUNK_SIZE,
+      { maxChamadas: env.ITEMS_CATALOG_MAX_CALLS }
+    );
+
+    if (novo) {
+      const items = await lerCatalogoPublicado(cache, novo);
+      return ok(montarResposta(novo, items, 'rebuilt', SOFT, HARD, warnings));
+    }
+
+    // INCOMPLETO: nada foi publicado. Serve o snapshot completo anterior.
+    console.warn(`[items-catalog] construcao incompleta motivos=${resultado.motivos.join('|')}`);
+    if (manifest) {
+      const items = await lerCatalogoPublicado(cache, manifest);
+      warnings.push('catalogo_incompleto_usando_anterior', ...resultado.motivos);
+      return ok(montarResposta(manifest, items, 'fallback_stale', SOFT, HARD, warnings));
+    }
+    return { status: 409, corpo: { error: 'not_ready', code: 'catalogo_incompleto' } };
+  } catch (e) {
+    // Falha da reconstrução NUNCA apaga o snapshot anterior.
+    console.error('[items-catalog] falha na reconstrucao');
+    if (manifest) {
+      const items = await lerCatalogoPublicado(cache, manifest);
+      warnings.push('atualizacao_falhou');
+      return ok(montarResposta(manifest, items, 'fallback_stale', SOFT, HARD, warnings));
+    }
+    return { status: 409, corpo: { error: 'not_ready', code: 'atualizacao_falhou' } };
+  } finally {
+    await cache.delIfEquals(CATALOG_LOCK_KEY, dono);
+  }
+}
+
+/** Do pior para o melhor: a origem da união é a da conta em pior situação. */
+const ORDEM_SOURCE = ['fallback_stale', 'rebuilt', 'snapshot'];
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
 
@@ -230,9 +382,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return json(res, 405, { error: 'Use GET' });
   }
 
-  // `cacheGlobal`: sessão e rate limit, do backend. `cache`: dados da CONTA
-  // (snapshot de catálogo, lock, cooldown, token do ML). Para a conta legada
-  // são o mesmo objeto e as mesmas chaves de sempre.
+  // `cacheGlobal`: sessão e rate limit, do backend. O cache de DADOS é o da
+  // conta (snapshot de catálogo, lock, cooldown, token do ML). Para a conta
+  // legada são o mesmo objeto e as mesmas chaves de sempre.
   const cacheGlobal = getCache();
 
   try {
@@ -243,17 +395,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
-    // Conta: ausente = legada; inválida = 400; mais de uma = 400 (sem consolidação até a etapa 4).
-    let conta;
+    // Conta: ausente = legada; inválida = 400; mais de uma = consolidado.
+    let contas: Conta[];
     try {
-      conta = resolverContaUnicaDeLeitura(req.query.contas);
+      contas = resolverContasDeLeitura(req.query.contas);
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;
     }
-    const cache = cacheDaConta(cacheGlobal, conta);
+    const lidas = contas.map(c => ({ conta: c, cache: cacheDaConta(cacheGlobal, c) }));
 
-    if (resource === 'inventory') return await responderInventario(req, res, cache);
+    if (resource === 'inventory') return await responderInventario(req, res, lidas);
 
     // Allowlist de parâmetros do `catalog`: 400 determinístico para qualquer outro.
     for (const k of Object.keys(req.query)) {
@@ -270,101 +422,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       refresh = rawRefresh === '1';
     }
 
-    const env = getEnv();
-    const SOFT = env.ITEMS_CATALOG_SOFT_TTL_S;
-    const HARD = env.ITEMS_CATALOG_HARD_TTL_S;
-
-    let manifest: CatalogManifest | null = null;
-    let manifestoCorrompido = false;
-    try {
-      manifest = await readCatalogManifest(cache);
-    } catch {
-      manifestoCorrompido = true; // trata como ausente; nunca 500 por isso
+    // A conta legada sozinha responde com o corpo de sempre, sem campo novo.
+    if (lidas.length === 1 && lidas[0].conta.legada) {
+      const r = await catalogoDaConta(lidas[0].cache, lidas[0].conta, refresh);
+      return json(res, r.status, r.corpo);
     }
 
-    const vencido = precisaReconstruir(manifest, HARD);
-    const warnings: string[] = [];
-    if (manifestoCorrompido) warnings.push('manifesto_anterior_invalido');
-
-    // Caminho rápido: snapshot válido e nenhuma reconstrução pedida.
-    if (manifest && !vencido && !refresh) {
-      const items = await lerCatalogoPublicado(cache, manifest);
-      return json(res, 200, {
-        ok: true,
-        ...montarResposta(manifest, items, 'snapshot', SOFT, HARD, warnings),
-      });
+    // Demais seleções: uma passada por conta (cada uma com o lock e o
+    // vendedor dela), anúncios MARCADOS com a conta.
+    const partes: Array<{ conta: Conta; corpo: Record<string, any> }> = [];
+    const naoProntas: Array<{ conta: string; code: unknown }> = [];
+    for (const l of lidas) {
+      const r = await catalogoDaConta(l.cache, l.conta, refresh);
+      if (r.status === 200) partes.push({ conta: l.conta, corpo: r.corpo });
+      else naoProntas.push({ conta: l.conta.id, code: r.corpo.code });
     }
-
-    // Cooldown protege o ML de rajadas de refresh forçado. Não se aplica
-    // quando não há snapshot algum — aí a reconstrução é a única saída.
-    if (refresh && manifest && !vencido) {
-      const livre = await cache.setNX(CATALOG_COOLDOWN_KEY, '1', env.ITEMS_CATALOG_COOLDOWN_S);
-      if (!livre) {
-        const items = await lerCatalogoPublicado(cache, manifest);
-        warnings.push('refresh_em_cooldown');
-        return json(res, 200, {
-          ok: true,
-          ...montarResposta(manifest, items, 'snapshot', SOFT, HARD, warnings),
-        });
-      }
+    if (naoProntas.length) {
+      return json(res, 409, { error: 'not_ready', code: naoProntas[0].code, contasNaoProntas: naoProntas });
     }
-
-    // Lock: nenhuma reconstrução concorrente duplicada.
-    const dono = donoLock();
-    const gotLock = await cache.setNX(CATALOG_LOCK_KEY, dono, env.ITEMS_CATALOG_LOCK_TTL_S);
-    if (!gotLock) {
-      if (manifest) {
-        const items = await lerCatalogoPublicado(cache, manifest);
-        warnings.push('reconstrucao_em_andamento');
-        return json(res, 200, {
-          ok: true,
-          ...montarResposta(manifest, items, vencido ? 'fallback_stale' : 'snapshot', SOFT, HARD, warnings),
-        });
-      }
-      return json(res, 409, { error: 'not_ready', code: 'reconstrucao_em_andamento' });
+    const counts: Record<string, number> = {};
+    for (const x of partes) {
+      for (const [k, v] of Object.entries(x.corpo.counts as Record<string, number>)) counts[k] = (counts[k] ?? 0) + v;
     }
-
-    try {
-      const { ids, batch } = fetchers(cache, mlUserIdDaConta(conta));
-      const { manifest: novo, resultado } = await reconstruirCatalogo(
-        cache, ids, batch, env.ITEMS_CATALOG_CHUNK_SIZE,
-        { maxChamadas: env.ITEMS_CATALOG_MAX_CALLS }
-      );
-
-      if (novo) {
-        const items = await lerCatalogoPublicado(cache, novo);
-        return json(res, 200, {
-          ok: true,
-          ...montarResposta(novo, items, 'rebuilt', SOFT, HARD, warnings),
-        });
-      }
-
-      // INCOMPLETO: nada foi publicado. Serve o snapshot completo anterior.
-      console.warn(`[items-catalog] construcao incompleta motivos=${resultado.motivos.join('|')}`);
-      if (manifest) {
-        const items = await lerCatalogoPublicado(cache, manifest);
-        warnings.push('catalogo_incompleto_usando_anterior', ...resultado.motivos);
-        return json(res, 200, {
-          ok: true,
-          ...montarResposta(manifest, items, 'fallback_stale', SOFT, HARD, warnings),
-        });
-      }
-      return json(res, 409, { error: 'not_ready', code: 'catalogo_incompleto' });
-    } catch (e) {
-      // Falha da reconstrução NUNCA apaga o snapshot anterior.
-      console.error('[items-catalog] falha na reconstrucao');
-      if (manifest) {
-        const items = await lerCatalogoPublicado(cache, manifest);
-        warnings.push('atualizacao_falhou');
-        return json(res, 200, {
-          ok: true,
-          ...montarResposta(manifest, items, 'fallback_stale', SOFT, HARD, warnings),
-        });
-      }
-      return json(res, 409, { error: 'not_ready', code: 'atualizacao_falhou' });
-    } finally {
-      await cache.delIfEquals(CATALOG_LOCK_KEY, dono);
-    }
+    const pior = partes.reduce((m, x) => (x.corpo.freshness.ageSeconds > m.corpo.freshness.ageSeconds ? x : m), partes[0]);
+    return json(res, 200, {
+      ok: true,
+      contas: partes.map(x => x.conta.id),
+      consolidado: partes.length > 1,
+      versao: partes.reduce((s, x) => s + (x.corpo.versao as number), 0),
+      versoes: Object.fromEntries(partes.map(x => [x.conta.id, x.corpo.versao])),
+      // O mais ANTIGO: a união só é tão fresca quanto o catálogo mais velho.
+      updatedAt: pior.corpo.updatedAt,
+      source: partes.map(x => String(x.corpo.source)).sort((a, b) => ORDEM_SOURCE.indexOf(a) - ORDEM_SOURCE.indexOf(b))[0],
+      complete: true,
+      freshness: { ...pior.corpo.freshness, stale: partes.some(x => x.corpo.freshness.stale) },
+      counts,
+      items: partes.flatMap(x => (x.corpo.items as object[]).map(i => ({ ...i, conta: x.conta.id }))),
+      warnings: Array.from(new Set(partes.flatMap(x => x.corpo.warnings as string[]))),
+    });
   } catch (e) {
     console.error('[items-catalog]', e instanceof Error ? e.message : e);
     return json(res, 500, { error: 'erro_interno' });
