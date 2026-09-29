@@ -1,0 +1,8 @@
+{
+  "name": "overwine-assistant-e2e",
+  "private": true,
+  "description": "Dependencia do roteiro de navegador. Separada do backend: nada daqui vai para producao.",
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}
