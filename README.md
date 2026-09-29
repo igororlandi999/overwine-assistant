@@ -560,11 +560,27 @@ Roteiro de navegador e prévia local com dados simulados: `e2e/README.md`.
 o dado (`completa`, `fracaoReceita`). Validação: a conta feita com ele foi
 conferida contra o Mercado Livre (`apuradoIntegralmenteValidado`,
 `ressalvas`). Venda comum foi conferida em 29/09/2026 e `TARIFA_REAL_VALIDADA`
-está ligada em produção. Pedido com **reembolso parcial** não foi: ele
-continua trazendo `sale_fee` e quantidade originais, e não se sabe se parte da
-tarifa foi devolvida. Esses pedidos entram no total e o resultado sai com
-`ressalvas: [{ tipo: "reembolso_parcial", conta, pedidos, tarifaCalculada }]`.
-A ressalva sai de cena com `TARIFA_REEMBOLSO_VALIDADA=true`.
+está ligada em produção.
+
+Pedido com **reembolso parcial não está conciliado.** O que entra no total é o
+que o pedido e o envio trazem: a tarifa ORIGINAL e o frete de IDA. Numa venda
+conferida na tela do Mercado Livre em 30/09/2026 (2 × R$ 99, metade
+reembolsada) a tarifa original bateu (R$ 27,72), e a tela trazia ainda frete
+de devolução (R$ 41,60) e um débito de "cancelamento de tarifa" (R$ 69,29) que
+não existem em nenhum campo lido pelo backend. O total exibido era negativo; o
+calculado aqui, positivo. O débito de R$ 69,29 não foi explicado.
+
+Por isso, quando o período tem pedido com reembolso:
+
+- o líquido sai `liquidoProvisorio: true`;
+- `ressalvas[]` traz o que ESTÁ incluído (`tarifaCalculada`, `freteCalculado`)
+  e o que NÃO está (`naoInclui`). Não há campo com a diferença em dinheiro,
+  nem teto para ela: não é conhecida;
+- a ressalva vale para tarifa, frete e líquido.
+
+Nenhuma regra geral e nenhum ajuste fixo foram derivados dessa tela.
+`TARIFA_REEMBOLSO_VALIDADA` existe e fica desligada: ligá-la exige conciliar
+reembolsos por tipo, não um pedido.
 
 #### Recarga completa com rede de segurança
 

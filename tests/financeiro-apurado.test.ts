@@ -417,3 +417,68 @@ describe('cobertura nao e validacao — pedido com reembolso parcial', () => {
     expect(m.periodo.faturamento.tarifaML).toBeCloseTo(-699 * 0.148, 9);
   });
 });
+
+describe('reembolso nao conciliado — liquido provisorio, sem teto e sem regra fixa', () => {
+  // A venda conferida na tela do Mercado Livre em 30/09/2026.
+  const caso = (): OrderSlim => {
+    const p = ped(2001, '2026-09-10', 198, { fee: 13.86, qtd: 2 });
+    p.status = 'partially_refunded'; p.paid_amount = 99; p.total_amount = 198;
+    return p;
+  };
+  beforeEach(() => { process.env.TARIFA_REAL_VALIDADA = 'true'; delete process.env.TARIFA_REEMBOLSO_VALIDADA; });
+
+  it('preserva os valores conhecidos: tarifa original e frete de ida entram no total', () => {
+    const r = apurarFinanceiro([caso()], INI, FIM, mapa([11001, 51.9]));
+    expect(r.tarifaML.valor).toBeCloseTo(-27.72, 9);
+    expect(r.frete.valor).toBeCloseTo(-51.9, 9);
+    expect(r.liquido).toBeCloseTo(99 - 27.72 - 51.9, 9);
+    expect(r.ressalvaReembolso.tarifaCalculada).toBeCloseTo(-27.72, 9);
+    expect(r.ressalvaReembolso.freteCalculado).toBeCloseTo(-51.9, 9);
+  });
+
+  it('o liquido sai PROVISORIO, e a ressalva nomeia o que falta', () => {
+    const r = apurarFinanceiro([caso()], INI, FIM, mapa([11001, 51.9]));
+    expect(r.liquidoProvisorio).toBe(true);
+    expect(r.integralmenteValidado).toBe(false);
+    expect(r.ressalvaReembolso.naoInclui).toEqual(['frete_de_devolucao', 'ajustes_de_cancelamento']);
+  });
+
+  it('nao ha campo com a diferenca em dinheiro nem com teto', () => {
+    const r = apurarFinanceiro([caso()], INI, FIM, mapa([11001, 51.9]));
+    expect(Object.keys(r.ressalvaReembolso).sort()).toEqual(['freteCalculado', 'naoInclui', 'pedidos', 'receita', 'tarifaCalculada', 'validada']);
+  });
+
+  it('nenhum ajuste da tela conferida foi gravado: 41,60 / 69,29 / 91,51 nao aparecem no resultado', () => {
+    const texto = JSON.stringify(apurarFinanceiro([caso()], INI, FIM, mapa([11001, 51.9])));
+    for (const n of ['41.6', '69.29', '91.51', '168.29', '93.5']) expect(texto).not.toContain(n);
+  });
+
+  it('pedido reembolsado sem frete resolvido continua contando na ressalva', () => {
+    const r = apurarFinanceiro([caso()], INI, FIM, new Map());
+    expect(r.ressalvaReembolso).toMatchObject({ pedidos: 1, receita: 99 });
+    expect(r.liquido).toBeNull();
+    expect(r.liquidoProvisorio).toBe(false);          // nao ha liquido para ser provisorio
+  });
+
+  it('sem reembolso no periodo: liquido definitivo, sem lista de faltas', () => {
+    const r = apurarFinanceiro([ped(2002, '2026-09-15', 100, { fee: 12 })], INI, FIM, mapa([11002, 10]));
+    expect(r).toMatchObject({ liquidoProvisorio: false, integralmenteValidado: true });
+    expect(r.ressalvaReembolso.naoInclui).toEqual([]);
+  });
+
+  it('pela rota: Degustar e consolidado marcam o liquido como provisorio', async () => {
+    await publicar(cacheDG, [ped(2002, '2026-09-15', 100, { fee: 12 }), caso()], 3);
+    await publicarMapaEnvios(cacheDG, mapa([11002, 10], [11001, 51.9]));
+    for (const contas of [DG, `${OW},${DG}`]) {
+      const k = (await metrics(contas)).json().financeiro.conhecido;
+      expect(k, contas).toMatchObject({ completo: true, liquidoProvisorio: true, apuradoIntegralmenteValidado: false });
+      expect(k.ressalvas[0]).toMatchObject({ conta: DG, pedidos: 1, naoInclui: ['frete_de_devolucao', 'ajustes_de_cancelamento'] });
+      expect(k.ressalvas[0].freteCalculado).toBeCloseTo(-51.9, 9);
+    }
+  });
+
+  it('a chave global continua desligada por padrao', () => {
+    expect(process.env.TARIFA_REEMBOLSO_VALIDADA).toBeUndefined();
+    expect(apurarFinanceiro([caso()], INI, FIM, mapa([11001, 51.9])).ressalvaReembolso.validada).toBe(false);
+  });
+});

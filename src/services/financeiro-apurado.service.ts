@@ -47,12 +47,23 @@
  *    Mercado Livre mostra? (`ressalvaReembolso`, `integralmenteValidado`)
  *
  * Para venda comum a tarifa foi conferida (29/09/2026, venda com 2 unidades).
- * Para pedido com REEMBOLSO PARCIAL, não: o pedido continua trazendo
- * `sale_fee` e a quantidade ORIGINAIS, e não se sabe se o Mercado Livre
- * devolveu parte da tarifa. Esses pedidos entram no total — tirá-los deixaria
- * o total sem eles, o que é outro erro — mas o resultado sai marcado com a
- * ressalva, com a quantidade de pedidos e o valor em dúvida. Sai de cena
- * quando `TARIFA_REEMBOLSO_VALIDADA` for `"true"`.
+ *
+ * Pedido com REEMBOLSO PARCIAL NÃO ESTÁ CONCILIADO. O que este serviço soma
+ * para ele é o que o pedido e o envio trazem: a tarifa ORIGINAL e o frete de
+ * IDA. Numa venda conferida na tela do Mercado Livre (30/09/2026) a tarifa
+ * original bateu, mas a tela trazia ainda frete de DEVOLUÇÃO e um débito de
+ * "cancelamento de tarifa" que não existem em nenhum campo lido aqui, e o
+ * total exibido era NEGATIVO enquanto o calculado aqui era positivo.
+ *
+ * Consequências, todas deliberadas:
+ *  - esses pedidos ficam no total (tirá-los deixaria o total sem eles), e o
+ *    líquido da seleção sai marcado PROVISÓRIO;
+ *  - a ressalva diz o que ESTÁ incluído e o que NÃO está. Não estima a
+ *    diferença nem lhe dá teto: ela não é conhecida;
+ *  - o frete também leva a ressalva: o valor é só o de ida;
+ *  - nenhuma regra geral e nenhum ajuste fixo saem de uma tela só.
+ * `TARIFA_REEMBOLSO_VALIDADA` continua existindo e continua desligada; ligá-la
+ * exige conciliar reembolsos por tipo, não um pedido.
  *
  * `sale_fee` É POR UNIDADE
  *
@@ -105,14 +116,24 @@ export function teveReembolso(o: Pick<OrderSlim, 'status' | 'paid_amount' | 'tot
   return typeof pago === 'number' && typeof total === 'number' && pago > 0 && pago < total - 0.005;
 }
 
+/** O que o financeiro de um pedido com reembolso NÃO inclui, porque nenhum campo lido o traz. */
+export const NAO_INCLUIDO_EM_REEMBOLSO = [
+  'frete_de_devolucao',
+  'ajustes_de_cancelamento',
+] as const;
+
 export interface RessalvaReembolso {
-  /** Pedidos do período com reembolso parcial cuja tarifa entrou no total. */
+  /** Pedidos do período com reembolso parcial que entraram no total. */
   pedidos: number;
   /** Receita (já líquida do reembolso) desses pedidos. */
   receita: number;
-  /** Tarifa calculada para eles, pelas quantidades ORIGINAIS (≤ 0). É o valor em dúvida. */
+  /** Tarifa ORIGINAL desses pedidos (≤ 0). Está INCLUÍDA no total. Não é a diferença possível. */
   tarifaCalculada: number;
-  /** `true` quando a regra para reembolso já foi conferida: a ressalva não se aplica. */
+  /** Frete de IDA desses pedidos (≤ 0), onde conhecido. Está INCLUÍDO. Não tem a devolução. */
+  freteCalculado: number;
+  /** O que falta, por nome. A diferença em dinheiro NÃO é conhecida e não é estimada. */
+  naoInclui: readonly string[];
+  /** `true` só quando reembolsos foram conciliados: a ressalva não se aplica. */
   validada: boolean;
 }
 
@@ -142,6 +163,11 @@ export interface FinanceiroApurado {
    * `false`: o número existe, mas não é integralmente validado.
    */
   integralmenteValidado: boolean;
+  /**
+   * `true` quando o líquido existe mas inclui pedido com reembolso não
+   * conciliado: é o melhor número disponível, não o definitivo.
+   */
+  liquidoProvisorio: boolean;
 }
 
 function dentro(iso: string | null, inicio: Date | null, fim: Date | null): boolean {
@@ -205,7 +231,7 @@ export function apurarFinanceiro(
   let tarifa = 0, tarifaReceita = 0, tarifaPedidos = 0;
   let frete = 0, freteReceita = 0, fretePedidos = 0;
   let liqConhecido = 0, liqReceita = 0, liqPedidos = 0;
-  let reembPedidos = 0, reembReceita = 0, reembTarifa = 0;
+  let reembPedidos = 0, reembReceita = 0, reembTarifa = 0, reembFrete = 0;
 
   for (const o of pedidos) {
     if (!contaComoVenda(o.status)) continue;
@@ -216,7 +242,6 @@ export function apurarFinanceiro(
 
     const t = validada ? tarifaDoPedido(o) : null;
     if (t !== null) { tarifa += t; tarifaReceita += receita; tarifaPedidos++; }
-    if (t !== null && teveReembolso(o)) { reembPedidos++; reembReceita += receita; reembTarifa += t; }
 
     // Frete: pedido sem envio não tem frete (0, conhecido). Com envio, vale o
     // custo real do mapa, rateado pela receita dos pedidos daquele envio.
@@ -233,6 +258,9 @@ export function apurarFinanceiro(
       }
     }
     if (f !== null) { frete += f; freteReceita += receita; fretePedidos++; }
+    // Reembolso: conta o pedido mesmo sem tarifa ou frete conhecidos — o que
+    // não está conciliado é o PEDIDO, não uma parcela.
+    if (teveReembolso(o)) { reembPedidos++; reembReceita += receita; reembTarifa += t ?? 0; reembFrete += f ?? 0; }
 
     if (t !== null && f !== null) { liqConhecido += receita - t - f; liqReceita += receita; liqPedidos++; }
   }
@@ -261,8 +289,12 @@ export function apurarFinanceiro(
     pedidos: n,
     tarifaML: pT,
     frete: pF,
-    ressalvaReembolso: { pedidos: reembPedidos, receita: reembReceita, tarifaCalculada: -reembTarifa, validada: reembOk },
+    ressalvaReembolso: {
+      pedidos: reembPedidos, receita: reembReceita, tarifaCalculada: -reembTarifa, freteCalculado: -reembFrete,
+      naoInclui: reembPedidos > 0 && !reembOk ? NAO_INCLUIDO_EM_REEMBOLSO : [], validada: reembOk,
+    },
     integralmenteValidado: liquido !== null && (reembPedidos === 0 || reembOk),
+    liquidoProvisorio: liquido !== null && reembPedidos > 0 && !reembOk,
     liquido,
     liquidoConhecido: {
       valor: liqConhecido,

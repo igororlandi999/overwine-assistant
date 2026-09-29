@@ -128,7 +128,20 @@ export interface FinanceiroPublico {
      * qual, em qual conta, quantos pedidos e quanto.
      */
     apuradoIntegralmenteValidado: boolean;
-    ressalvas: Array<{ tipo: 'reembolso_parcial'; conta: string; pedidos: number; receita: number; tarifaCalculada: number }>;
+    /**
+     * `true` quando o líquido da seleção inclui pedido com reembolso não
+     * conciliado. O número existe e é o melhor disponível; não é definitivo.
+     */
+    liquidoProvisorio: boolean;
+    /**
+     * `tarifaCalculada` e `freteCalculado` são o que JÁ ESTÁ no total (tarifa
+     * original, frete de ida). `naoInclui` é o que falta. Nenhum campo traz a
+     * diferença em dinheiro: ela não é conhecida.
+     */
+    ressalvas: Array<{
+      tipo: 'reembolso_parcial'; conta: string; pedidos: number; receita: number;
+      tarifaCalculada: number; freteCalculado: number; naoInclui: readonly string[];
+    }>;
     /** Cada parcela com a SUA cobertura: a da tarifa pode diferir da do frete. */
     tarifaML: SubtotalConhecido;
     tarifaEnv: SubtotalConhecido;
@@ -523,7 +536,9 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
     .filter(([, p]) => p.ressalvaReembolso && p.ressalvaReembolso.pedidos > 0 && !p.ressalvaReembolso.validada)
     .map(([conta, p]) => ({
       tipo: 'reembolso_parcial' as const, conta,
-      pedidos: p.ressalvaReembolso!.pedidos, receita: p.ressalvaReembolso!.receita, tarifaCalculada: p.ressalvaReembolso!.tarifaCalculada,
+      pedidos: p.ressalvaReembolso!.pedidos, receita: p.ressalvaReembolso!.receita,
+      tarifaCalculada: p.ressalvaReembolso!.tarifaCalculada, freteCalculado: p.ressalvaReembolso!.freteCalculado,
+      naoInclui: p.ressalvaReembolso!.naoInclui,
     }));
   const todas = (f: (p: FinanceiroDaConta) => number | null): number | null =>
     partes.every(p => f(p) !== null) ? partes.reduce((s, p) => s + (f(p) as number), 0) : null;
@@ -552,6 +567,7 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
       completo: partes.every(p => p.liquido !== null), metodo,
       tarifaValidada: partes.every(p => !p.cobertura || p.cobertura.tarifaML.validada),
       apuradoIntegralmenteValidado: apuradas.every(([, p]) => p.integralmenteValidado),
+      liquidoProvisorio: ressalvas.length > 0 && partes.every(p => p.liquido !== null),
       ressalvas,
       tarifaML: cT, tarifaEnv: cF, liquido: cL,
     },
