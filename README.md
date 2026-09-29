@@ -556,6 +556,22 @@ Para dar margem à Degustar: criar a tabela de custos dela, ensinar
 
 Roteiro de navegador e prévia local com dados simulados: `e2e/README.md`.
 
+#### Recarga completa com rede de segurança
+
+`POST /api/admin/orders-sync` (com `x-admin-key` e `conta`) ganhou três ações
+que não falam com o Mercado Livre (`orders-backup.service.ts`):
+
+| `acao` | efeito |
+|---|---|
+| `ver_backup` | versão e total publicados, e a cópia guardada |
+| `backup` | copia o snapshot publicado para `orders:backup:*`, relê e confere |
+| `restaurar` | publica o conteúdo da cópia como versão NOVA |
+
+A cópia vive fora do ciclo de publicação e dura 7 dias. O `manifest:previous`
+do store não serve para isso: some na segunda publicação seguinte, e uma venda
+nova publica em segundos. A ordem de uma recarga é: `backup` → carga
+`modo: "full"` → conferir o total → `restaurar` se diminuiu.
+
 #### O que continua por conta
 
 Ações não consolidam: `orders/refresh`, `admin/*` e o proxy `ml/<op>` seguem

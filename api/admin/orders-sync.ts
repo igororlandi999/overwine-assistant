@@ -29,6 +29,7 @@ import { readManifest } from '../../src/lib/orders-store.js';
 import { registrarConclusaoSync, registrarFalhaSync, registrarTentativaSync } from '../../src/lib/sync-telemetry.js';
 import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
 import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
+import { criarBackup, restaurarBackup, lerBackup } from '../../src/services/orders-backup.service.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
@@ -54,7 +55,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = (req.body ?? {}) as {
       alvo?: 'ativos' | 'cancelados';
       modo?: 'full' | 'incremental';
-      acao?: 'sincronizar' | 'drenar';
+      acao?: 'sincronizar' | 'drenar' | 'backup' | 'restaurar' | 'ver_backup';
       max?: number;
       conta?: unknown;
       /**
@@ -77,6 +78,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const cacheDados = cacheDaConta(cache, conta);
     const uid = mlUserIdDaConta(conta);
+
+    // Cópia de segurança e restauração do snapshot DESTA conta. Não falam com
+    // o Mercado Livre. Ver orders-backup.service.
+    if (body.acao === 'backup' || body.acao === 'restaurar' || body.acao === 'ver_backup') {
+      console.info(`[orders-sync] ${body.acao} ip=${maskIp(ip)} conta=${conta.id} alvo=${alvo}`);
+      if (body.acao === 'ver_backup') {
+        const m = await lerBackup(cacheDados, alvo);
+        const man = await readManifest(cacheDados, alvo);
+        return json(res, 200, {
+          ok: true, acao: 'ver_backup', conta: conta.id,
+          atual: man ? { versao: man.versao, totalRegistros: man.totalRegistros, newestDate: man.newestDate, oldestDate: man.oldestDate } : null,
+          backup: m ? { ...m, blocos: m.blocos.length } : null,
+        });
+      }
+      const r = body.acao === 'backup' ? await criarBackup(cacheDados, alvo) : await restaurarBackup(cacheDados, alvo);
+      return json(res, r.ok ? 200 : 409, { ...r, conta: conta.id });
+    }
 
     if (body.acao === 'drenar') {
       const max = Number.isInteger(body.max) && (body.max as number) > 0 ? (body.max as number) : undefined;
