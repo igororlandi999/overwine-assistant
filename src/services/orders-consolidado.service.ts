@@ -109,6 +109,11 @@ export interface FinanceiroPublico {
   conhecido?: {
     completo: boolean;
     metodo: MetodoFinanceiro | 'misto';
+    /**
+     * `false` = a tarifa real ainda não foi conferida contra o Mercado Livre e
+     * não é apresentada (nem o líquido). Não é falta de dado: é falta de prova.
+     */
+    tarifaValidada: boolean;
     /** Cada parcela com a SUA cobertura: a da tarifa pode diferir da do frete. */
     tarifaML: SubtotalConhecido;
     tarifaEnv: SubtotalConhecido;
@@ -521,7 +526,11 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
   for (const a of [cT, cF, cL]) a.fracaoReceita = bruto > 0 ? a.receitaCoberta / bruto : 1;
   return {
     bruto, todas, metodo, temEstimativa,
-    conhecido: { completo: partes.every(p => p.liquido !== null), metodo, tarifaML: cT, tarifaEnv: cF, liquido: cL },
+    conhecido: {
+      completo: partes.every(p => p.liquido !== null), metodo,
+      tarifaValidada: partes.every(p => !p.cobertura || p.cobertura.tarifaML.validada),
+      tarifaML: cT, tarifaEnv: cF, liquido: cL,
+    },
   };
 }
 

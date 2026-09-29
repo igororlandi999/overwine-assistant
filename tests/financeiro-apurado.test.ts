@@ -25,6 +25,10 @@ import { toSlim, type OrderSlim } from '../src/services/orders.service.js';
 import { apurarFinanceiro, tarifaDoPedido } from '../src/services/financeiro-apurado.service.js';
 import ordersHandler from '../api/orders/[resource].js';
 
+// A maior parte deste arquivo exercita o calculo com a tarifa VALIDADA. O
+// padrao de producao (nao validada) tem o seu proprio bloco, no fim.
+process.env.TARIFA_REAL_VALIDADA = 'true';
+
 const INI = new Date('2026-09-01T00:00:00.000-03:00');
 const FIM = new Date('2026-09-30T23:59:59.999-03:00');
 
@@ -186,7 +190,7 @@ const PED_OW = [ped(1002, '2026-09-12', 300, { fee: 99 }), ped(1001, '2026-09-10
 beforeEach(async () => {
   cache = new FakeCache();
   setCacheForTests(cache);
-  Object.assign(process.env, TEST_ENV, { MULTI_CONTA_ENABLED: 'true', CONTAS_ATIVAS: DG, ML_DEGUSTAR_USER_ID: '3642371174' });
+  Object.assign(process.env, TEST_ENV, { MULTI_CONTA_ENABLED: 'true', CONTAS_ATIVAS: DG, ML_DEGUSTAR_USER_ID: '3642371174', TARIFA_REAL_VALIDADA: 'true' });
   resetEnvForTests();
   vi.spyOn(console, 'info').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -278,5 +282,57 @@ describe('GET /api/orders/metrics — financeiro por metodo', () => {
     expect(k.liquido.fracaoReceita).toBeCloseTo(0.75, 9);
     expect(k.liquido.valor).toBeCloseTo(600 * (1 - 0.148 - 0.144), 9);
     expect(m.financeiro.porConta[DG].liquido).toBeNull();
+  });
+});
+
+describe('tarifa NAO validada — o padrao, ate alguem conferir contra o Mercado Livre', () => {
+  beforeEach(async () => {
+    delete process.env.TARIFA_REAL_VALIDADA;
+    await publicar(cacheDG, [ped(2002, '2026-09-15', 100, { fee: 12.5 }), ped(2001, '2026-09-11', 200, { fee: 11, qtd: 2 })], 3);
+    await publicarMapaEnvios(cacheDG, mapa([11002, 18.9], [11001, 0]));
+  });
+  afterEach(() => { process.env.TARIFA_REAL_VALIDADA = 'true'; });
+
+  it('o servico nao apresenta a tarifa nem o liquido, mesmo com sale_fee em todos os pedidos', () => {
+    const ps = [ped(1, '2026-09-10', 100, { fee: 12 }), ped(2, '2026-09-11', 200, { fee: 11, qtd: 2 })];
+    const r = apurarFinanceiro(ps, INI, FIM, mapa([9001, 18], [9002, 0]));
+    expect(r.tarifaML).toMatchObject({ valor: null, conhecida: -0, receitaCoberta: 0, fracao: 0, completa: false, pedidosCobertos: 0, validada: false });
+    expect(r.liquido).toBeNull();
+    expect(r.liquidoConhecido).toMatchObject({ valor: 0, receitaCoberta: 0, pedidos: 0 });
+    // o frete nao depende da validacao
+    expect(r.frete).toMatchObject({ valor: -18, completa: true, validada: true });
+  });
+
+  it('qualquer valor diferente de "true" mantem desligado', () => {
+    for (const v of ['1', 'TRUE', 'sim', '', 'false']) {
+      process.env.TARIFA_REAL_VALIDADA = v;
+      expect(apurarFinanceiro([ped(1, '2026-09-10', 100, { fee: 12 })], INI, FIM, mapa([9001, 1])).tarifaML.validada).toBe(false);
+    }
+  });
+
+  it('pela rota, Degustar: tarifa e liquido null, frete real, e o motivo declarado', async () => {
+    const m = (await metrics(DG)).json();
+    expect(m.periodo.faturamento).toMatchObject({ bruto: 300, tarifaML: null, liquido: null });
+    expect(m.periodo.faturamento.tarifaEnv).toBeCloseTo(-18.9, 9);
+    expect(m.financeiro.conhecido).toMatchObject({ completo: false, tarifaValidada: false });
+    expect(m.financeiro.conhecido.tarifaML).toMatchObject({ receitaCoberta: 0, fracaoReceita: 0 });
+    expect(Math.abs(m.financeiro.conhecido.tarifaML.valor)).toBe(0);
+    expect(m.financeiro.porConta[DG].cobertura.tarifaML.validada).toBe(false);
+    // o numero calculado nao aparece em lugar nenhum da resposta
+    expect(JSON.stringify(m)).not.toContain('34.5');
+  });
+
+  it('pela rota, consolidado: a parte da Overwine (estimada) segue; o total nao existe', async () => {
+    const m = (await metrics(`${OW},${DG}`)).json();
+    expect(m.periodo.faturamento).toMatchObject({ bruto: 900, tarifaML: null, liquido: null });
+    expect(m.financeiro.conhecido.tarifaValidada).toBe(false);
+    expect(m.financeiro.conhecido.liquido.receitaCoberta).toBe(600);
+    expect(m.financeiro.porConta[OW].liquido).toBeCloseTo(600 * (1 - 0.148 - 0.144), 9);
+  });
+
+  it('Overwine sozinha nao muda com a variavel', async () => {
+    const m = (await metrics()).json();
+    expect(m.periodo.faturamento.tarifaML).toBeCloseTo(-600 * 0.148, 9);
+    expect(m).not.toHaveProperty('financeiro');
   });
 });

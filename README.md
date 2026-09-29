@@ -531,13 +531,24 @@ Overwine continua usando a estimativa dela. Pedidos sincronizados ANTES desta
 versão não têm o campo; para a Degustar, rodar uma carga `modo: "full"` depois
 de publicar, senão a cobertura começa em zero.
 
-**`sale_fee` é por UNIDADE** (`sale_fee × quantity`). Conferido em 29/09/2026
+**A tarifa real NÃO é apresentada por padrão.** `sale_fee × quantity` ainda
+não foi comparado com a tarifa que o Mercado Livre mostra no detalhe de uma
+venda. Enquanto a variável `TARIFA_REAL_VALIDADA` não for `"true"`, tarifa e
+líquido das contas sem perfil saem `null`, com
+`financeiro.conhecido.tarifaValidada: false`. O frete real é apresentado.
+Para validar: abrir no Mercado Livre o detalhe de uma venda com mais de uma
+unidade e comparar a tarifa de venda com `sale_fee × quantidade`. Se baterem,
+definir a variável em produção e republicar; os pedidos não precisam ser
+recarregados.
+
+**Evidência parcial de que `sale_fee` é por UNIDADE.** Conferido em 29/09/2026
 contra pedidos reais das duas contas, lidos pelo proxy: em 85 pedidos com mais
 de uma unidade, `sale_fee / unit_price` caiu na faixa de comissão do Mercado
 Livre (10% a 20%) em 57 e abaixo dela nos demais (tarifa com desconto);
 `sale_fee / (unit_price × quantity)` não caiu na faixa em NENHUM. Exemplo:
 8 unidades de R$ 30,69 com `sale_fee` 4,30 — 14,0% por unidade, 1,75% se
-fosse o total da linha. O que NÃO foi conferido: a fatura do Mercado Livre.
+fosse o total da linha. Isso indica a unidade, mas NÃO confirma o valor
+cobrado: a comparação foi com uma faixa percentual, não com a tarifa da venda.
 
 Para dar margem à Degustar: criar a tabela de custos dela, ensinar
 `products.service` a escolher a tabela pelo perfil e declarar o perfil em

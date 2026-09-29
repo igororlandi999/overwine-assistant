@@ -29,7 +29,17 @@
  * Um subtotal nunca é apresentado como total.
  *
  * ─────────────────────────────────────────────────────────────────────────
- * `sale_fee` É POR UNIDADE
+ * A TARIFA SÓ É APRESENTADA DEPOIS DE VALIDADA
+ *
+ * `sale_fee × quantity` ainda NÃO foi comparado com a tarifa que o Mercado
+ * Livre mostra no detalhe de uma venda. Enquanto `TARIFA_REAL_VALIDADA` não
+ * for `"true"` no ambiente, a tarifa sai como NÃO VALIDADA: `valor` nulo,
+ * cobertura zero, `validada: false` — e o líquido, que depende dela, também
+ * não sai. O frete real não depende disso e continua sendo apresentado.
+ * O snapshot guarda o `sale_fee` de qualquer forma, para que ligar a variável
+ * não exija recarregar pedidos.
+ *
+ * `sale_fee` É POR UNIDADE (hipótese de trabalho)
  *
  * O Mercado Livre devolve em `sale_fee` a tarifa de UMA unidade do item; a
  * tarifa da linha é `sale_fee × quantity`. Conferido em 29/09/2026 contra 85
@@ -57,6 +67,16 @@ export interface ParcelaApurada {
   /** Pedidos do período com a parcela conhecida, e o total de pedidos. */
   pedidosCobertos: number;
   pedidosTotal: number;
+  /**
+   * `false` = o cálculo existe mas não foi conferido contra o Mercado Livre,
+   * e por isso não é apresentado. Só a tarifa usa; no frete é sempre `true`.
+   */
+  validada: boolean;
+}
+
+/** A tarifa calculada foi conferida contra o Mercado Livre e pode ser apresentada? */
+export function tarifaRealValidada(): boolean {
+  return process.env.TARIFA_REAL_VALIDADA === 'true';
 }
 
 export interface FinanceiroApurado {
@@ -130,6 +150,7 @@ export function apurarFinanceiro(
     pedidosPorEnvio.set(sid, (pedidosPorEnvio.get(sid) ?? 0) + 1);
   }
 
+  const validada = tarifaRealValidada();
   let bruto = 0, n = 0;
   let tarifa = 0, tarifaReceita = 0, tarifaPedidos = 0;
   let frete = 0, freteReceita = 0, fretePedidos = 0;
@@ -142,7 +163,7 @@ export function apurarFinanceiro(
     bruto += receita;
     n++;
 
-    const t = tarifaDoPedido(o);
+    const t = validada ? tarifaDoPedido(o) : null;
     if (t !== null) { tarifa += t; tarifaReceita += receita; tarifaPedidos++; }
 
     // Frete: pedido sem envio não tem frete (0, conhecido). Com envio, vale o
@@ -164,9 +185,10 @@ export function apurarFinanceiro(
     if (t !== null && f !== null) { liqConhecido += receita - t - f; liqReceita += receita; liqPedidos++; }
   }
 
-  const parcela = (soma: number, receita: number, cobertos: number): ParcelaApurada => {
-    const completa = cobertos === n;
+  const parcela = (soma: number, receita: number, cobertos: number, ok = true): ParcelaApurada => {
+    const completa = ok && cobertos === n;
     return {
+      validada: ok,
       valor: completa ? -soma : null,
       conhecida: -soma,
       receitaCoberta: receita,
@@ -176,7 +198,7 @@ export function apurarFinanceiro(
       pedidosTotal: n,
     };
   };
-  const pT = parcela(tarifa, tarifaReceita, tarifaPedidos);
+  const pT = parcela(tarifa, tarifaReceita, tarifaPedidos, validada);
   const pF = parcela(frete, freteReceita, fretePedidos);
 
   return {

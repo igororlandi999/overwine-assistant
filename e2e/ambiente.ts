@@ -233,6 +233,9 @@ export async function iniciarAmbiente(op: OpcoesAmbiente): Promise<Ambiente> {
   Object.assign(process.env, TEST_ENV, {
     ALLOWED_ORIGIN: origem, ML_WEBHOOK_SECRET: 'segredo-simulado-de-webhook-bem-longo',
     MULTI_CONTA_ENABLED: 'true', CONTAS_ATIVAS: DG, ML_DEGUSTAR_USER_ID: UID_DG,
+    // No ambiente SIMULADO a tarifa e apresentada, para o roteiro exercitar a
+    // tela com valor e com cobertura parcial. Em producao o padrao e desligado.
+    TARIFA_REAL_VALIDADA: process.env.E2E_TARIFA_VALIDADA === 'false' ? 'false' : 'true',
   });
   resetEnvForTests();
   if (op.silencioso) { console.info = () => {}; }
