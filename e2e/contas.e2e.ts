@@ -515,4 +515,92 @@ describe('E2E — seletores de empresa e marketplace no navegador', () => {
     writeFileSync(SAIDA + '/relato-sessao.txt', texto);
     console.log(texto);
   }, 300_000);
+
+  it('filtros: Periodo > Personalizado cabe na tela, sem corte nem rolagem horizontal', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const relato: string[] = [];
+    const ok = (c: boolean, t: string) => { relato.push((c ? 'ok   ' : 'ERRO ') + t); expect(c, t).toBe(true); };
+    const larguras: Array<[string, number, number]> = [
+      ['notebook 1366', 1366, 768], ['notebook 1280', 1280, 720], ['tablet 1024', 1024, 768],
+      ['tablet 768', 768, 1024], ['celular 390', 390, 844],
+    ];
+    const selecoes: Array<[string, string]> = [['alemmar', OW], ['degustar', DG], ['*', OW + ',' + DG]];
+
+    // UM login para todas as larguras: o backend limita a 5 logins por minuto.
+    const ctx = await browser.newContext({ viewport: { width: larguras[0][1], height: larguras[0][2] } });
+    const page = await ctx.newPage();
+    await page.goto(ORIGIN + '/');
+    await page.fill('#viewer-pass', TEST_ENV.DASHBOARD_PASSWORD);
+    await page.press('#viewer-pass', 'Enter');
+    await page.waitForSelector('#main-header', { state: 'visible', timeout: 60_000 });
+    await page.waitForFunction('!_loadAllEmCurso && _metrics !== null', null, { timeout: 60_000 });
+
+    for (const [nome, w, h] of larguras) {
+      await page.setViewportSize({ width: w, height: h });
+      await page.waitForTimeout(200);
+
+      for (const [empresa, esperada] of selecoes) {
+        if (await page.evaluate('selecaoChave()') !== esperada) {
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'load', timeout: 60_000 }),
+            page.selectOption('#conta-empresa', empresa),
+          ]);
+          await page.waitForSelector('#main-header', { state: 'visible', timeout: 60_000 });
+          await page.waitForFunction('!_loadAllEmCurso && _metrics !== null', null, { timeout: 60_000 });
+        }
+        await page.selectOption('#gdr-preset', 'custom');
+        await page.waitForSelector('#gdr-custom.aberto', { state: 'visible' });
+        await page.evaluate(`document.getElementById('section-nav').scrollIntoView({ block: 'center' })`);
+        await page.waitForTimeout(250);
+
+        const m: any = await page.evaluate(`(function () {
+          var vw = document.documentElement.clientWidth;
+          var nav = document.getElementById('section-nav').getBoundingClientRect();
+          var ids = ['conta-empresa', 'conta-canal', 'gdr-preset', 'gdr-de', 'gdr-ate', 'gdr-apply'];
+          var els = ids.map(function (id) {
+            var el = document.getElementById(id), r = el.getBoundingClientRect();
+            var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            var topo = document.elementFromPoint(cx, cy);
+            return { id: id, left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height),
+              dentroDaTela: r.left >= 0 && r.right <= vw + 0.5 && r.width > 20 && r.height > 10,
+              dentroDaBarra: r.left >= nav.left - 0.5 && r.right <= nav.right + 0.5 && r.top >= nav.top - 0.5 && r.bottom <= nav.bottom + 0.5,
+              alcancavel: !!topo && (topo === el || el.contains(topo)) };
+          });
+          var navEl = document.getElementById('section-nav');
+          return { vw: vw, rolagemPagina: document.documentElement.scrollWidth - vw, rolagemBarra: navEl.scrollWidth - navEl.clientWidth,
+            alturaBarra: Math.round(nav.height), barraDireita: Math.round(nav.right), els: els };
+        })()`);
+        const rot = `${nome} / ${esperada}`;
+        // Abaixo de 768 px a pagina ja rolava na horizontal ANTES desta correcao, por
+        // causa dos cards de grafico (largura minima fixa) — nao dos filtros. La o que
+        // se exige e que a BARRA de filtros caiba; a rolagem dos cards e outro defeito.
+        if (w >= 768) ok(m.rolagemPagina <= 0, `${rot}: sem rolagem horizontal na pagina (${m.rolagemPagina}px)`);
+        else {
+          ok(m.barraDireita <= m.vw + 0.5, `${rot}: a barra de filtros cabe na tela (ate ${m.barraDireita} de ${m.vw})`);
+          relato.push(`     (pagina rola ${m.rolagemPagina}px na horizontal por causa dos cards: defeito anterior, fora desta correcao)`);
+        }
+        ok(m.rolagemBarra <= 0, `${rot}: sem conteudo escondido na barra (${m.rolagemBarra}px)`);
+        for (const e of m.els) {
+          ok(e.dentroDaTela && e.dentroDaBarra && e.alcancavel, `${rot}: ${e.id} inteiro e clicavel (x ${e.left}..${e.right} de ${m.vw}, ${e.w}x${e.h})`);
+        }
+        // Funciona: escolher o intervalo e aplicar.
+        const de = ymd(new Date(Date.now() - 9 * 86400_000)), ate = ymd(new Date());
+        await page.fill('#gdr-de', de);
+        await page.fill('#gdr-ate', ate);
+        await page.click('#gdr-apply');
+        await page.waitForFunction('!document.getElementById("gdr-preset").disabled && globalDateRange.from === "' + de + '"', null, { timeout: 60_000 });
+        ok(await page.evaluate('globalDateRange.preset') === 'custom' && await page.evaluate('globalDateRange.to') === ate, `${rot}: intervalo ${de}..${ate} aplicado`);
+        ok(await page.evaluate('selecaoChave()') === esperada, `${rot}: a selecao nao mudou ao aplicar o periodo`);
+        relato.push(`     altura da barra: ${m.alturaBarra}px`);
+        await page.screenshot({ path: SAIDA + `/filtros-${w}-${empresa === '*' ? 'consolidado' : empresa}.png`, clip: { x: 0, y: 0, width: w, height: Math.min(h, 700) } }).catch(() => {});
+        await page.selectOption('#gdr-preset', 'mes_atual');
+        await page.waitForFunction('!document.getElementById("gdr-preset").disabled', null, { timeout: 60_000 });
+      }
+    }
+    await ctx.close();
+    await browser.close();
+    const texto = ['── FILTROS ──', ...relato].join(String.fromCharCode(10));
+    writeFileSync(SAIDA + '/relato-filtros.txt', texto);
+    console.log(texto);
+  }, 600_000);
 });
