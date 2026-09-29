@@ -556,6 +556,16 @@ Para dar margem à Degustar: criar a tabela de custos dela, ensinar
 
 Roteiro de navegador e prévia local com dados simulados: `e2e/README.md`.
 
+**Cobertura não é validação.** São campos separados. Cobertura: o pedido traz
+o dado (`completa`, `fracaoReceita`). Validação: a conta feita com ele foi
+conferida contra o Mercado Livre (`apuradoIntegralmenteValidado`,
+`ressalvas`). Venda comum foi conferida em 29/09/2026 e `TARIFA_REAL_VALIDADA`
+está ligada em produção. Pedido com **reembolso parcial** não foi: ele
+continua trazendo `sale_fee` e quantidade originais, e não se sabe se parte da
+tarifa foi devolvida. Esses pedidos entram no total e o resultado sai com
+`ressalvas: [{ tipo: "reembolso_parcial", conta, pedidos, tarifaCalculada }]`.
+A ressalva sai de cena com `TARIFA_REEMBOLSO_VALIDADA=true`.
+
 #### Recarga completa com rede de segurança
 
 `POST /api/admin/orders-sync` (com `x-admin-key` e `conta`) ganhou três ações

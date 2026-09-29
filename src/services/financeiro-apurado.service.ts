@@ -39,7 +39,22 @@
  * O snapshot guarda o `sale_fee` de qualquer forma, para que ligar a variável
  * não exija recarregar pedidos.
  *
- * `sale_fee` É POR UNIDADE (hipótese de trabalho)
+ * COBERTURA NÃO É VALIDAÇÃO
+ *
+ * São duas perguntas diferentes, e a resposta sai em campos diferentes:
+ *  - COBERTURA: o pedido TRAZ o dado? (`completa`, `fracao`, `pedidosCobertos`)
+ *  - VALIDAÇÃO: o cálculo feito com esse dado foi CONFERIDO contra o que o
+ *    Mercado Livre mostra? (`ressalvaReembolso`, `integralmenteValidado`)
+ *
+ * Para venda comum a tarifa foi conferida (29/09/2026, venda com 2 unidades).
+ * Para pedido com REEMBOLSO PARCIAL, não: o pedido continua trazendo
+ * `sale_fee` e a quantidade ORIGINAIS, e não se sabe se o Mercado Livre
+ * devolveu parte da tarifa. Esses pedidos entram no total — tirá-los deixaria
+ * o total sem eles, o que é outro erro — mas o resultado sai marcado com a
+ * ressalva, com a quantidade de pedidos e o valor em dúvida. Sai de cena
+ * quando `TARIFA_REEMBOLSO_VALIDADA` for `"true"`.
+ *
+ * `sale_fee` É POR UNIDADE
  *
  * O Mercado Livre devolve em `sale_fee` a tarifa de UMA unidade do item; a
  * tarifa da linha é `sale_fee × quantity`. Conferido em 29/09/2026 contra 85
@@ -48,7 +63,7 @@
  * Detalhe no README, "Perfil financeiro, e o que é real".
  */
 import type { EnvioInfo } from '../lib/shipping-store.js';
-import { contaComoVenda } from '../lib/status-venda.js';
+import { contaComoVenda, ehReembolsoParcial } from '../lib/status-venda.js';
 import type { OrderSlim } from './orders.service.js';
 
 export interface ParcelaApurada {
@@ -74,6 +89,33 @@ export interface ParcelaApurada {
   validada: boolean;
 }
 
+/** A tarifa de pedido com reembolso parcial foi conferida contra o Mercado Livre? */
+export function tarifaDeReembolsoValidada(): boolean {
+  return process.env.TARIFA_REEMBOLSO_VALIDADA === 'true';
+}
+
+/**
+ * O pedido teve devolução de parte do valor? O status é o sinal principal; a
+ * diferença entre pago e total cobre o caso em que o status ainda não mudou.
+ * Na dúvida marca: uma ressalva a mais é o lado seguro.
+ */
+export function teveReembolso(o: Pick<OrderSlim, 'status' | 'paid_amount' | 'total_amount'>): boolean {
+  if (ehReembolsoParcial(o.status)) return true;
+  const pago = o.paid_amount, total = o.total_amount;
+  return typeof pago === 'number' && typeof total === 'number' && pago > 0 && pago < total - 0.005;
+}
+
+export interface RessalvaReembolso {
+  /** Pedidos do período com reembolso parcial cuja tarifa entrou no total. */
+  pedidos: number;
+  /** Receita (já líquida do reembolso) desses pedidos. */
+  receita: number;
+  /** Tarifa calculada para eles, pelas quantidades ORIGINAIS (≤ 0). É o valor em dúvida. */
+  tarifaCalculada: number;
+  /** `true` quando a regra para reembolso já foi conferida: a ressalva não se aplica. */
+  validada: boolean;
+}
+
 /** A tarifa calculada foi conferida contra o Mercado Livre e pode ser apresentada? */
 export function tarifaRealValidada(): boolean {
   return process.env.TARIFA_REAL_VALIDADA === 'true';
@@ -92,6 +134,14 @@ export interface FinanceiroApurado {
    * deles. Serve para mostrar "o que já se sabe"; nunca substitui `liquido`.
    */
   liquidoConhecido: { valor: number; receitaCoberta: number; fracao: number; pedidos: number };
+  /** Pedidos com reembolso parcial dentro do total. `pedidos: 0` = nada a ressalvar. */
+  ressalvaReembolso: RessalvaReembolso;
+  /**
+   * `true` só quando tarifa e líquido estão completos E nenhum valor do total
+   * depende de regra ainda não conferida. Cobertura completa com ressalva é
+   * `false`: o número existe, mas não é integralmente validado.
+   */
+  integralmenteValidado: boolean;
 }
 
 function dentro(iso: string | null, inicio: Date | null, fim: Date | null): boolean {
@@ -155,6 +205,7 @@ export function apurarFinanceiro(
   let tarifa = 0, tarifaReceita = 0, tarifaPedidos = 0;
   let frete = 0, freteReceita = 0, fretePedidos = 0;
   let liqConhecido = 0, liqReceita = 0, liqPedidos = 0;
+  let reembPedidos = 0, reembReceita = 0, reembTarifa = 0;
 
   for (const o of pedidos) {
     if (!contaComoVenda(o.status)) continue;
@@ -165,6 +216,7 @@ export function apurarFinanceiro(
 
     const t = validada ? tarifaDoPedido(o) : null;
     if (t !== null) { tarifa += t; tarifaReceita += receita; tarifaPedidos++; }
+    if (t !== null && teveReembolso(o)) { reembPedidos++; reembReceita += receita; reembTarifa += t; }
 
     // Frete: pedido sem envio não tem frete (0, conhecido). Com envio, vale o
     // custo real do mapa, rateado pela receita dos pedidos daquele envio.
@@ -201,13 +253,17 @@ export function apurarFinanceiro(
   const pT = parcela(tarifa, tarifaReceita, tarifaPedidos, validada);
   const pF = parcela(frete, freteReceita, fretePedidos);
 
+  const reembOk = tarifaDeReembolsoValidada();
+  const liquido = pT.completa && pF.completa ? bruto - tarifa - frete : null;
   return {
     metodo: 'apurado_pedidos_envios',
     bruto,
     pedidos: n,
     tarifaML: pT,
     frete: pF,
-    liquido: pT.completa && pF.completa ? bruto - tarifa - frete : null,
+    ressalvaReembolso: { pedidos: reembPedidos, receita: reembReceita, tarifaCalculada: -reembTarifa, validada: reembOk },
+    integralmenteValidado: liquido !== null && (reembPedidos === 0 || reembOk),
+    liquido,
     liquidoConhecido: {
       valor: liqConhecido,
       receitaCoberta: liqReceita,

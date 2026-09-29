@@ -55,7 +55,7 @@ import { calcularRanking, type ResultadoRanking } from './product-ranking.servic
 import { coberturaLogistica } from './shipping-logistics.service.js';
 import type { EnvioInfo } from '../lib/shipping-store.js';
 import { faturamentoPeriodo } from './orders.service.js';
-import { apurarFinanceiro, type ParcelaApurada } from './financeiro-apurado.service.js';
+import { apurarFinanceiro, type ParcelaApurada, type RessalvaReembolso } from './financeiro-apurado.service.js';
 import { brtStartOfDay, brtEndOfDay } from '../lib/datas-brt.js';
 
 /** Uma conta da seleção com o cache DELA. A rota monta; o serviço não conhece prefixo. */
@@ -84,6 +84,14 @@ export interface FinanceiroDaConta {
   liquido: number | null;
   /** Só no método apurado: o que se conhece e quanto da receita cobre. */
   cobertura: { tarifaML: ParcelaApurada; frete: ParcelaApurada; liquidoConhecido: { valor: number; receitaCoberta: number; fracao: number; pedidos: number } } | null;
+  /** Só no método apurado. VALIDAÇÃO, não cobertura: ver financeiro-apurado. */
+  ressalvaReembolso: RessalvaReembolso | null;
+  /**
+   * O número desta conta foi conferido por inteiro? Na estimativa é `false` por
+   * definição (é estimativa); no apurado, `false` com cobertura incompleta ou
+   * com pedido de reembolso parcial ainda não conferido.
+   */
+  integralmenteValidado: boolean;
 }
 
 /** Um subtotal e quanto da receita bruta da seleção ele cobre. */
@@ -114,6 +122,13 @@ export interface FinanceiroPublico {
      * não é apresentada (nem o líquido). Não é falta de dado: é falta de prova.
      */
     tarifaValidada: boolean;
+    /**
+     * VALIDAÇÃO do apurado, separada da cobertura: `false` quando alguma conta
+     * apurada tem valor que depende de regra não conferida. `ressalvas` diz
+     * qual, em qual conta, quantos pedidos e quanto.
+     */
+    apuradoIntegralmenteValidado: boolean;
+    ressalvas: Array<{ tipo: 'reembolso_parcial'; conta: string; pedidos: number; receita: number; tarifaCalculada: number }>;
     /** Cada parcela com a SUA cobertura: a da tarifa pode diferir da do frete. */
     tarifaML: SubtotalConhecido;
     tarifaEnv: SubtotalConhecido;
@@ -503,6 +518,13 @@ export interface FaturamentoSemPerfil {
  */
 export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, bruto: number) {
   const partes = Object.values(finPorConta);
+  const apuradas = Object.entries(finPorConta).filter(([, p]) => p.metodo === 'apurado_pedidos_envios');
+  const ressalvas = apuradas
+    .filter(([, p]) => p.ressalvaReembolso && p.ressalvaReembolso.pedidos > 0 && !p.ressalvaReembolso.validada)
+    .map(([conta, p]) => ({
+      tipo: 'reembolso_parcial' as const, conta,
+      pedidos: p.ressalvaReembolso!.pedidos, receita: p.ressalvaReembolso!.receita, tarifaCalculada: p.ressalvaReembolso!.tarifaCalculada,
+    }));
   const todas = (f: (p: FinanceiroDaConta) => number | null): number | null =>
     partes.every(p => f(p) !== null) ? partes.reduce((s, p) => s + (f(p) as number), 0) : null;
   const metodos = new Set(partes.map(p => p.metodo));
@@ -529,6 +551,8 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
     conhecido: {
       completo: partes.every(p => p.liquido !== null), metodo,
       tarifaValidada: partes.every(p => !p.cobertura || p.cobertura.tarifaML.validada),
+      apuradoIntegralmenteValidado: apuradas.every(([, p]) => p.integralmenteValidado),
+      ressalvas,
       tarifaML: cT, tarifaEnv: cF, liquido: cL,
     },
   };
@@ -540,7 +564,7 @@ export function financeiroDaConta(b: BaseLida, periodo: PeriodoYmd): FinanceiroD
   const fim = brtEndOfDay(periodo.toYmd);
   if (contaTemFinanceiro(b.conta)) {
     const f = faturamentoPeriodo(b.pedidos, ini, fim);
-    return { metodo: 'estimado_taxas_da_conta', bruto: f.bruto, tarifaML: f.tarifaML, tarifaEnv: f.tarifaEnv, liquido: f.liquido, cobertura: null };
+    return { metodo: 'estimado_taxas_da_conta', bruto: f.bruto, tarifaML: f.tarifaML, tarifaEnv: f.tarifaEnv, liquido: f.liquido, cobertura: null, ressalvaReembolso: null, integralmenteValidado: false };
   }
   const a = apurarFinanceiro(b.pedidos, ini, fim, b.envios);
   return {
@@ -550,6 +574,8 @@ export function financeiroDaConta(b: BaseLida, periodo: PeriodoYmd): FinanceiroD
     tarifaEnv: a.frete.valor,
     liquido: a.liquido,
     cobertura: { tarifaML: a.tarifaML, frete: a.frete, liquidoConhecido: a.liquidoConhecido },
+    ressalvaReembolso: a.ressalvaReembolso,
+    integralmenteValidado: a.integralmenteValidado,
   };
 }
 

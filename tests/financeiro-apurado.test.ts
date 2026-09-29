@@ -336,3 +336,84 @@ describe('tarifa NAO validada — o padrao, ate alguem conferir contra o Mercado
     expect(m).not.toHaveProperty('financeiro');
   });
 });
+
+describe('cobertura nao e validacao — pedido com reembolso parcial', () => {
+  // O caso real: 2 x R$ 99, reembolso de metade. O pedido continua trazendo
+  // sale_fee 13,86 e quantidade 2.
+  const reembolsado = (): OrderSlim => {
+    const p = ped(2001, '2026-09-10', 198, { fee: 13.86, qtd: 2 });
+    p.status = 'partially_refunded'; p.paid_amount = 99; p.total_amount = 198;
+    return p;
+  };
+  beforeEach(() => { process.env.TARIFA_REAL_VALIDADA = 'true'; delete process.env.TARIFA_REEMBOLSO_VALIDADA; });
+  afterEach(() => { delete process.env.TARIFA_REEMBOLSO_VALIDADA; });
+
+  it('o pedido entra no total (cobertura completa) e o resultado sai COM ressalva', () => {
+    const r = apurarFinanceiro([ped(2002, '2026-09-15', 100, { fee: 12 }), reembolsado()], INI, FIM, mapa([11002, 10], [11001, 51.9]));
+    expect(r.bruto).toBe(199);                                       // 100 + 99 pagos
+    expect(r.tarifaML).toMatchObject({ completa: true, fracao: 1, pedidosCobertos: 2, pedidosTotal: 2, validada: true });
+    expect(r.tarifaML.valor).toBeCloseTo(-(12 + 27.72), 9);
+    expect(r.liquido).toBeCloseTo(199 - 39.72 - 61.9, 9);
+    expect(r.ressalvaReembolso).toMatchObject({ pedidos: 1, receita: 99, validada: false });
+    expect(r.ressalvaReembolso.tarifaCalculada).toBeCloseTo(-27.72, 9);
+    expect(r.integralmenteValidado).toBe(false);
+  });
+
+  it('sem pedido reembolsado no periodo: sem ressalva, integralmente validado', () => {
+    const r = apurarFinanceiro([ped(2002, '2026-09-15', 100, { fee: 12 }), reembolsado()],
+      new Date('2026-09-12T00:00:00.000-03:00'), FIM, mapa([11002, 10], [11001, 51.9]));
+    expect(r.ressalvaReembolso).toMatchObject({ pedidos: 0, receita: 0 });
+    expect(r.integralmenteValidado).toBe(true);
+  });
+
+  it('pago menor que o total tambem marca, mesmo com o status ainda "paid"', () => {
+    const p = reembolsado(); p.status = 'paid';
+    expect(apurarFinanceiro([p], INI, FIM, mapa([11001, 1])).ressalvaReembolso.pedidos).toBe(1);
+  });
+
+  it('cobertura incompleta nunca e "integralmente validado", com ou sem reembolso', () => {
+    const r = apurarFinanceiro([ped(2002, '2026-09-15', 100)], INI, FIM, mapa([11002, 10]));
+    expect(r.integralmenteValidado).toBe(false);
+    expect(r.ressalvaReembolso.pedidos).toBe(0);
+  });
+
+  it('regra de reembolso conferida (TARIFA_REEMBOLSO_VALIDADA=true): a ressalva sai de cena', () => {
+    process.env.TARIFA_REEMBOLSO_VALIDADA = 'true';
+    const r = apurarFinanceiro([reembolsado()], INI, FIM, mapa([11001, 51.9]));
+    expect(r.ressalvaReembolso).toMatchObject({ pedidos: 1, validada: true });
+    expect(r.integralmenteValidado).toBe(true);
+  });
+
+  it('pela rota: Degustar e consolidado trazem a ressalva; cobertura e validacao em campos separados', async () => {
+    await publicar(cacheDG, [ped(2002, '2026-09-15', 100, { fee: 12 }), reembolsado()], 3);
+    await publicarMapaEnvios(cacheDG, mapa([11002, 10], [11001, 51.9]));
+    for (const contas of [DG, `${OW},${DG}`]) {
+      const m = (await metrics(contas)).json();
+      const k = m.financeiro.conhecido;
+      expect(k.completo, contas).toBe(true);                                   // COBERTURA
+      expect(k.liquido.fracaoReceita).toBeCloseTo(1, 9);
+      expect(m.periodo.faturamento.liquido).not.toBeNull();
+      expect(k.apuradoIntegralmenteValidado, contas).toBe(false);              // VALIDACAO
+      expect(k.ressalvas).toHaveLength(1);
+      expect(k.ressalvas[0]).toMatchObject({ tipo: 'reembolso_parcial', conta: DG, pedidos: 1, receita: 99 });
+      expect(k.ressalvas[0].tarifaCalculada).toBeCloseTo(-27.72, 9);
+      expect(m.financeiro.porConta[DG]).toMatchObject({ integralmenteValidado: false });
+    }
+  });
+
+  it('pela rota: sem reembolso no periodo nao ha ressalva', async () => {
+    await publicar(cacheDG, [ped(2002, '2026-09-15', 100, { fee: 12 })], 3);
+    await publicarMapaEnvios(cacheDG, mapa([11002, 10]));
+    const k = (await metrics(DG)).json().financeiro.conhecido;
+    expect(k).toMatchObject({ completo: true, apuradoIntegralmenteValidado: true, ressalvas: [] });
+  });
+
+  it('a Overwine nao ganha ressalva nem muda de numero: a estimativa dela nao usa sale_fee', async () => {
+    const p = ped(1003, '2026-09-13', 198, { fee: 13.86, qtd: 2 });
+    p.status = 'partially_refunded'; p.paid_amount = 99;
+    await publicar(cache, [p, ...PED_OW], 8);
+    const m = (await metrics()).json();
+    expect(m).not.toHaveProperty('financeiro');
+    expect(m.periodo.faturamento.tarifaML).toBeCloseTo(-699 * 0.148, 9);
+  });
+});

@@ -55,3 +55,12 @@ export const STATUS_VENDA: ReadonlySet<string> = new Set([
 export function contaComoVenda(status: string | null | undefined): boolean {
   return typeof status === 'string' && STATUS_VENDA.has(status);
 }
+
+/**
+ * Venda que teve parte do valor devolvida. Continua sendo venda (o que ficou
+ * pago é receita), mas o que o pedido traz de tarifa é o da quantidade
+ * ORIGINAL — quem apura tarifa real precisa saber que este é o caso.
+ */
+export function ehReembolsoParcial(status: string | null | undefined): boolean {
+  return status === 'partially_refunded';
+}
