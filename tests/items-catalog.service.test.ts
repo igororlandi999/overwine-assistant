@@ -314,3 +314,16 @@ describe('frescor', () => {
     expect(STATUS_CATALOGO).toEqual(['active', 'paused', 'closed']);
   });
 });
+
+describe('toSlimItem — produto de catalogo como identidade', () => {
+  it('guarda catalog_product_id quando o ML informa', () => {
+    const s = toSlimItem({ id: 'MLB1', title: 'V', catalog_product_id: 'MLB19762297' } as any)!;
+    expect(s.catalog_product_id).toBe('MLB19762297');
+  });
+  it('sem catalogo, o anuncio fica com o formato de sempre (campo ausente)', () => {
+    for (const v of [undefined, null, '', 'nao-e-id', 123]) {
+      const s = toSlimItem({ id: 'MLB1', title: 'V', catalog_product_id: v } as any)!;
+      expect('catalog_product_id' in s).toBe(false);
+    }
+  });
+});

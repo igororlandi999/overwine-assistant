@@ -66,6 +66,7 @@ export interface ItemBruto {
   tags?: string[] | null;
   shipping?: { logistic_type?: string | null } | null;
   attributes?: ItemAtributoBruto[] | null;
+  catalog_product_id?: string | null;
   [k: string]: unknown;
 }
 
@@ -97,7 +98,7 @@ export function toSlimItem(item: ItemBruto): ItemSlim | null {
     .slice(0, 1)
     .map(a => ({ id: 'SELLER_SKU', value_name: str(a.value_name) }));
 
-  return {
+  const slim: ItemSlim = {
     id,
     title: str(item.title),
     status: str(item.status),
@@ -117,6 +118,10 @@ export function toSlimItem(item: ItemBruto): ItemSlim | null {
     shipping: item.shipping ? { logistic_type: str(item.shipping.logistic_type) } : null,
     attributes: sellerSku.length ? sellerSku : null,
   };
+  // Só grava quando veio: anúncio sem catálogo fica com o formato de sempre.
+  const cat = str(item.catalog_product_id);
+  if (cat && /^MLB\d{4,15}$/.test(cat)) slim.catalog_product_id = cat;
+  return slim;
 }
 
 export function contar(itens: ItemSlim[]): CatalogCounts {

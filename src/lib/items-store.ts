@@ -42,6 +42,14 @@ export interface ItemSlim {
   shipping: { logistic_type: string | null } | null;
   /** SOMENTE o par SELLER_SKU — nunca a lista completa de atributos. */
   attributes: Array<{ id: string; value_name: string | null }> | null;
+  /**
+   * Produto de CATÁLOGO do Mercado Livre a que o anúncio está ligado. É a
+   * identidade do produto quando o vendedor não preencheu SKU: o catálogo
+   * separa volume, safra, kit e variação, e anúncios do mesmo produto com
+   * títulos diferentes apontam para o mesmo id. OPCIONAL e AUSENTE quando o ML
+   * não informa — os snapshots publicados antes deste campo continuam válidos.
+   */
+  catalog_product_id?: string;
 }
 
 export interface CatalogCounts {
