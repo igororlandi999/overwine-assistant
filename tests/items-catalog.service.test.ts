@@ -327,3 +327,14 @@ describe('toSlimItem — produto de catalogo como identidade', () => {
     }
   });
 });
+
+describe('toSlimItem — vinculo explicito de estoque (user_product_id)', () => {
+  it('guarda user_product_id quando o ML informa', () => {
+    expect(toSlimItem({ id: 'MLB1', title: 'V', user_product_id: 'MLBU5105427654' } as any)!.user_product_id).toBe('MLBU5105427654');
+  });
+  it('ausente ou invalido: campo ausente', () => {
+    for (const v of [undefined, null, '', 'MLB123', 42]) {
+      expect('user_product_id' in toSlimItem({ id: 'MLB1', title: 'V', user_product_id: v } as any)!).toBe(false);
+    }
+  });
+});

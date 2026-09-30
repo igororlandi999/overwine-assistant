@@ -67,6 +67,7 @@ export interface ItemBruto {
   shipping?: { logistic_type?: string | null } | null;
   attributes?: ItemAtributoBruto[] | null;
   catalog_product_id?: string | null;
+  user_product_id?: string | null;
   [k: string]: unknown;
 }
 
@@ -121,6 +122,8 @@ export function toSlimItem(item: ItemBruto): ItemSlim | null {
   // Só grava quando veio: anúncio sem catálogo fica com o formato de sempre.
   const cat = str(item.catalog_product_id);
   if (cat && /^MLB\d{4,15}$/.test(cat)) slim.catalog_product_id = cat;
+  const up = str(item.user_product_id);
+  if (up && /^MLBU\d{4,15}$/.test(up)) slim.user_product_id = up;
   return slim;
 }
 

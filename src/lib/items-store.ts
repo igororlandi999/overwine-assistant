@@ -50,6 +50,13 @@ export interface ItemSlim {
    * não informa — os snapshots publicados antes deste campo continuam válidos.
    */
   catalog_product_id?: string;
+  /**
+   * "Produto do vendedor" (User Product) do Mercado Livre: anúncios com o
+   * MESMO id compartilham o MESMO estoque. É o vínculo explícito que permite
+   * deduplicar saldo entre anúncios; catálogo e quantidade iguais não provam
+   * isso. OPCIONAL e AUSENTE quando o ML não informa.
+   */
+  user_product_id?: string;
 }
 
 export interface CatalogCounts {

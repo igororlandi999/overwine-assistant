@@ -36,7 +36,7 @@ const ITEM_FIELDS = [
   'sold_quantity', 'status', 'sub_status', 'permalink', 'thumbnail', 'category_id',
   'condition', 'last_updated', 'date_created', 'catalog_listing', 'catalog_product_id',
   'inventory_id', 'shipping', 'seller_custom_field', 'attributes', 'variations',
-  'listing_type_id', 'health', 'tags',
+  'listing_type_id', 'health', 'tags', 'user_product_id',
 ];
 
 const ORDER_SLIM_FIELDS = [
