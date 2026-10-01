@@ -21,7 +21,7 @@ import { sincronizarAnuncios, sincronizarEstoqueFba } from '../src/amazon/catalo
 import { sincronizarFinanceiro, apurarPedido, type TransacaoAmazon } from '../src/amazon/financeiro.js';
 import { lerColecao, lerManifesto } from '../src/amazon/store.js';
 import { executarPassoAmazon } from '../src/amazon/sync.service.js';
-import { MODELOS, CREDENCIAIS_TESTE, criarAmazonSimulada, exemploOficialSearchOrders, validarContraModelo, type Cenario } from './amazon-simulada.js';
+import { MODELOS, CREDENCIAIS_TESTE, criarAmazonSimulada, exemploOficialSearchOrders, validarContraModelo, pedidoApi, anuncioApi, transacaoApi, type Cenario } from './amazon-simulada.js';
 import syncHandler from '../api/admin/orders-sync.js';
 import ordersHandler from '../api/orders/[resource].js';
 import refreshHandler from '../api/orders/refresh.js';
@@ -79,16 +79,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function pedidoApi(id: string, atualizado: string, extra: Partial<any> = {}) {
-  return {
-    orderId: id, createdTime: atualizado, lastUpdatedTime: atualizado,
-    salesChannel: { channelName: 'AMAZON', marketplaceId: BR, marketplaceName: 'Amazon.com.br' },
-    fulfillment: { fulfillmentStatus: 'SHIPPED', fulfilledBy: 'MERCHANT' },
-    proceeds: { grandTotal: { amount: '119.90', currencyCode: 'BRL' }, breakdowns: [{ type: 'ITEM', subtotal: { amount: '99.90', currencyCode: 'BRL' } }, { type: 'SHIPPING', subtotal: { amount: '20.00', currencyCode: 'BRL' } }] },
-    orderItems: [{ orderItemId: id + '-1', quantityOrdered: 1, product: { asin: 'B0TESTE001', sellerSku: '21003', title: 'Vinho', price: { unitPrice: { amount: '99.90', currencyCode: 'BRL' } } }, proceeds: { proceedsTotal: { amount: '119.90', currencyCode: 'BRL' } }, fulfillment: { quantityFulfilled: 1, quantityUnfulfilled: 0 } }],
-    ...extra,
-  };
-}
 
 // ── 1. Contrato ────────────────────────────────────────────────────────────
 describe('contrato: constantes iguais aos modelos oficiais', () => {
@@ -134,8 +124,9 @@ describe('contrato: constantes iguais aos modelos oficiais', () => {
   });
   it('nada do Mercado Livre entra no módulo Amazon: tarifa, custo, status ou regra de venda', () => {
     for (const f of readdirSync('src/amazon')) {
-      const src = readFileSync(join('src/amazon', f), 'utf8');
-      expect(src, f).not.toMatch(/taxas\.json|custos\.json|sale_fee|contaComoVenda|status-venda|ml-auth|mercadolibre/);
+      // Só o CÓDIGO (sem comentários): a documentação pode citar o ML para dizer o que não se usa.
+      const src = readFileSync(join('src/amazon', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+      expect(src, f).not.toMatch(/taxas\.json|custos\.json|sale_fee|ml-auth|mercadolibre|ehReembolsoParcial|(?<![A-Z_])STATUS_VENDA(?![A-Z_])|'paid'|partially_refunded/);
       expect(src, f).not.toMatch(/0\.148|14[.,]8|0\.144|14[.,]4/);
     }
   });
@@ -265,14 +256,6 @@ describe('pedidos: janela por atualização, retomável', () => {
 });
 
 // ── 5. Anúncios e estoque ─────────────────────────────────────────────────
-function anuncioApi(sku: string, q: number) {
-  return {
-    sku,
-    summaries: [{ marketplaceId: BR, asin: 'B0' + sku, productType: 'WINE', conditionType: 'new_new', status: ['BUYABLE', 'DISCOVERABLE'], itemName: 'Vinho ' + sku, createdDate: '2026-01-01T00:00:00Z', lastUpdatedDate: '2026-09-01T00:00:00Z' }],
-    offers: [{ marketplaceId: BR, offerType: 'B2C', price: { amount: '99.90', currencyCode: 'BRL' } }],
-    fulfillmentAvailability: [{ fulfillmentChannelCode: 'DEFAULT', quantity: q }],
-  };
-}
 describe('anúncios e estoque', () => {
   it('a coleção só é publicada completa; varredura interrompida não aparece', async () => {
     usarAmazon({ anuncios: Array.from({ length: 45 }, (_, i) => anuncioApi(`S${i}`, i)) });
@@ -302,18 +285,6 @@ describe('anúncios e estoque', () => {
 });
 
 // ── 6. Financeiro ─────────────────────────────────────────────────────────
-function transacaoApi(id: string, pedido: string | null, posted: string, total: number, status = 'RELEASED') {
-  return {
-    transactionId: id, transactionType: 'Shipment', transactionStatus: status, description: 'Order Payment', postedDate: posted,
-    totalAmount: { currencyCode: 'BRL', currencyAmount: total },
-    relatedIdentifiers: pedido ? [{ relatedIdentifierName: 'ORDER_ID', relatedIdentifierValue: pedido }] : [],
-    marketplaceDetails: { marketplaceId: BR, marketplaceName: 'Amazon.com.br' },
-    breakdowns: [
-      { breakdownType: 'ProductCharges', breakdownAmount: { currencyCode: 'BRL', currencyAmount: 99.9 } },
-      { breakdownType: 'AmazonFees', breakdownAmount: { currencyCode: 'BRL', currencyAmount: Math.round((total - 99.9) * 100) / 100 }, breakdowns: [{ breakdownType: 'Commission', breakdownAmount: { currencyCode: 'BRL', currencyAmount: -14.99 } }] },
-    ],
-  };
-}
 describe('financeiro: o que a Amazon lançou, com a cobertura lida', () => {
   it('janelas de até 180 dias; cobertura só avança com a janela inteira lida', async () => {
     const amz = usarAmazon({ transacoes: [transacaoApi('T1', '701-1', '2026-03-01T00:00:00Z', 80), transacaoApi('T2', '701-2', '2026-09-20T00:00:00Z', 70)] });
@@ -369,10 +340,11 @@ describe('alemmar-amazon continua inativa; só a admin a prepara', () => {
     process.env.MULTI_CONTA_ENABLED = 'true';
     expect(() => resolverContasDeLeitura('alemmar-amazon')).toThrow(ContaInvalidaError);
     expect(descreverContas().contas.find(c => c.id === 'alemmar-amazon')!.selecionavel).toBe(false);
-    // Mesmo ativada por ambiente, a LEITURA ainda não aceita a Amazon.
+    expect(() => resolverContasDeLeitura('alemmar-amazon')).toThrow(expect.objectContaining({ motivo: 'conta_inativa' }));
+    // Ativada por ambiente E com credenciais, a leitura passa a aceitar (é o que a ativação fará).
     process.env.CONTAS_ATIVAS = 'degustar-ml,alemmar-amazon';
-    expect(() => resolverContasDeLeitura('alemmar-amazon')).toThrow(expect.objectContaining({ motivo: 'conta_sem_suporte' }));
-    // E nenhuma ação fora da sincronização de admin aceita a Amazon.
+    expect(resolverContasDeLeitura('alemmar-amazon')[0].id).toBe('alemmar-amazon');
+    // Nenhuma ação que não declare o canal aceita a Amazon (proxy do ML, semeadura, envios).
     expect(() => resolverContaDeAcao('alemmar-amazon')).toThrow(expect.objectContaining({ motivo: 'conta_sem_suporte' }));
   });
   it('rota de admin: inativa sem preparação = 400; preparação sem credencial = 400; nada gravado', async () => {
@@ -401,7 +373,9 @@ describe('alemmar-amazon continua inativa; só a admin a prepara', () => {
     expect(b.etapas.estoque_fba).toMatchObject({ status: 'sem_permissao' });
     const chaves = [...cache.store.keys()].filter(k => !k.startsWith('rl:'));
     expect(chaves.length).toBeGreaterThan(0);
-    expect(chaves.every(k => k.startsWith('c:alemmar-amazon:amz:'))).toBe(true);
+    expect(chaves.every(k => k.startsWith('c:alemmar-amazon:'))).toBe(true);
+    // Leitura publicada na base da conta, não na do ML.
+    expect(chaves).toEqual(expect.arrayContaining(['c:alemmar-amazon:orders:manifest', 'c:alemmar-amazon:items:catalog:manifest']));
     expect(amz.chamadas.every(c => c.status === 200 || c.operationId === 'getInventorySummaries')).toBe(true);
     const corpo = r.body as string;
     for (const v of Object.values(CREDENCIAIS_TESTE)) expect(corpo).not.toContain(v);

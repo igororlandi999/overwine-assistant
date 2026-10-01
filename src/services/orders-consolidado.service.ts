@@ -57,6 +57,10 @@ import type { EnvioInfo } from '../lib/shipping-store.js';
 import { faturamentoPeriodo } from './orders.service.js';
 import { apurarFinanceiro, type ParcelaApurada, type RessalvaReembolso } from './financeiro-apurado.service.js';
 import { brtStartOfDay, brtEndOfDay } from '../lib/datas-brt.js';
+import { contaComoVenda } from '../lib/status-venda.js';
+import { lerColecao } from '../amazon/store.js';
+import { lerCoberturaFinanceira, type CoberturaFinanceira, type TransacaoAmazon } from '../amazon/financeiro.js';
+import { financeiroAmazonDoPeriodo, type FinanceiroAmazonDoPeriodo } from '../amazon/leitura.js';
 
 /** Uma conta da seleção com o cache DELA. A rota monta; o serviço não conhece prefixo. */
 export interface ContaLida {
@@ -73,7 +77,7 @@ export function marcar(pedidos: readonly OrderSlim[], conta: Conta): PedidoMarca
 // ── Perfil financeiro ───────────────────────────────────────────────────────
 
 /** Como a tarifa e o frete de UMA conta foram obtidos no período. */
-export type MetodoFinanceiro = 'estimado_taxas_da_conta' | 'apurado_pedidos_envios';
+export type MetodoFinanceiro = 'estimado_taxas_da_conta' | 'apurado_pedidos_envios' | 'transacoes_amazon';
 
 export interface FinanceiroDaConta {
   metodo: MetodoFinanceiro;
@@ -92,6 +96,12 @@ export interface FinanceiroDaConta {
    * com pedido de reembolso parcial ainda não conferido.
    */
   integralmenteValidado: boolean;
+  /**
+   * Só no método `transacoes_amazon`: o dinheiro que a Amazon LANÇOU para as
+   * vendas do período e até quando foi lido. Tarifa, frete e líquido da conta
+   * ficam `null`: transação lançada não é faturamento e não fecha o período.
+   */
+  amazon?: FinanceiroAmazonDoPeriodo;
 }
 
 /** Um subtotal e quanto da receita bruta da seleção ele cobre. */
@@ -454,6 +464,8 @@ export interface BaseLida {
   pedidos: PedidoMarcado[];
   /** Mapa de envios DA CONTA (custo real de frete). Vazio quando não há. */
   envios: Map<string, EnvioInfo>;
+  /** Só conta Amazon: transações lançadas e o período lido do financeiro. */
+  amazon?: { transacoes: TransacaoAmazon[]; cobertura: CoberturaFinanceira | null };
 }
 
 export type LeituraBases =
@@ -478,7 +490,10 @@ export async function lerBases(lidas: readonly ContaLida[]): Promise<LeituraBase
       continue;
     }
     if (pedidos.length === 0) { naoProntas.push(l.conta.id); continue; }
-    bases.push({ conta: l.conta, cache: l.cache, status, pedidos: marcar(pedidos, l.conta), envios: await lerMapaEnvios(l.cache) });
+    const amazon = l.conta.canal === 'amazon'
+      ? { transacoes: await lerColecao<TransacaoAmazon>(l.cache, 'financeiro'), cobertura: await lerCoberturaFinanceira(l.cache) }
+      : undefined;
+    bases.push({ conta: l.conta, cache: l.cache, status, pedidos: marcar(pedidos, l.conta), envios: await lerMapaEnvios(l.cache), ...(amazon ? { amazon } : {}) });
   }
   if (naoProntas.length) return { ok: false, code: 'not_ready', contasNaoProntas: naoProntas };
   return { ok: true, bases };
@@ -545,11 +560,15 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
   const metodos = new Set(partes.map(p => p.metodo));
   const metodo: MetodoFinanceiro | 'misto' = metodos.size === 1 ? partes[0].metodo : 'misto';
   const temEstimativa = metodos.has('estimado_taxas_da_conta');
+  const temAmazon = metodos.has('transacoes_amazon');
 
   const sub = (): SubtotalConhecido => ({ valor: 0, receitaCoberta: 0, fracaoReceita: 0 });
   const cT = sub(), cF = sub(), cL = sub();
   const somar = (a: SubtotalConhecido, valor: number, receita: number) => { a.valor += valor; a.receitaCoberta += receita; };
   for (const p of partes) {
+    // Amazon: nada de tarifa/frete/líquido conhecido no sentido do ML. A conta
+    // entra no bruto (pelo faturamento) e em nenhum subtotal conhecido.
+    if (p.metodo === 'transacoes_amazon') continue;
     if (p.cobertura) {
       somar(cT, p.cobertura.tarifaML.conhecida, p.cobertura.tarifaML.receitaCoberta);
       somar(cF, p.cobertura.frete.conhecida, p.cobertura.frete.receitaCoberta);
@@ -562,7 +581,7 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
   }
   for (const a of [cT, cF, cL]) a.fracaoReceita = bruto > 0 ? a.receitaCoberta / bruto : 1;
   return {
-    bruto, todas, metodo, temEstimativa,
+    bruto, todas, metodo, temEstimativa, temAmazon,
     conhecido: {
       completo: partes.every(p => p.liquido !== null), metodo,
       tarifaValidada: partes.every(p => !p.cobertura || p.cobertura.tarifaML.validada),
@@ -578,6 +597,17 @@ export function apurarSelecao(finPorConta: Record<string, FinanceiroDaConta>, br
 export function financeiroDaConta(b: BaseLida, periodo: PeriodoYmd): FinanceiroDaConta {
   const ini = brtStartOfDay(periodo.fromYmd);
   const fim = brtEndOfDay(periodo.toYmd);
+  if (b.conta.canal === 'amazon') {
+    const iniMs = ini?.getTime() ?? -Infinity, fimMs = fim?.getTime() ?? Infinity;
+    const vendas = b.pedidos.filter(o => contaComoVenda(o.status) && o.date_created
+      && Date.parse(o.date_created) >= iniMs && Date.parse(o.date_created) <= fimMs);
+    const bruto = Math.round(vendas.reduce((s, o) => s + (o.paid_amount ?? 0), 0) * 100) / 100;
+    return {
+      metodo: 'transacoes_amazon', bruto, tarifaML: null, tarifaEnv: null, liquido: null,
+      cobertura: null, ressalvaReembolso: null, integralmenteValidado: false,
+      amazon: financeiroAmazonDoPeriodo(vendas, b.amazon?.transacoes ?? [], b.amazon?.cobertura ?? null, { ini: ini ?? new Date(0), fim: fim ?? new Date(8.64e15) }),
+    };
+  }
   if (contaTemFinanceiro(b.conta)) {
     const f = faturamentoPeriodo(b.pedidos, ini, fim);
     return { metodo: 'estimado_taxas_da_conta', bruto: f.bruto, tarifaML: f.tarifaML, tarifaEnv: f.tarifaEnv, liquido: f.liquido, cobertura: null, ressalvaReembolso: null, integralmenteValidado: false };
@@ -656,7 +686,7 @@ export function metricsDaSelecao(
   const ap = apurarSelecao(finPorConta, m.periodo.faturamento.bruto);
   financeiro.porConta = finPorConta;
   financeiro.conhecido = ap.conhecido;
-  const { bruto, todas, metodo, temEstimativa } = ap;
+  const { bruto, todas, metodo, temEstimativa, temAmazon } = ap;
 
   const faturamento: FaturamentoComPerfil | FaturamentoSemPerfil = financeiro.disponivel
     ? m.periodo.faturamento
@@ -669,7 +699,10 @@ export function metricsDaSelecao(
       fonte: metodo,
       metodologia: metodo === 'apurado_pedidos_envios'
         ? 'Tarifa de venda real de cada item (sale_fee x quantidade) e frete real pago pelo vendedor em cada envio. Sem percentuais.'
-        : 'Misto: contas com tabela propria entram com a estimativa da tabela delas; as demais, com tarifa e frete reais dos pedidos e envios. Ver financeiro.porConta.',
+        : metodo === 'transacoes_amazon'
+          ? 'Amazon: faturamento pelos pedidos aprovados. Tarifa, frete e liquido nao sao estimados; o dinheiro que a Amazon lancou, e ate quando foi lido, esta em financeiro.porConta.<conta>.amazon.'
+          : 'Misto: contas com tabela propria entram com a estimativa da tabela delas; as demais, com tarifa e frete reais dos pedidos e envios'
+            + (temAmazon ? '; a Amazon, so com o dinheiro lancado e o periodo lido, sem tarifa calculada' : '') + '. Ver financeiro.porConta.',
     };
 
   return {

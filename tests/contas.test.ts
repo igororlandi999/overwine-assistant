@@ -112,9 +112,10 @@ describe('conta so pode ser usada com suporte completo (validarContaParaUso)', (
     process.env.ML_X_TESTE_USER_ID = '42';
     expect(tentar(() => validarContaParaUso(fabricada({})))!.motivo).toBe('conta_nao_habilitada');
   });
-  it('flag ligada, canal sem adaptador (amazon) → conta_sem_suporte', () => {
+  it('flag ligada, Amazon sem as variaveis de credencial → conta_sem_credencial; canal sem adaptador (shopee) → conta_sem_suporte', () => {
     process.env.MULTI_CONTA_ENABLED = 'true';
-    expect(tentar(() => validarContaParaUso(fabricada({ canal: 'amazon', ml: undefined, amazon: { marketplaceId: 'A2Q3Y263D00KWC', credenciaisEnv: 'AMZ_X' } })))!.motivo).toBe('conta_sem_suporte');
+    expect(tentar(() => validarContaParaUso(fabricada({ canal: 'amazon', ml: undefined, amazon: { marketplaceId: 'A2Q3Y263D00KWC', credenciaisEnv: 'AMZ_X' } })))!.motivo).toBe('conta_sem_credencial');
+    expect(tentar(() => validarContaParaUso(fabricada({ canal: 'shopee', ml: undefined })))!.motivo).toBe('conta_sem_suporte');
   });
   it('flag ligada, ML sem a variavel de user_id → conta_sem_credencial', () => {
     process.env.MULTI_CONTA_ENABLED = 'true';

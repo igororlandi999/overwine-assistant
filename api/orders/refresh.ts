@@ -47,6 +47,7 @@ import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import { criarFetchOrdersPage } from '../../src/lib/ml-orders.js';
 import { refrescarSeVelho } from '../../src/services/orders-refresh.service.js';
+import { refrescarAmazon } from '../../src/amazon/refresh.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return; // OPTIONS encerra aqui (204)
@@ -72,12 +73,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let conta;
     try {
       const corpo = (req.body && typeof req.body === 'object') ? (req.body as { conta?: unknown }) : {};
-      conta = resolverContaDeAcao(corpo.conta ?? req.query.conta);
+      conta = resolverContaDeAcao(corpo.conta ?? req.query.conta, { canais: ['ml', 'amazon'] });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;
     }
     const cacheDados = cacheDaConta(cache, conta);
+
+    // Amazon: passo curto da própria Amazon, dentro das cotas dela. Ver src/amazon/refresh.ts.
+    if (conta.canal === 'amazon') {
+      const ra = await refrescarAmazon(cacheDados, conta);
+      console.info(`[orders-refresh] conta=${conta.id} acao=${ra.acao} sessao=${sess.id.slice(0, 8)}`);
+      return json(res, 200, { ok: ra.acao !== 'erro', ...ra, conta: conta.id, canal: 'amazon' });
+    }
 
     const r = await refrescarSeVelho(cacheDados, criarFetchOrdersPage(cacheDados, mlUserIdDaConta(conta)));
 

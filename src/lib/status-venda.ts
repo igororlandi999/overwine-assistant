@@ -49,11 +49,29 @@ export const STATUS_VENDA: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * AMAZON — lista PRÓPRIA, decidida sobre o contrato da Orders API
+ * v2026-01-01 (FulfillmentStatus), não copiada da do Mercado Livre. Os
+ * pedidos da Amazon chegam à leitura com o status prefixado (`amazon:`), então
+ * nenhum status de um canal pode coincidir com o do outro. A tabela completa,
+ * com o motivo de cada decisão, está em src/amazon/leitura.ts
+ * (STATUS_AMAZON) e no README; é ela que gera este conjunto.
+ *
+ * Entram: pedido com pagamento autorizado, pronto para envio ou enviado
+ * (UNSHIPPED, PARTIALLY_SHIPPED, SHIPPED). Ficam de fora: PENDING e
+ * PENDING_AVAILABILITY (sem pagamento autorizado), CANCELLED e UNFULFILLABLE.
+ */
+export const STATUS_VENDA_AMAZON: ReadonlySet<string> = new Set([
+  'amazon:unshipped',
+  'amazon:partially_shipped',
+  'amazon:shipped',
+]);
+
+/**
  * Único predicado de status do sistema. Use SEMPRE isto — nunca compare
  * `status` com string solta, e nunca escreva `!== 'cancelled'`.
  */
 export function contaComoVenda(status: string | null | undefined): boolean {
-  return typeof status === 'string' && STATUS_VENDA.has(status);
+  return typeof status === 'string' && (STATUS_VENDA.has(status) || STATUS_VENDA_AMAZON.has(status));
 }
 
 /**

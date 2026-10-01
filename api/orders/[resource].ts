@@ -58,6 +58,7 @@ import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import type { Alvo } from '../../src/lib/orders-store.js';
 import { getReadStatus, getPage } from '../../src/services/orders-read.service.js';
+import { estadoAtualizacaoAmazon } from '../../src/amazon/refresh.js';
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
 import { lerManifesto, lerMapaEnvios } from '../../src/lib/shipping-store.js';
@@ -117,9 +118,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── Seleção que não é "a conta legada sozinha" ──────────────────────────
     if (varias && resource === 'status') {
-      return json(res, 200, await statusConsolidado(lidas, alvo, {
+      const st = await statusConsolidado(lidas, alvo, {
         notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
-      }));
+      });
+      const amz = lidas.filter(l => l.conta.canal === 'amazon');
+      if (!amz.length) return json(res, 200, st);
+      const amazon: Record<string, unknown> = {};
+      for (const l of amz) amazon[l.conta.id] = await estadoAtualizacaoAmazon(l.cache);
+      return json(res, 200, { ...st, amazon });
     }
     if (varias && resource === 'logistics') {
       return json(res, 200, await logisticaDaSelecao(lidas));
@@ -161,8 +167,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // a cada poucos dezenas de segundos para decidir se vale repaginar os
       // milhares de pedidos — a decisão sai de `versao`.
       const status = await getReadStatus(cacheDados, alvo, {
-        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
+        // O webhook é do Mercado Livre: a Amazon não tem notificação por HTTP.
+        notificacoesHabilitadas: conta.canal === 'amazon' ? false : Boolean(getEnv().ML_WEBHOOK_SECRET),
       });
+      if (conta.canal === 'amazon') return json(res, 200, { ...status, conta: conta.id, canal: 'amazon', amazon: await estadoAtualizacaoAmazon(cacheDados) });
       return json(res, 200, { ...status, conta: conta.id });
     }
 

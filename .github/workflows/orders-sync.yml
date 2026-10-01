@@ -471,10 +471,12 @@ jobs:
           PY
 
   amazon:
-    # Amazon da Além Mar. Sem webhook HTTP na Amazon (notificações só por SQS
-    # ou EventBridge), esta rotina é o que mantém pedidos, anúncios, estoque e
-    # financeiro em dia sem dashboard aberto. Um passo por hora, retomável; o
-    # ritmo de cada operação é o balde da própria SP-API, guardado no backend.
+    # Amazon da Além Mar. RECONCILIAÇÃO, não tempo real: a Amazon não tem
+    # webhook HTTP (notificações só por SQS ou EventBridge) e o agendador do
+    # GitHub não garante horário — em setembro/2026 a mediana entre execuções
+    # deste workflow foi 4,4 h, com lacunas de até 8,6 h. Com o dashboard
+    # aberto, quem atualiza é a aba (POST /api/orders/refresh). Um passo por
+    # execução, retomável; o ritmo de cada operação é o balde da SP-API.
     #
     # Enquanto a conta estiver inativa (ou sem credenciais) o backend responde
     # 400 conta_* e o passo é PULADO. Nunca envia `preparacao: true`.

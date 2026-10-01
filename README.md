@@ -461,44 +461,85 @@ webhook só a enxergam depois de `CONTAS_ATIVAS`. Ninguém vê uma conta vazia.
 Desfazer: remover `degustar-ml` de `CONTAS_ATIVAS` (a conta some das rotas
 na hora; chaves `c:degustar-ml:*` ficam inertes).
 
-### Amazon da Além Mar (`alemmar-amazon`), adaptador local
+### Amazon da Além Mar (`alemmar-amazon`)
 
-Status: implemented and tested locally. The account stays **inactive**. No credential is configured, nothing is published, and the dashboard does not read Amazon yet.
+Situação: coleta e leitura implementadas e testadas localmente. A conta continua **inativa** no registro. Nenhuma credencial está configurada e nada foi publicado.
 
-**APIs**, checked against the official models (copies in `tests/contratos/amazon/`, taken on 2026-10-01):
+#### Coleta (`src/amazon/`)
 
-| Data | Operation | Default limit (rate/s, burst) |
+Operações conferidas nos modelos oficiais (cópia em `tests/contratos/amazon/`, de 2026-10-01):
+
+| Dado | Operação | Limite padrão (req/s, rajada) |
 |---|---|---|
-| Orders | Orders v2026-01-01 `searchOrders` | 0.0056 / 20 |
-| Listings | Listings Items v2021-08-01 `searchListingsItems` | 5 / 5 |
-| FBA stock | FBA Inventory v1 `getInventorySummaries` | 2 / 2 |
-| Finance | Finances v2024-06-19 `listTransactions` | 0.5 / 10 |
+| Pedidos | Orders v2026-01-01 `searchOrders` | 0,0056 / 20 |
+| Anúncios | Listings Items v2021-08-01 `searchListingsItems` | 5 / 5 |
+| Estoque FBA | FBA Inventory v1 `getInventorySummaries` | 2 / 2 |
+| Financeiro | Finances v2024-06-19 `listTransactions` | 0,5 / 10 |
 
-These are the contract's DEFAULT limits. Each operation has its own token bucket in the account cache. The bucket starts at the default and switches to the value Amazon returns in `x-amzn-RateLimit-Limit`. No fixed interval is a rule.
+Cada operação tem um balde próprio no cache da conta. Ele começa no padrão e passa a usar o `x-amzn-RateLimit-Limit` devolvido pela Amazon. Nenhum intervalo fixo é regra.
 
-**Authorization**: two tokens with different roles.
-- The refresh token comes from self-authorization. It lives in the environment, is long-lived, and is not exchanged on renewal.
-- The access token (about 1 h) is derived from it and kept only in the account cache.
-- `invalid_grant` (authorization revoked) and `invalid_client` (secret expired; rotation every 180 days) are distinct errors.
+Autorização:
+- O refresh token vem da self-authorization. Fica no ambiente, dura muito e não é trocado.
+- O access token (cerca de 1 h) é guardado só no cache da conta.
+- `invalid_grant` (autorização revogada) e `invalid_client` (segredo vencido; rotação a cada 180 dias) são erros distintos.
 
-Environment variables, read by name only:
+Variáveis de ambiente:
 - `AMZ_ALEMMAR_LWA_CLIENT_ID`
 - `AMZ_ALEMMAR_LWA_CLIENT_SECRET`
 - `AMZ_ALEMMAR_REFRESH_TOKEN`
-- `AMZ_ALEMMAR_SELLER_ID` (the Merchant Token)
+- `AMZ_ALEMMAR_SELLER_ID` (o token de comerciante)
 
-**Sync without the dashboard open**: Amazon sends no HTTP notification, only SQS or EventBridge. A step therefore runs every hour from the `amazon` job of `orders-sync.yml`, through the existing endpoint `POST /api/admin/orders-sync` with `{"conta":"alemmar-amazon"}`. It needs no new function. While the account is inactive, the endpoint answers 400 and the job skips the step. A manual load before activation uses `preparacao: true`. `acao: "estado"` reads coverage, counts and limits without calling Amazon.
+#### Leitura nas telas existentes (`src/amazon/leitura.ts`)
 
-**Data** is stored in Amazon's own format (`src/amazon/`), not in the Mercado Livre `OrderSlim`. No Mercado Livre fee, cost or status rule applies.
-- **Orders** are read by update window. The cursor advances only when the window is closed.
-- **Listings** are published only when complete.
-- **FBA stock** is marked unavailable, with a reason, when the account has no FBA or the app lacks the role. It is never stored as zero.
-- **Finance** stores the transactions Amazon posted and the period actually read. Withheld (`DEFERRED`) transactions are read again until they are released. Per order, the result says what was received and up to which date it was read, and it is never marked reconciled. Reconciling requires comparing with the Seller Central screen.
+A coleta é projetada no snapshot de pedidos (`orders-store`) e no catálogo (`items-store`) da própria conta. Status, lista, métricas, consolidação, versão do poll e catálogo leem a Amazon pelas rotas de sempre, com `conta` e `canal` marcados. O ML nunca é chamado para uma conta Amazon:
+- **Proxy:** o proxy `/api/ml` recusa a conta Amazon.
+- **Inventário:** `items/inventory` responde 400 `recurso_indisponivel_no_canal`.
+- **Catálogo:** `items/catalog` só lê o que a sincronização publicou.
 
-**Still open**:
-- the real registration and authorization;
-- the dashboard reading stage (what counts as a sale on Amazon, screens);
-- activation.
+**Status (decisão para revisão, sobre o `FulfillmentStatus` do contrato)**:
+
+| Status Amazon | Classe | Faturamento |
+|---|---|---|
+| `PENDING_AVAILABILITY` (pré-venda, sem pagamento autorizado) | pendente | fora |
+| `PENDING` (pedido feito, não pronto) | pendente | fora |
+| `UNSHIPPED` | aprovado | entra |
+| `PARTIALLY_SHIPPED` | aprovado | entra |
+| `SHIPPED` | aprovado | entra |
+| `CANCELLED` | cancelado | fora |
+| `UNFULFILLABLE` (só FBA fora do site da Amazon) | não atendível | fora |
+| ausente ou novo | desconhecido | fora até alguém decidir |
+
+- **Status nas telas:** chegam como `amazon:<status>`. A lista de venda da Amazon é separada da do ML em `lib/status-venda.ts`.
+- **Item cancelado** dentro de um pedido ativo sai do valor do pedido.
+- **Faturamento do item** = subtotal `ITEM` dos proceeds menos `DISCOUNT`. Frete, imposto e embrulho ficam de fora e o total pago é guardado à parte. Sem `ITEM`, usa preço unitário × quantidade e o pedido fica marcado.
+- **Reembolso:** a Orders API não tem esse status. A evidência é uma transação negativa vinculada ao pedido, mostrada como "débito lançado". O faturamento do pedido não é reduzido automaticamente.
+
+**Modalidades preservadas**:
+- `amazon_fba` (fulfilledBy AMAZON);
+- `amazon_easy_ship` (MERCHANT com programa `AMAZON_EASY_SHIP`);
+- `amazon_envio_proprio` (MERCHANT sem Easy Ship).
+
+Nenhuma vira `fulfillment`, o Full do ML.
+
+No catálogo, cada SKU vira até duas linhas: `<sku>` (estoque próprio, usado também pelo Easy Ship) e `<sku>#fba`. Sem leitura de FBA não há linha FBA, e nunca há zero inventado.
+
+**Financeiro** (`financeiro.porConta.<conta>.amazon`, método `transacoes_amazon`):
+- O bruto vem dos pedidos aprovados. Tarifa, frete e líquido ficam `null`.
+- O que a Amazon lançou é mostrado à parte: transações das vendas do período, até quando foi lido, vendas sem transação até essa data, vendas fora do período lido, transações retidas, débitos e lançamentos sem pedido.
+- Nunca sai como conciliado.
+- Na consolidação, a Amazon entra no bruto e em nenhum subtotal "conhecido" do ML.
+
+#### Atualização
+
+- **Com o dashboard aberto:** `POST /api/orders/refresh` com `{conta:'alemmar-amazon'}` roda um passo curto (pedidos e financeiro; anúncios e estoque só quando o catálogo tem mais de 6 h). Respeita o balde e tem intervalo mínimo de 60 s por conta. Com a cota esgotada, não chama a Amazon e devolve `proximaConsultaPedidosEm`.
+- **Estado visível:** o status (`orders/status`) traz o bloco `amazon`: último passo, até quando pedidos e financeiro foram lidos, próxima consulta e `semAbaAberta`.
+- **Sem aba aberta:** o job `amazon` do `orders-sync.yml` faz só reconciliação, sem horário garantido. Nas 500 execuções agendadas de 12/08 a 01/10/2026, a mediana do intervalo em setembro foi de 4,4 h, com lacunas de até 8,6 h. A própria GitHub documenta atraso e descarte nos horários de pico.
+- **Proposta para atualização confiável sem aba (não implementada):** um agendamento do Upstash QStash (o mesmo fornecedor do Redis) chamando `POST /api/admin/orders-sync` a cada 15 min, com verificação da assinatura do QStash no endpoint em vez da `ADMIN_KEY`. O plano gratuito dá 1.000 mensagens/dia. O Vercel Cron no plano Hobby só roda uma vez por dia.
+
+**Pendente**:
+- cadastro e autorização reais;
+- agendador confiável;
+- ativação.
 
 ### Etapa 4 — seletores e consolidação das contas
 

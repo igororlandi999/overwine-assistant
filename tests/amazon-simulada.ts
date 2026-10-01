@@ -79,6 +79,10 @@ export interface Cenario {
   /** Responde 429 nas próximas N chamadas desta operação. */
   forcar429?: Partial<Record<string, number>>;
   lwa?: 'ok' | 'invalid_grant' | 'invalid_client';
+  /** Operações que respondem 403 "Access to requested resource is denied" (app sem a função). */
+  semPermissao?: string[];
+  /** listTransactions devolve uma página VAZIA com nextToken antes dos dados (o contrato permite). */
+  paginaVaziaFinanceiro?: boolean;
 }
 
 export const CREDENCIAIS_TESTE = {
@@ -130,6 +134,7 @@ export function criarAmazonSimulada(cen: Cenario) {
     if (!exp || exp < agora()) return fim(erro(403, 'Unauthorized', 'The access token you provided has expired.'));
     if (v.erros.length) return fim(erro(400, 'InvalidInput', v.erros.join('; ')));
     const op = v.operationId!;
+    if (cen.semPermissao?.includes(op)) return fim(erro(403, 'Unauthorized', 'Access to requested resource is denied.'));
     if ((cen.forcar429?.[op] ?? 0) > 0) { cen.forcar429![op]!--; return fim(erro(429, 'QuotaExceeded', 'You exceeded your quota for the requested resource.')); }
     const hdr: Record<string, string> = cen.limiteCabecalho?.[op] ? { 'x-amzn-RateLimit-Limit': String(cen.limiteCabecalho[op]) } : {};
     const q = url.searchParams;
@@ -159,6 +164,7 @@ export function criarAmazonSimulada(cen: Cenario) {
       const de = q.get('postedAfter')!, ate = q.get('postedBefore');
       if (ate && Date.parse(ate) - Date.parse(de) > 180 * 86_400_000) return fim(resp(200, { payload: { transactions: [] } }, hdr)); // contrato: >180 dias = vazio
       const lista = (cen.transacoes ?? []).filter(t => t.postedDate >= de && (!ate || t.postedDate < ate));
+      if (cen.paginaVaziaFinanceiro && !q.get('nextToken')) return fim(resp(200, { payload: { transactions: [], nextToken: 'pg:0' } }, hdr));
       const { pagina, prox } = paginar(lista, 2, q.get('nextToken'));
       return fim(resp(200, { payload: { transactions: pagina, ...(prox ? { nextToken: prox } : {}) } }, hdr));
     }
@@ -176,4 +182,40 @@ export function criarAmazonSimulada(cen: Cenario) {
 /** Pedido no formato do contrato v2026-01-01, a partir do exemplo oficial. */
 export function exemploOficialSearchOrders(): any {
   return MODELOS.orders.paths['/orders/2026-01-01/orders'].get.responses['200'].examples['application/json'];
+}
+
+// ── Fábricas no formato dos contratos (usadas pelos testes) ───────────────
+const BR = 'A2Q3Y263D00KWC';
+
+export function pedidoApi(id: string, atualizado: string, extra: Partial<any> = {}) {
+  return {
+    orderId: id, createdTime: atualizado, lastUpdatedTime: atualizado,
+    salesChannel: { channelName: 'AMAZON', marketplaceId: BR, marketplaceName: 'Amazon.com.br' },
+    fulfillment: { fulfillmentStatus: 'SHIPPED', fulfilledBy: 'MERCHANT' },
+    proceeds: { grandTotal: { amount: '119.90', currencyCode: 'BRL' }, breakdowns: [{ type: 'ITEM', subtotal: { amount: '99.90', currencyCode: 'BRL' } }, { type: 'SHIPPING', subtotal: { amount: '20.00', currencyCode: 'BRL' } }] },
+    orderItems: [{ orderItemId: id + '-1', quantityOrdered: 1, product: { asin: 'B0TESTE001', sellerSku: '21003', title: 'Vinho', price: { unitPrice: { amount: '99.90', currencyCode: 'BRL' } } }, proceeds: { proceedsTotal: { amount: '119.90', currencyCode: 'BRL' } }, fulfillment: { quantityFulfilled: 1, quantityUnfulfilled: 0 } }],
+    ...extra,
+  };
+}
+
+export function anuncioApi(sku: string, q: number) {
+  return {
+    sku,
+    summaries: [{ marketplaceId: BR, asin: 'B0' + sku, productType: 'WINE', conditionType: 'new_new', status: ['BUYABLE', 'DISCOVERABLE'], itemName: 'Vinho ' + sku, createdDate: '2026-01-01T00:00:00Z', lastUpdatedDate: '2026-09-01T00:00:00Z' }],
+    offers: [{ marketplaceId: BR, offerType: 'B2C', price: { amount: '99.90', currencyCode: 'BRL' } }],
+    fulfillmentAvailability: [{ fulfillmentChannelCode: 'DEFAULT', quantity: q }],
+  };
+}
+
+export function transacaoApi(id: string, pedido: string | null, posted: string, total: number, status = 'RELEASED') {
+  return {
+    transactionId: id, transactionType: 'Shipment', transactionStatus: status, description: 'Order Payment', postedDate: posted,
+    totalAmount: { currencyCode: 'BRL', currencyAmount: total },
+    relatedIdentifiers: pedido ? [{ relatedIdentifierName: 'ORDER_ID', relatedIdentifierValue: pedido }] : [],
+    marketplaceDetails: { marketplaceId: BR, marketplaceName: 'Amazon.com.br' },
+    breakdowns: [
+      { breakdownType: 'ProductCharges', breakdownAmount: { currencyCode: 'BRL', currencyAmount: 99.9 } },
+      { breakdownType: 'AmazonFees', breakdownAmount: { currencyCode: 'BRL', currencyAmount: Math.round((total - 99.9) * 100) / 100 }, breakdowns: [{ breakdownType: 'Commission', breakdownAmount: { currencyCode: 'BRL', currencyAmount: -14.99 } }] },
+    ],
+  };
 }

@@ -3,10 +3,11 @@
  * estoque FBA e financeiro, cada um até onde o orçamento de tempo e o limite
  * da operação deixarem. Retomável: o próximo passo continua de onde parou.
  *
- * Quem chama: a rota de admin existente (/api/admin/orders-sync), disparada
- * de hora em hora pelo GitHub Actions — é o que mantém os dados em dia sem
- * dashboard aberto. A Amazon não entrega notificação por HTTP (só SQS ou
- * EventBridge), então não há webhook como no Mercado Livre.
+ * Quem chama: a rota de admin existente (/api/admin/orders-sync), pelo job
+ * agendado do GitHub Actions (reconciliação, SEM horário garantido — ver
+ * refresh.ts), e o refresh pedido por uma aba aberta (src/amazon/refresh.ts).
+ * A Amazon não entrega notificação por HTTP (só SQS ou EventBridge), então
+ * não há webhook como no Mercado Livre.
  *
  * Cada etapa usa operações com limites INDEPENDENTES: limite esgotado em
  * pedidos não impede anúncios. Falha de autorização (LWA) para tudo, porque
@@ -22,6 +23,7 @@ import { sincronizarPedidos, estadoPedidos } from './pedidos.js';
 import { sincronizarAnuncios, sincronizarEstoqueFba, lerEstadoEstoqueFba } from './catalogo.js';
 import { sincronizarFinanceiro, lerCoberturaFinanceira } from './financeiro.js';
 import { lerManifesto } from './store.js';
+import { publicarLeitura } from './leitura.js';
 
 export type EtapaAmazon = 'pedidos' | 'anuncios' | 'estoque_fba' | 'financeiro';
 export const ETAPAS_AMAZON: readonly EtapaAmazon[] = ['pedidos', 'anuncios', 'estoque_fba', 'financeiro'];
@@ -40,6 +42,8 @@ export interface ResultadoPassoAmazon {
   concluido: boolean;
   etapas: Partial<Record<EtapaAmazon, ResultadoEtapa>>;
   limites?: Record<string, { rate: number; burst: number; fonte: string }>;
+  /** O que a leitura das telas ganhou neste passo (nova versão de pedidos / catálogo). */
+  leitura?: { pedidos: boolean; catalogo: boolean };
 }
 
 const K = { lock: 'amz:sync:lock', ultimo: 'amz:sync:ultimo' };
@@ -50,6 +54,8 @@ export interface OpcoesPassoAmazon {
   orcamentoMs?: number;
   cliente?: ClienteSpApi;
   cargaInicialDias?: number;
+  /** Quem pediu: reconciliação (admin/agendador) ou aba aberta do dashboard. */
+  origem?: 'incremental' | 'dashboard_refresh';
 }
 
 export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesPassoAmazon = {}): Promise<ResultadoPassoAmazon> {
@@ -108,6 +114,14 @@ export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesP
       }
     }
     res.concluido = res.ok && etapas.every(x => res.etapas[x]?.status === 'concluida' || (x === 'estoque_fba' && res.etapas[x]?.status === 'sem_permissao'));
+    // Publica a leitura (snapshot de pedidos e catálogo da conta) sempre que a
+    // Amazon foi consultada; a versão só cresce se o conteúdo mudou.
+    const consultou = Object.values(res.etapas).some(e => e && (e.status === 'concluida' || e.status === 'parcial'));
+    const ep = res.etapas.pedidos?.status;
+    res.leitura = await publicarLeitura(cache, {
+      agora: new Date(agora()), origem: o.origem ?? 'incremental', checouAmazon: consultou,
+      resultado: ep === 'concluida' ? 'ok' : ep === 'erro' || ep === 'sem_permissao' ? 'erro_parcial' : 'parcial',
+    });
     res.limites = await cliente.limites();
     await cache.set(K.ultimo, JSON.stringify({ em: new Date(agora()).toISOString(), ok: res.ok, motivo: res.motivo ?? null, etapas: res.etapas }));
     return res;

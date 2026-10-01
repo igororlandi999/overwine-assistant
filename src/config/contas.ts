@@ -174,6 +174,12 @@ function normalizarLista(param: unknown): string[] | null {
 export function validarContaParaUso(c: Conta): Conta {
   if (!c.ativo) throw new ContaInvalidaError('conta_inativa', c.id);
   if (!multiContaHabilitada() && !c.legada) throw new ContaInvalidaError('conta_nao_habilitada', c.id);
+  // Amazon: leitura das telas pela camada src/amazon/leitura.ts. Mesmas
+  // exigências: ativa, flag, e as variáveis de credencial presentes.
+  if (c.canal === 'amazon') {
+    if (variaveisAusentes(c).length) throw new ContaInvalidaError('conta_sem_credencial', c.id);
+    return c;
+  }
   if (c.canal !== 'ml') throw new ContaInvalidaError('conta_sem_suporte', c.id);
   if (!c.ml || !process.env[c.ml.userIdEnv]) throw new ContaInvalidaError('conta_sem_credencial', c.id);
   return c;
@@ -229,7 +235,12 @@ export function resolverContaDeAcao(param: unknown, opts: { preparacao?: boolean
   if (ids === null) return contaLegada();
   if (ids.length > 1) throw new ContaInvalidaError('conta_unica', ids.join(','));
   const amazon = contaPorId(ids[0]);
-  if (amazon?.canal === 'amazon' && (opts.canais ?? ['ml']).includes('amazon')) return validarAmazonParaAcao(amazon, opts.preparacao === true);
+  if (amazon?.canal === 'amazon') {
+    // Só as rotas que declaram o canal (sincronização de admin e refresh do
+    // dashboard) aceitam a Amazon. Proxy do ML, semeadura e envios, nunca.
+    if (!(opts.canais ?? ['ml']).includes('amazon')) throw new ContaInvalidaError('conta_sem_suporte', amazon.id);
+    return validarAmazonParaAcao(amazon, opts.preparacao === true);
+  }
   if (!opts.preparacao) return validarUma(ids[0]);
   const c = contaPorId(ids[0]);
   if (!c) throw new ContaInvalidaError('conta_invalida', ids[0]);
