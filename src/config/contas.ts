@@ -27,6 +27,7 @@
  * ações (refresh, sync, seed, proxy do ML) exigem UMA conta (`conta=a`).
  */
 import registro from './contas.json' with { type: 'json' };
+import { variaveisAusentes } from '../amazon/credenciais.js';
 
 export type Canal = 'ml' | 'amazon' | 'shopee' | 'loja';
 
@@ -223,15 +224,32 @@ export function resolverContaUnicaDeLeitura(param: unknown): Conta {
  * dashboard e o webhook batendo numa conta vazia. Leituras, refresh do
  * dashboard, proxy e webhook nunca usam este modo.
  */
-export function resolverContaDeAcao(param: unknown, opts: { preparacao?: boolean } = {}): Conta {
+export function resolverContaDeAcao(param: unknown, opts: { preparacao?: boolean; canais?: readonly Canal[] } = {}): Conta {
   const ids = normalizarLista(param);
   if (ids === null) return contaLegada();
   if (ids.length > 1) throw new ContaInvalidaError('conta_unica', ids.join(','));
+  const amazon = contaPorId(ids[0]);
+  if (amazon?.canal === 'amazon' && (opts.canais ?? ['ml']).includes('amazon')) return validarAmazonParaAcao(amazon, opts.preparacao === true);
   if (!opts.preparacao) return validarUma(ids[0]);
   const c = contaPorId(ids[0]);
   if (!c) throw new ContaInvalidaError('conta_invalida', ids[0]);
   if (c.canal !== 'ml') throw new ContaInvalidaError('conta_sem_suporte', c.id);
   if (!c.ml || !process.env[c.ml.userIdEnv]) throw new ContaInvalidaError('conta_sem_credencial', c.id);
+  return c;
+}
+
+/**
+ * Conta Amazon numa AÇÃO (só a sincronização da rota de admin pede o canal
+ * `amazon`; nenhuma outra rota o aceita). Mesmas exigências de uma conta ML:
+ * ativa (ou preparação deliberada pela admin), flag multi-conta, e as quatro
+ * variáveis de credencial presentes. A LEITURA (dashboard, seletor) continua
+ * recusando a Amazon com `conta_sem_suporte` até a etapa de leitura existir —
+ * ver validarContaParaUso.
+ */
+function validarAmazonParaAcao(c: Conta, preparacao: boolean): Conta {
+  if (!preparacao && !c.ativo) throw new ContaInvalidaError('conta_inativa', c.id);
+  if (!multiContaHabilitada()) throw new ContaInvalidaError('conta_nao_habilitada', c.id);
+  if (variaveisAusentes(c).length) throw new ContaInvalidaError('conta_sem_credencial', c.id);
   return c;
 }
 

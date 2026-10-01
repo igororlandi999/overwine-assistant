@@ -10,6 +10,10 @@
  * conhece rede. Um passo respeita ORDERS_SYNC_MAX_PAGES e é retomável.
  * Body: { alvo?: 'ativos' | 'cancelados', modo?: 'full' | 'incremental' }.
  *
+ * Conta da AMAZON (`conta: 'alemmar-amazon'`): um passo de sincronização da
+ * Amazon (pedidos, anúncios, estoque FBA, financeiro), ou `acao: 'estado'`
+ * para ler o estado sem chamar a Amazon. Ver src/amazon/sync.service.ts.
+ *
  * `{ "acao": "drenar" }` roda o dreno da fila de notificações do Mercado Livre
  * em vez de um passo de sincronização. É o gatilho de GARANTIA do caminho de
  * tempo real: se o runtime não ofereceu waitUntil, ou se o dreno da notificação
@@ -30,6 +34,7 @@ import { registrarConclusaoSync, registrarFalhaSync, registrarTentativaSync } fr
 import { resolverContaDeAcao, mlUserIdDaConta, ContaInvalidaError, erroContaParaHttp } from '../../src/config/contas.js';
 import { cacheDaConta } from '../../src/lib/cache/conta-cache.js';
 import { criarBackup, restaurarBackup, lerBackup } from '../../src/services/orders-backup.service.js';
+import { executarPassoAmazon, estadoAmazon, ETAPAS_AMAZON, type EtapaAmazon } from '../../src/amazon/sync.service.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const cache = getCache();
@@ -55,7 +60,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = (req.body ?? {}) as {
       alvo?: 'ativos' | 'cancelados';
       modo?: 'full' | 'incremental';
-      acao?: 'sincronizar' | 'drenar' | 'backup' | 'restaurar' | 'ver_backup';
+      acao?: 'sincronizar' | 'drenar' | 'backup' | 'restaurar' | 'ver_backup' | 'estado';
+      /** Só Amazon: subconjunto de etapas do passo (padrão: todas). */
+      etapas?: unknown[];
       max?: number;
       conta?: unknown;
       /**
@@ -71,12 +78,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Ação: UMA conta. O GitHub Actions atual não envia conta → legada.
     let conta;
     try {
-      conta = resolverContaDeAcao(body.conta, { preparacao: body.preparacao === true });
+      conta = resolverContaDeAcao(body.conta, { preparacao: body.preparacao === true, canais: ['ml', 'amazon'] });
     } catch (e) {
       if (e instanceof ContaInvalidaError) return json(res, 400, erroContaParaHttp(e));
       throw e;
     }
     const cacheDados = cacheDaConta(cache, conta);
+
+    // Amazon: mesmo endpoint, mesma proteção, sem função nova (plano gratuito
+    // da Vercel). `acao: 'estado'` só lê; o resto é um passo de sincronização.
+    if (conta.canal === 'amazon') {
+      if (body.acao === 'estado') return json(res, 200, { ok: true, ...(await estadoAmazon(cacheDados, conta)) });
+      const pedidas = Array.isArray(body.etapas) ? body.etapas.filter((e): e is EtapaAmazon => ETAPAS_AMAZON.includes(e as EtapaAmazon)) : undefined;
+      if (Array.isArray(body.etapas) && (!pedidas || pedidas.length !== body.etapas.length)) return json(res, 400, { error: 'etapa_invalida', validas: ETAPAS_AMAZON });
+      console.info(`[orders-sync] amazon ip=${maskIp(ip)} conta=${conta.id} etapas=${(pedidas ?? ETAPAS_AMAZON).join(',')}`);
+      const r = await executarPassoAmazon(cacheDados, conta, { etapas: pedidas });
+      return json(res, r.ok || r.motivo === 'sync_em_andamento' ? 200 : 502, r);
+    }
+
     const uid = mlUserIdDaConta(conta);
 
     // Cópia de segurança e restauração do snapshot DESTA conta. Não falam com

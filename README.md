@@ -461,6 +461,45 @@ webhook só a enxergam depois de `CONTAS_ATIVAS`. Ninguém vê uma conta vazia.
 Desfazer: remover `degustar-ml` de `CONTAS_ATIVAS` (a conta some das rotas
 na hora; chaves `c:degustar-ml:*` ficam inertes).
 
+### Amazon da Além Mar (`alemmar-amazon`), adaptador local
+
+Status: implemented and tested locally. The account stays **inactive**. No credential is configured, nothing is published, and the dashboard does not read Amazon yet.
+
+**APIs**, checked against the official models (copies in `tests/contratos/amazon/`, taken on 2026-10-01):
+
+| Data | Operation | Default limit (rate/s, burst) |
+|---|---|---|
+| Orders | Orders v2026-01-01 `searchOrders` | 0.0056 / 20 |
+| Listings | Listings Items v2021-08-01 `searchListingsItems` | 5 / 5 |
+| FBA stock | FBA Inventory v1 `getInventorySummaries` | 2 / 2 |
+| Finance | Finances v2024-06-19 `listTransactions` | 0.5 / 10 |
+
+These are the contract's DEFAULT limits. Each operation has its own token bucket in the account cache. The bucket starts at the default and switches to the value Amazon returns in `x-amzn-RateLimit-Limit`. No fixed interval is a rule.
+
+**Authorization**: two tokens with different roles.
+- The refresh token comes from self-authorization. It lives in the environment, is long-lived, and is not exchanged on renewal.
+- The access token (about 1 h) is derived from it and kept only in the account cache.
+- `invalid_grant` (authorization revoked) and `invalid_client` (secret expired; rotation every 180 days) are distinct errors.
+
+Environment variables, read by name only:
+- `AMZ_ALEMMAR_LWA_CLIENT_ID`
+- `AMZ_ALEMMAR_LWA_CLIENT_SECRET`
+- `AMZ_ALEMMAR_REFRESH_TOKEN`
+- `AMZ_ALEMMAR_SELLER_ID` (the Merchant Token)
+
+**Sync without the dashboard open**: Amazon sends no HTTP notification, only SQS or EventBridge. A step therefore runs every hour from the `amazon` job of `orders-sync.yml`, through the existing endpoint `POST /api/admin/orders-sync` with `{"conta":"alemmar-amazon"}`. It needs no new function. While the account is inactive, the endpoint answers 400 and the job skips the step. A manual load before activation uses `preparacao: true`. `acao: "estado"` reads coverage, counts and limits without calling Amazon.
+
+**Data** is stored in Amazon's own format (`src/amazon/`), not in the Mercado Livre `OrderSlim`. No Mercado Livre fee, cost or status rule applies.
+- **Orders** are read by update window. The cursor advances only when the window is closed.
+- **Listings** are published only when complete.
+- **FBA stock** is marked unavailable, with a reason, when the account has no FBA or the app lacks the role. It is never stored as zero.
+- **Finance** stores the transactions Amazon posted and the period actually read. Withheld (`DEFERRED`) transactions are read again until they are released. Per order, the result says what was received and up to which date it was read, and it is never marked reconciled. Reconciling requires comparing with the Seller Central screen.
+
+**Still open**:
+- the real registration and authorization;
+- the dashboard reading stage (what counts as a sale on Amazon, screens);
+- activation.
+
 ### Etapa 4 — seletores e consolidação das contas
 
 `GET /api/orders/contas` devolve o que o seletor do dashboard pode oferecer:

@@ -217,9 +217,11 @@ describe('preparação: semear e carregar a Degustar ANTES de ligá-la', () => {
     expect(seed.json().error).toBe('conta_sem_credencial');
   });
 
-  it('preparação de conta sem adaptador (amazon): conta_sem_suporte', async () => {
+  it('Amazon: a sincronização de admin tem adaptador e exige as credenciais; as demais ações seguem sem suporte', async () => {
     const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon', preparacao: true } });
-    expect(r.json().error).toBe('conta_sem_suporte');
+    expect(r.json().error).toBe('conta_sem_credencial');
+    const seed = await chamar(seedHandler, { method: 'POST', headers: admin(), body: { refreshToken: 'TG-x', conta: 'alemmar-amazon' } });
+    expect(seed.json().error).toBe('conta_sem_suporte');
   });
 });
 

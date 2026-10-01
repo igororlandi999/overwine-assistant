@@ -469,3 +469,52 @@ jobs:
 
           raise SystemExit(0)
           PY
+
+  amazon:
+    # Amazon da Além Mar. Sem webhook HTTP na Amazon (notificações só por SQS
+    # ou EventBridge), esta rotina é o que mantém pedidos, anúncios, estoque e
+    # financeiro em dia sem dashboard aberto. Um passo por hora, retomável; o
+    # ritmo de cada operação é o balde da própria SP-API, guardado no backend.
+    #
+    # Enquanto a conta estiver inativa (ou sem credenciais) o backend responde
+    # 400 conta_* e o passo é PULADO. Nunca envia `preparacao: true`.
+    name: Sincronizar Amazon (oficial · alemmar-amazon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Executar passo da Amazon
+        shell: bash
+        env:
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          SYNC_URL: https://overwine-assistant.vercel.app/api/admin/orders-sync
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::O secret OVERWINE_ADMIN_KEY não está configurado."
+            exit 1
+          fi
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          http_code="$(
+            curl --silent --show-error --location --request POST \
+              --url "$SYNC_URL" \
+              --header "Content-Type: application/json" \
+              --header "x-admin-key: $ADMIN_KEY" \
+              --data '{"conta":"alemmar-amazon"}' \
+              --connect-timeout 15 --max-time 60 \
+              --output "$response_file" --write-out "%{http_code}"
+          )"
+          echo "HTTP: $http_code"
+          cat "$response_file"; echo
+          if [ "$http_code" = "400" ] && grep -qE '"error":"conta_(inativa|nao_habilitada|sem_credencial|sem_suporte)"' "$response_file"; then
+            echo "::notice::Amazon ainda não está ativa no backend; passo pulado."
+            exit 0
+          fi
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Rate limit do endpoint; a próxima execução continua."
+            exit 0
+          fi
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::O endpoint respondeu HTTP $http_code (autorização Amazon ou falha do passo)."
+            exit 1
+          fi
