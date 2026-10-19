@@ -46,8 +46,11 @@
  * mesmos envios a cada atualização. Por isso:
  *   - Full para na 1ª chamada: quem despacha é o Mercado Livre, e o envio
  *     não entra na expedição. Resultado FINAL.
- *   - Despachado ou cancelado é FINAL: não volta a pendente. Fica em cache
- *     por TTL_FINAL_S e nunca mais toca no ML.
+ *   - Cancelado e despachado COM data são FINAIS: ficam em cache por
+ *     TTL_FINAL_S e nunca mais tocam no ML. Despachado SEM data é revisto a
+ *     cada TTL_INCOMPLETO_S, para a data aparecer quando o histórico a trouxer.
+ *   - Status fora da lista fechada de pendentes vira 'outro' (nunca pendente
+ *     por exclusão, o que geraria atraso falso).
  *   - Pendente é revisto no máximo a cada TTL_PENDENTE_S. O prazo oficial
  *     muda raramente e tem cache próprio (TTL_PRAZO_S), então a revisão de
  *     um pendente custa 1 chamada (o envio), não 3.
@@ -69,6 +72,7 @@ export type Situacao =
   | 'cancelado'    // envio cancelado: não sai mais
   | 'full'         // Full: despacho é do Mercado Livre, fora da expedição
   | 'aguardando'   // ainda não consultado nesta passada (teto ou cooldown)
+  | 'outro'        // status que não é pendente, despacho nem cancelamento (ex.: a combinar)
   | 'indisponivel'; // o ML não respondeu de forma utilizável
 
 export interface EnvioExpedicao {
@@ -102,6 +106,13 @@ export interface FetchersEnvio {
 
 /** Status que só existem DEPOIS do despacho. */
 export const STATUS_DESPACHADO = new Set(['shipped', 'delivered', 'not_delivered']);
+
+/**
+ * Status em que o pacote ainda está com o vendedor. Lista FECHADA de
+ * propósito: um status que o ML venha a criar não vira "pendente" por
+ * exclusão — viraria atraso falso na tela. Cai em 'outro', com o status no aviso.
+ */
+export const STATUS_PENDENTE = new Set(['pending', 'handling', 'ready_to_ship']);
 
 /** Substatus de ready_to_ship em que o pacote já saiu da mão do vendedor. */
 export const SUBSTATUS_DESPACHO = new Set(['dropped_off', 'picked_up', 'authorized_by_carrier']);
@@ -215,8 +226,15 @@ export function extrairDespacho(data: unknown): string | null {
 export const TTL_FINAL_S = 60 * 24 * 3600;
 /** Pendente: revisto no máximo a cada 2 minutos. */
 export const TTL_PENDENTE_S = 120;
+/**
+ * Despachado SEM data, ou status 'outro': não é final. Revisto a cada 10 min,
+ * para a data aparecer quando o histórico a trouxer, sem martelar o ML.
+ */
+export const TTL_INCOMPLETO_S = 10 * 60;
 /** Prazo oficial de um pendente: muda raramente. 20 minutos. */
 export const TTL_PRAZO_S = 20 * 60;
+/** /lead_time respondeu 200 SEM prazo: não perguntar de novo por 5 minutos. */
+export const TTL_PRAZO_AUSENTE_S = 5 * 60;
 /** Janela sem chamadas ao ML depois de um 429. */
 export const COOLDOWN_429_S = 60;
 
@@ -231,8 +249,15 @@ export const MAX_CHAMADAS_PADRAO = 60;
 /** Mesma ordem de grandeza do backfill de logística (CONCORRENCIA = 8). */
 export const CONCORRENCIA_PADRAO = 4;
 
-function situacaoFinal(s: Situacao): boolean {
-  return s === 'despachado' || s === 'cancelado' || s === 'full';
+/**
+ * TTL de um resultado. Final só quando nada mais muda: Full, cancelado e
+ * despachado COM data. Despachado sem data continua sendo revisto.
+ */
+export function ttlDoResultado(e: EnvioExpedicao): number {
+  if (e.situacao === 'full' || e.situacao === 'cancelado') return TTL_FINAL_S;
+  if (e.situacao === 'despachado') return e.despachadoEm ? TTL_FINAL_S : TTL_INCOMPLETO_S;
+  if (e.situacao === 'outro') return TTL_INCOMPLETO_S;
+  return TTL_PENDENTE_S;
 }
 
 async function lerJSON<T>(cache: Cache, k: string): Promise<T | null> {
@@ -297,6 +322,10 @@ async function resolverEnvio(
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
   if (envioCancelado(d.status)) return { ...base, situacao: 'cancelado' };
+  const despachou = eventoEhDespacho(d.status, d.substatus);
+  if (!despachou && !STATUS_PENDENTE.has(d.status)) {
+    return { ...base, situacao: 'outro', avisos: [`status_nao_mapeado:${d.status}`] };
+  }
 
   // Prazo oficial: cache próprio → /lead_time → campo do próprio envio.
   let prazo: string | null = null;
@@ -305,7 +334,9 @@ async function resolverEnvio(
     prazo = prazoCache.prazo;
   } else {
     const rPrazo = await chamar(f.prazo);
+    let lido = false;
     if (rPrazo.status === 200) {
+      lido = true;
       prazo = extrairPrazo(rPrazo.data);
       if (!prazo) base.avisos.push('lead_time_sem_prazo');
     } else {
@@ -315,13 +346,15 @@ async function resolverEnvio(
       prazo = d.prazoNoEnvio;
       base.avisos.push('prazo_do_envio');
     }
-    // Só guarda prazo LIDO. Falha de rede não pode ficar 20 min em cache.
+    // Prazo lido fica 20 min. Resposta 200 sem prazo fica 5 min (ausência
+    // confirmada). Falha de rede ou HTTP de erro NÃO é cacheada.
     if (prazo) await cache.set(chavePrazo(id), JSON.stringify({ prazo }), TTL_PRAZO_S);
+    else if (lido) await cache.set(chavePrazo(id), JSON.stringify({ prazo: null }), TTL_PRAZO_AUSENTE_S);
   }
   base.prazoPostagem = prazo;
   if (!prazo) base.avisos.push('prazo_nao_informado');
 
-  if (!eventoEhDespacho(d.status, d.substatus)) return base;
+  if (!despachou) return base;
 
   // Já saiu: a data vem do histórico. Sem ela, despachado SEM data.
   base.situacao = 'despachado';
@@ -399,7 +432,7 @@ export async function consultarEnvios(
         const e = await resolverEnvio(cache, id, f, orc, agoraIso);
         saida.set(id, e);
         if (e.situacao !== 'indisponivel') {
-          await cache.set(chaveEnvio(id), JSON.stringify(e), situacaoFinal(e.situacao) ? TTL_FINAL_S : TTL_PENDENTE_S);
+          await cache.set(chaveEnvio(id), JSON.stringify(e), ttlDoResultado(e));
         }
       } catch (err) {
         if (err instanceof LimiteML) saida.set(id, vazio(id, 'aguardando', [err.motivo]));

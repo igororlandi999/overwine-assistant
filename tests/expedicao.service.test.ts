@@ -3,6 +3,7 @@ import { FakeCache, TEST_ENV } from './fake-cache.js';
 import {
   consultarEnvios, extrairDespacho, extrairPrazo, extrairEnvio, diaDoCampo, normalizarIds,
   eventoEhDespacho, CHAVE_COOLDOWN, TTL_PENDENTE_S, MAX_IDS,
+  TTL_INCOMPLETO_S, TTL_FINAL_S, ttlDoResultado,
   type FetchersEnvio, type RespostaML,
 } from '../src/services/expedicao.service.js';
 import { runOp } from '../src/ml/ops.js';
@@ -221,6 +222,15 @@ describe('consultarEnvios — falhas do Mercado Livre', () => {
     expect(chamadas.filter(c => c.startsWith('envio:'))).toEqual(['envio:50001', 'envio:50002']);
   });
 
+  it('status desconhecido não vira pendente (nem atraso falso): sai como outro', async () => {
+    const { f, chamadas } = ml({ '50009': { envio: envio('to_be_agreed', null) } });
+    const [e] = (await consultarEnvios(cache, ['50009'], f)).envios;
+    expect(e.situacao).toBe('outro');
+    expect(e.prazoPostagem).toBeNull();
+    expect(e.avisos).toEqual(['status_nao_mapeado:to_be_agreed']);
+    expect(chamadas).toEqual(['envio:50009']);
+  });
+
   it('envio sem status utilizável é indisponível, não pendente', async () => {
     const { f } = ml({ '50004': { envio: ok({ id: 50004 }) } });
     const [e] = (await consultarEnvios(cache, ['50004'], f)).envios;
@@ -323,6 +333,45 @@ describe('consultarEnvios — incremental', () => {
     const [e] = (await consultarEnvios(cache, ['70003'], f)).envios;
     expect(e.situacao).toBe('despachado');
     expect(e.despachadoEm).toBe('2026-10-19T09:01:30-03:00');
+  });
+
+  it('despachado SEM data não é final: volta a consultar e recupera a data depois', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T10:00:00-03:00'));
+    const sim: Record<string, EnvioSim> = {
+      '70005': { envio: envio('ready_to_ship', 'dropped_off'), historico: { status: 500, data: null } },
+    };
+    const { f, chamadas } = ml(sim);
+    const [a] = (await consultarEnvios(cache, ['70005'], f)).envios;
+    expect(a.situacao).toBe('despachado');
+    expect(a.despachadoEm).toBeNull();
+
+    // Antes do TTL incompleto: cache. Depois: nova leitura, agora com data.
+    vi.setSystemTime(Date.now() + (TTL_PENDENTE_S + 1) * 1000);
+    chamadas.length = 0;
+    await consultarEnvios(cache, ['70005'], f);
+    expect(chamadas).toEqual([]);
+
+    sim['70005'].historico = hist(['ready_to_ship', 'dropped_off', '2026-10-19T09:40:00-03:00']);
+    vi.setSystemTime(Date.now() + (TTL_INCOMPLETO_S + 1) * 1000);
+    const [b] = (await consultarEnvios(cache, ['70005'], f)).envios;
+    expect(b.despachadoEm).toBe('2026-10-19T09:40:00-03:00');
+    expect(ttlDoResultado(b)).toBe(TTL_FINAL_S);
+  });
+
+  it('lead_time 200 sem prazo: ausência cacheada por 5 min; HTTP de erro não é cacheado', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-19T10:00:00-03:00'));
+    const sim: Record<string, EnvioSim> = {
+      '70006': { envio: envio('ready_to_ship', 'printed'), prazo: prazo(null) },
+      '70007': { envio: envio('ready_to_ship', 'printed'), prazo: { status: 503, data: null } },
+    };
+    const { f, chamadas } = ml(sim);
+    await consultarEnvios(cache, ['70006', '70007'], f);
+    vi.setSystemTime(Date.now() + (TTL_PENDENTE_S + 1) * 1000);
+    chamadas.length = 0;
+    await consultarEnvios(cache, ['70006', '70007'], f);
+    expect(chamadas.sort()).toEqual(['envio:70006', 'envio:70007', 'prazo:70007']);
   });
 
   it('cache é por conta: o mesmo id em outra conta não reaproveita', async () => {
