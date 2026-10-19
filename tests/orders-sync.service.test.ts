@@ -740,3 +740,26 @@ describe('incremental — comparação profunda publica em mudança de campo', (
     expect((await pedNoSnap(cache, 10))?.order_items[0].quantity).toBe(5);
   });
 });
+describe('falha não conta como checagem (incidente de 13/10/2026)', () => {
+  // Com o ML recusando a renovação do token, cada passo incremental terminava
+  // em erro_parcial e mesmo assim gravava lastSyncAt = agora. O status dizia
+  // "checado há segundos" por 17 horas, e a aba deixava de pedir refresh.
+  it('erro_parcial preserva o lastSyncAt da última checagem que funcionou', async () => {
+    setEnv({ ORDERS_PAGE_RETRIES: '0' });
+    await runSyncStep(cache, fakeFetcher([ped(10), ped(11)]), { alvo: 'ativos', modo: 'full' });
+    const antes = (await readStatus(cache, 'ativos'))?.lastSyncAt;
+    expect(antes).toBeTruthy();
+    await new Promise(r => setTimeout(r, 15));
+
+    const tokenRecusado = (async () => {
+      throw new Error('Falha ao renovar token ML: invalid client_id or client_secret');
+    }) as unknown as FetchOrdersPage;
+    const r = await runSyncStep(cache, tokenRecusado, { alvo: 'ativos', modo: 'incremental' });
+    expect(r.ok).toBe(false);
+    expect(r.motivo).toMatch(/erro_parcial: Falha ao renovar token ML/);
+
+    const st = await readStatus(cache, 'ativos');
+    expect(st?.lastResult).toBe('erro_parcial');
+    expect(st?.lastSyncAt).toBe(antes);
+  });
+});

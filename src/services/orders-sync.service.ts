@@ -678,7 +678,11 @@ async function statusResumo(
     ultimaVersao: man?.versao ?? null,
     totalRegistros: man?.totalRegistros ?? 0,
     newestDate: man?.newestDate ?? null,
-    lastSyncAt: new Date().toISOString(),
+    // `lastSyncAt` é a última vez que o Mercado Livre RESPONDEU. Um passo que
+    // falhou não checou nada: avançá-lo fazia o status dizer "checado há
+    // segundos" enquanto o token era recusado (13/10/2026), e a aba aberta
+    // parava de pedir refresh porque o snapshot parecia fresco.
+    lastSyncAt: lastResult === 'erro_parcial' ? (anterior?.lastSyncAt ?? null) : new Date().toISOString(),
     lastResult,
     emAndamento,
     // Um passo parcial ou com erro não é uma revisão concluída: preserva a

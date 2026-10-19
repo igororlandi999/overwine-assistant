@@ -14,10 +14,17 @@ concurrency:
 
 jobs:
   sync:
-    # Uma execução por backend. São PROJETOS SEPARADOS, com Redis separados:
-    # o oficial e o isolado de preview. Antes deste arquivo só o oficial era
-    # sincronizado, e o snapshot do preview ficou parado de 13 a 17/08/2026 —
-    # o chatbot passou a recusar consultas de "ontem" por falta de cobertura.
+    # Só o backend OFICIAL. O projeto de laboratório (overwine-assistant-preview)
+    # está PAUSADO desde 10/2026 e saiu da automação: cada chamada a ele
+    # respondia 503 e deixava todas as execuções vermelhas, escondendo falhas
+    # reais do oficial. Cada job recebe SÓ o secret do oficial, por nome
+    # explícito (antes, a indexação dinâmica pelo nome do secret na matriz
+    # entregava ao job todos os secrets do repositório).
+    #
+    # Para reativar o preview: reverter o commit que fez esta mudança, ou
+    # reincluir as entradas `preview` nos três jobs escolhendo o secret POR NOME
+    # (expressão condicional em matrix.nome entre OVERWINE_PREVIEW_ADMIN_KEY e
+    # OVERWINE_ADMIN_KEY), nunca por indexação dinâmica.
     name: Sincronizar pedidos (${{ matrix.nome }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -40,27 +47,17 @@ jobs:
         include:
           - nome: oficial
             url: https://overwine-assistant.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_ADMIN_KEY
             conta: ''
           - nome: oficial · degustar-ml
             url: https://overwine-assistant.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_ADMIN_KEY
-            conta: degustar-ml
-          - nome: preview
-            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_PREVIEW_ADMIN_KEY
-            conta: ''
-          - nome: preview · degustar-ml
-            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_PREVIEW_ADMIN_KEY
             conta: degustar-ml
 
     steps:
       - name: Validar configuração
         shell: bash
         env:
-          ADMIN_KEY: ${{ secrets[matrix.secret] }}
-          NOME_SECRET: ${{ matrix.secret }}
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          NOME_SECRET: OVERWINE_ADMIN_KEY
         run: |
           set -euo pipefail
 
@@ -72,7 +69,7 @@ jobs:
       - name: Executar sincronização
         shell: bash
         env:
-          ADMIN_KEY: ${{ secrets[matrix.secret] }}
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
           SYNC_URL: ${{ matrix.url }}
           CONTA: ${{ matrix.conta }}
           # O endpoint lê no máximo ORDERS_SYNC_MAX_PAGES (5) páginas por
@@ -253,17 +250,13 @@ jobs:
         include:
           - nome: oficial
             url: https://overwine-assistant.vercel.app/api/admin/shipping-sync
-            secret: OVERWINE_ADMIN_KEY
-          - nome: preview
-            url: https://overwine-assistant-preview.vercel.app/api/admin/shipping-sync
-            secret: OVERWINE_PREVIEW_ADMIN_KEY
 
     steps:
       - name: Executar passo de logistica
         shell: bash
         env:
-          ADMIN_KEY: ${{ secrets[matrix.secret] }}
-          NOME_SECRET: ${{ matrix.secret }}
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          NOME_SECRET: OVERWINE_ADMIN_KEY
           SYNC_URL: ${{ matrix.url }}
           # 4 passos x 300 envios = 1.200 por hora. O backfill inicial de ~3.500
           # termina em 3 horas. Depois só entram envios novos, poucos por hora.
@@ -385,17 +378,13 @@ jobs:
         include:
           - nome: oficial
             url: https://overwine-assistant.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_ADMIN_KEY
-          - nome: preview
-            url: https://overwine-assistant-preview.vercel.app/api/admin/orders-sync
-            secret: OVERWINE_PREVIEW_ADMIN_KEY
 
     steps:
       - name: Drenar a fila
         shell: bash
         env:
-          ADMIN_KEY: ${{ secrets[matrix.secret] }}
-          NOME_SECRET: ${{ matrix.secret }}
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          NOME_SECRET: OVERWINE_ADMIN_KEY
           SYNC_URL: ${{ matrix.url }}
         run: |
           set -euo pipefail
