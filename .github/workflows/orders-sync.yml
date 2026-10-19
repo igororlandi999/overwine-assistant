@@ -521,7 +521,7 @@ jobs:
               print("Resposta: (formato inesperado; omitida)")
               raise SystemExit(0)
           etapas = r.get("etapas") if isinstance(r.get("etapas"), dict) else {}
-          resumo = ", ".join(f"{k}={(v or {}).get('status')}" for k, v in sorted(etapas.items()))
+          resumo = ", ".join(f"{k}={(v if isinstance(v, dict) else {}).get('status')}" for k, v in sorted(etapas.items()))
           print(f"Resultado: ok={r.get('ok')}, concluido={r.get('concluido')}, motivo={r.get('motivo') or (r.get('error') if re.fullmatch(r'[a-z_]{1,40}', str(r.get('error'))) else None)}, etapas: {resumo or '-'}")
           PY
           if [ "$http_code" = "400" ] && grep -qE '"error":"conta_(inativa|nao_habilitada|sem_credencial|sem_suporte)"' "$response_file"; then
