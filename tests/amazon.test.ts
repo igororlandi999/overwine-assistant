@@ -14,7 +14,8 @@ import { contaPorId, resolverContaDeAcao, resolverContasDeLeitura, descreverCont
 import { cacheDaConta } from '../src/lib/cache/conta-cache.js';
 import { OPERACOES, PEDIDOS_INCLUDED_DATA, ANUNCIOS_INCLUDED_DATA, PEDIDOS_POR_PAGINA_MAX, ANUNCIOS_POR_PAGINA_MAX } from '../src/amazon/contrato.js';
 import { lerCredenciais, variaveisAusentes } from '../src/amazon/credenciais.js';
-import { obterAccessToken, FalhaLwa, CHAVES_LWA } from '../src/amazon/lwa.js';
+import { obterAccessToken, descartarAccessToken, FalhaLwa, CHAVES_LWA } from '../src/amazon/lwa.js';
+import type { CredenciaisAmazon } from '../src/amazon/credenciais.js';
 import { criarClienteSpApi, ErroSpApi } from '../src/amazon/cliente.js';
 import { normalizarPedido, sincronizarPedidos, CHAVES_PEDIDOS, type PedidoAmazon } from '../src/amazon/pedidos.js';
 import { sincronizarAnuncios, sincronizarEstoqueFba } from '../src/amazon/catalogo.js';
@@ -70,6 +71,8 @@ beforeEach(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
+// O access token vive na memória do módulo: um cache desconhecido zera tudo.
+beforeEach(() => descartarAccessToken(new FakeCache()));
 afterEach(() => {
   globalThis.fetch = fetchOriginal;
   for (const k of Object.keys(CREDENCIAIS_TESTE)) delete process.env[k];
@@ -134,7 +137,7 @@ describe('contrato: constantes iguais aos modelos oficiais', () => {
 
 // ── 2. Autorização ────────────────────────────────────────────────────────
 describe('LWA: refresh token e access token', () => {
-  it('troca o refresh pelo access, guarda SÓ o access no cache da conta e reaproveita', async () => {
+  it('troca o refresh pelo access, guarda o access SÓ em memória e reaproveita', async () => {
     const amz = usarAmazon({});
     const c = contaCache();
     const t1 = await obterAccessToken(c, credenciais());
@@ -143,9 +146,11 @@ describe('LWA: refresh token e access token', () => {
     expect(amz.trocasLwa).toHaveLength(1);
     expect(amz.trocasLwa[0].get('grant_type')).toBe('refresh_token');
     const tudo = JSON.stringify([...cache.store.entries()]);
+    expect(tudo).not.toContain(t1);
     expect(tudo).not.toContain(CREDENCIAIS_TESTE.AMZ_ALEMMAR_REFRESH_TOKEN);
     expect(tudo).not.toContain(CREDENCIAIS_TESTE.AMZ_ALEMMAR_LWA_CLIENT_SECRET);
-    expect(cache.store.has('c:alemmar-amazon:' + CHAVES_LWA.access)).toBe(true);
+    expect(cache.store.has('c:alemmar-amazon:' + CHAVES_LWA.access)).toBe(false);
+    expect(cache.store.has('c:alemmar-amazon:' + CHAVES_LWA.lock)).toBe(false);
   });
   it('renova perto de expirar, sem trocar o refresh token', async () => {
     const amz = usarAmazon({});
@@ -175,6 +180,305 @@ describe('LWA: refresh token e access token', () => {
     expect(variaveisAusentes(conta)).toEqual(['AMZ_ALEMMAR_REFRESH_TOKEN']);
     expect(() => lerCredenciais(conta)).toThrow(/AMZ_ALEMMAR_REFRESH_TOKEN/);
     expect(() => lerCredenciais(conta)).not.toThrow(new RegExp(CREDENCIAIS_TESTE.AMZ_ALEMMAR_LWA_CLIENT_SECRET));
+  });
+});
+
+// ── 2b. Access token só em memória (A6) ───────────────────────────────────
+describe('LWA: access token só na memória da instância', () => {
+  type RespostaLwa = { status: number; corpo?: unknown; texto?: string } | 'rede';
+  const credA = (o: Partial<CredenciaisAmazon> = {}): CredenciaisAmazon =>
+    ({ clientId: 'amzn1.app.A', clientSecret: 'segredo-A', refreshToken: 'Atzr|refresh-A', sellerId: 'SA', marketplaceId: BR, ...o });
+  const credB = () => credA({ clientId: 'amzn1.app.B', clientSecret: 'segredo-B', refreshToken: 'Atzr|refresh-B', sellerId: 'SB' });
+  const ok = (n: number, corpo: URLSearchParams, expires_in: unknown = 3600): RespostaLwa =>
+    ({ status: 200, corpo: { access_token: `Atza|${corpo.get('client_id')}-${n}`, token_type: 'bearer', expires_in } });
+
+  /** LWA falsa: conta as trocas; `responder` decide cada resposta (padrão: token novo, 3600 s). */
+  function lwa(responder: (n: number, corpo: URLSearchParams) => RespostaLwa | Promise<RespostaLwa> = ok) {
+    const trocas: URLSearchParams[] = [];
+    globalThis.fetch = (async (_url: unknown, init: RequestInit = {}) => {
+      const corpo = new URLSearchParams(String(init.body));
+      trocas.push(corpo);
+      const r = await responder(trocas.length, corpo);
+      if (r === 'rede') throw new TypeError('fetch failed');
+      return new Response(r.texto ?? JSON.stringify(r.corpo ?? {}), { status: r.status, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    return trocas;
+  }
+  function portao() {
+    let abrir!: () => void;
+    const p = new Promise<void>(r => { abrir = r; });
+    return { p, abrir };
+  }
+  /** Cache que registra toda operação, para provar que a LWA não toca o Redis. */
+  function espiar(base: FakeCache) {
+    const ops: string[] = [];
+    const c = new Proxy(base, {
+      get(t, k, r) {
+        const v = Reflect.get(t, k, r);
+        return typeof v === 'function' ? (...a: unknown[]) => { ops.push(`${String(k)} ${String(a[0])}`); return v.apply(t, a); } : v;
+      },
+    });
+    return { c, ops };
+  }
+
+  it('nenhuma operação no Redis: nem leitura, nem escrita, nem trava', async () => {
+    lwa();
+    const { c, ops } = espiar(new FakeCache());
+    await obterAccessToken(c, credA());
+    await obterAccessToken(c, credA(), { forcar: true });
+    await descartarAccessToken(c);
+    await obterAccessToken(c, credA());
+    expect(ops).toEqual([]);
+  });
+  it('um access token deixado no Redis por versão antiga é ignorado', async () => {
+    const trocas = lwa();
+    const c = new FakeCache();
+    await c.set(CHAVES_LWA.access, JSON.stringify({ token: 'Atza|antigo-do-redis', expiraEm: Date.now() + 3600_000 }), 3600);
+    const t = await obterAccessToken(c, credA());
+    expect(t).not.toBe('Atza|antigo-do-redis');
+    expect(trocas).toHaveLength(1);
+  });
+  it('o código do módulo não chama nenhum método do cache', () => {
+    const src = readFileSync('src/amazon/lwa.ts', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    expect(src).not.toMatch(/cache\s*\.\s*(get|set|setNX|del|delIfEquals|incr|rpush|lpopMany|llen)\s*\(/);
+    // A chave da memória é um hash; nenhum segredo vira chave em texto puro.
+    expect(src).toMatch(/createHash\('sha256'\)/);
+  });
+  it('reaproveita o token entre wrappers e caches diferentes da mesma credencial', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    const t2 = await obterAccessToken(new FakeCache(), credA());
+    const t3 = await obterAccessToken(contaCache(), credA());
+    expect(new Set([t1, t2, t3]).size).toBe(1);
+    expect(trocas).toHaveLength(1);
+  });
+  it('renova antes do vencimento: reaproveita com 5 min + 1 s restantes, renova com 5 min', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    vi.setSystemTime(AGORA + 55 * 60_000 - 1000);
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe(t1);
+    vi.setSystemTime(AGORA + 55 * 60_000);
+    const t2 = await obterAccessToken(new FakeCache(), credA());
+    expect(t2).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+  });
+  it('token já expirado nunca é devolvido', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    vi.setSystemTime(AGORA + 2 * 3600_000);
+    expect(await obterAccessToken(new FakeCache(), credA())).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+  });
+  it('expires_in ausente, zero, negativo ou inválido vale 3600 s', async () => {
+    for (const exp of [undefined, 0, -5, 'abc']) {
+      await descartarAccessToken(new FakeCache());
+      vi.setSystemTime(AGORA);
+      const trocas = lwa((n, corpo) => ok(n, corpo, exp));
+      await obterAccessToken(new FakeCache(), credA());
+      vi.setSystemTime(AGORA + 54 * 60_000);
+      await obterAccessToken(new FakeCache(), credA());
+      expect(trocas, String(exp)).toHaveLength(1);
+    }
+  });
+  it('expires_in menor que a margem não renova a cada chamada: reusa até a metade da vida', async () => {
+    const trocas = lwa((n, corpo) => ok(n, corpo, 120));
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe(t1);
+    vi.setSystemTime(AGORA + 59_000);
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe(t1);
+    expect(trocas).toHaveLength(1);
+    vi.setSystemTime(AGORA + 61_000);
+    expect(await obterAccessToken(new FakeCache(), credA())).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+  });
+  it('10 chamadas simultâneas compartilham UMA renovação', async () => {
+    const g = portao();
+    const trocas = lwa(async (n, corpo) => { await g.p; return ok(n, corpo); });
+    const todas = Array.from({ length: 10 }, () => obterAccessToken(new FakeCache(), credA()));
+    g.abrir();
+    const tokens = await Promise.all(todas);
+    expect(new Set(tokens).size).toBe(1);
+    expect(trocas).toHaveLength(1);
+  });
+  it('falha compartilhada rejeita todas e não deixa renovação presa', async () => {
+    const g = portao();
+    let falhar = true;
+    const trocas = lwa(async (n, corpo) => { await g.p; return falhar ? { status: 503, corpo: {} } : ok(n, corpo); });
+    const todas = Array.from({ length: 5 }, () => obterAccessToken(new FakeCache(), credA()));
+    g.abrir();
+    const r = await Promise.allSettled(todas);
+    expect(r.every(x => x.status === 'rejected' && x.reason instanceof FalhaLwa && x.reason.motivo === 'lwa_indisponivel')).toBe(true);
+    expect(trocas).toHaveLength(1);
+    falhar = false;
+    await expect(obterAccessToken(new FakeCache(), credA())).resolves.toMatch(/^Atza\|/);
+    expect(trocas).toHaveLength(2);
+  });
+  it('credenciais diferentes ficam isoladas, e o descarte de uma não afeta a outra', async () => {
+    const trocas = lwa();
+    const cA = new FakeCache(); const cB = new FakeCache();
+    const [a1, b1] = await Promise.all([obterAccessToken(cA, credA()), obterAccessToken(cB, credB())]);
+    expect(a1).not.toBe(b1);
+    expect(a1).toContain('amzn1.app.A');
+    expect(b1).toContain('amzn1.app.B');
+    expect(trocas).toHaveLength(2);
+    await descartarAccessToken(cA);
+    const a2 = await obterAccessToken(cA, credA());
+    expect(a2).not.toBe(a1);
+    expect(await obterAccessToken(cB, credB())).toBe(b1);
+    expect(trocas).toHaveLength(3);
+  });
+  it('secret ou refresh token rotacionado não usa o token da credencial anterior', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    expect(await obterAccessToken(new FakeCache(), credA({ clientSecret: 'segredo-A2' }))).not.toBe(t1);
+    expect(await obterAccessToken(new FakeCache(), credA({ refreshToken: 'Atzr|refresh-A2' }))).not.toBe(t1);
+    expect(trocas).toHaveLength(3);
+  });
+  it('forcar troca um token ainda válido e o novo passa a ser o reaproveitado', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    const t2 = await obterAccessToken(new FakeCache(), credA(), { forcar: true });
+    expect(t2).not.toBe(t1);
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe(t2);
+    expect(trocas).toHaveLength(2);
+  });
+  it('descartar com OUTRO wrapper do mesmo cache também obriga a renovar', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(contaCache(), credA());
+    await descartarAccessToken(contaCache());
+    expect(await obterAccessToken(contaCache(), credA())).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+  });
+  it('renovação que falha depois de descarte ou forcar nunca devolve o token antigo', async () => {
+    let erro: string | null = null;
+    const trocas = lwa((n, corpo) => erro ? { status: 400, corpo: { error: erro } } : ok(n, corpo));
+    const c = new FakeCache();
+    const t1 = await obterAccessToken(c, credA());
+    erro = 'invalid_grant';
+    await descartarAccessToken(c);
+    await expect(obterAccessToken(c, credA())).rejects.toMatchObject({ motivo: 'autorizacao_invalida' });
+    await expect(obterAccessToken(c, credA())).rejects.toMatchObject({ motivo: 'autorizacao_invalida' });
+    erro = null;
+    const t2 = await obterAccessToken(c, credA());
+    erro = 'invalid_client';
+    await expect(obterAccessToken(c, credA(), { forcar: true })).rejects.toMatchObject({ motivo: 'credencial_app_invalida' });
+    await expect(obterAccessToken(c, credA())).rejects.toMatchObject({ motivo: 'credencial_app_invalida' });
+    expect([t1, t2]).toHaveLength(2);
+    expect(trocas).toHaveLength(6);
+  });
+  it('renovação na margem que falha não devolve o token em cache', async () => {
+    let falhar = false;
+    const trocas = lwa((n, corpo) => falhar ? { status: 500, corpo: {} } : ok(n, corpo));
+    await obterAccessToken(new FakeCache(), credA());
+    vi.setSystemTime(AGORA + 57 * 60_000);
+    falhar = true;
+    await expect(obterAccessToken(new FakeCache(), credA())).rejects.toBeInstanceOf(FalhaLwa);
+    await expect(obterAccessToken(new FakeCache(), credA())).rejects.toBeInstanceOf(FalhaLwa);
+    expect(trocas).toHaveLength(3);
+  });
+  it('forcar durante uma renovação em voo junta-se a ela e recebe o token novo', async () => {
+    let g: ReturnType<typeof portao> | null = null;
+    const trocas = lwa(async (n, corpo) => { if (g) await g.p; return ok(n, corpo); });
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    vi.setSystemTime(AGORA + 56 * 60_000);
+    g = portao();
+    const p1 = obterAccessToken(new FakeCache(), credA());
+    const p2 = obterAccessToken(new FakeCache(), credA(), { forcar: true });
+    g.abrir();
+    const [a, b] = await Promise.all([p1, p2]);
+    expect(a).toBe(b);
+    expect(a).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+  });
+  it('descarte durante uma renovação em voo: o token recém-emitido é guardado', async () => {
+    let g: ReturnType<typeof portao> | null = null;
+    const trocas = lwa(async (n, corpo) => { if (g) await g.p; return ok(n, corpo); });
+    const c = new FakeCache();
+    const t1 = await obterAccessToken(c, credA());
+    g = portao();
+    const p = obterAccessToken(c, credA(), { forcar: true });
+    await descartarAccessToken(c);
+    g.abrir();
+    const t2 = await p;
+    expect(t2).not.toBe(t1);
+    expect(await obterAccessToken(c, credA())).toBe(t2);
+    expect(trocas).toHaveLength(2);
+  });
+  it('cada erro da LWA vira o motivo certo e nada fica guardado', async () => {
+    const casos: Array<[RespostaLwa, string]> = [
+      [{ status: 400, corpo: { error: 'invalid_grant' } }, 'autorizacao_invalida'],
+      [{ status: 401, corpo: { error: 'invalid_client' } }, 'credencial_app_invalida'],
+      [{ status: 400, corpo: { error: 'unauthorized_client' } }, 'credencial_app_invalida'],
+      [{ status: 503, corpo: {} }, 'lwa_indisponivel'],
+      [{ status: 200, corpo: { token_type: 'bearer' } }, 'lwa_indisponivel'],
+      [{ status: 502, texto: '<html>Bad Gateway</html>' }, 'lwa_indisponivel'],
+      ['rede', 'lwa_indisponivel'],
+    ];
+    for (const [resp, motivo] of casos) {
+      let falhar = true;
+      const trocas = lwa((n, corpo) => falhar ? resp : ok(n, corpo));
+      const e = await obterAccessToken(new FakeCache(), credA()).catch(x => x);
+      expect(e, motivo).toBeInstanceOf(FalhaLwa);
+      expect(e.name).toBe('FalhaLwa');
+      expect(e.motivo, JSON.stringify(resp)).toBe(motivo);
+      falhar = false;
+      await obterAccessToken(new FakeCache(), credA());
+      expect(trocas).toHaveLength(2);
+      await descartarAccessToken(new FakeCache());
+    }
+  });
+  it('timeout da LWA vira lwa_indisponivel e libera a próxima tentativa', async () => {
+    // Captura o timer do módulo para dispará-lo na hora, sem esperar 10 s de verdade.
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms: number) => { timers.push({ fn, ms }); return 0; }) as unknown as typeof setTimeout);
+    let pendurar = true;
+    let trocas = 0;
+    globalThis.fetch = ((_u: unknown, init: RequestInit = {}) => {
+      trocas++;
+      if (!pendurar) return Promise.resolve(new Response(JSON.stringify({ access_token: 'Atza|depois', expires_in: 3600 }), { status: 200 }));
+      return new Promise((_r, rej) => init.signal!.addEventListener('abort', () => rej(new DOMException('abortado', 'AbortError'))));
+    }) as typeof fetch;
+    const p = obterAccessToken(new FakeCache(), credA()).catch(x => x);
+    expect(timers.map(t => t.ms)).toEqual([10_000]);
+    timers[0].fn();
+    expect(await p).toMatchObject({ motivo: 'lwa_indisponivel' });
+    pendurar = false;
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe('Atza|depois');
+    expect(trocas).toBe(2);
+  });
+  it('nenhum token, segredo ou corpo da LWA aparece em erro ou log', async () => {
+    const segredos = ['Atzr|refresh-A', 'segredo-A', 'DESCRICAO-SENSIVEL'];
+    let erro: string | null = null;
+    lwa((n, corpo) => erro ? { status: 400, corpo: { error: erro, error_description: 'DESCRICAO-SENSIVEL Atzr|refresh-A' } } : ok(n, corpo));
+    const t = await obterAccessToken(new FakeCache(), credA());
+    const mensagens: string[] = [];
+    for (const e of ['invalid_grant', 'invalid_client', 'server_error']) {
+      erro = e;
+      const x = await obterAccessToken(new FakeCache(), credA(), { forcar: true }).catch(y => y);
+      mensagens.push(String(x.message), String(x.stack));
+    }
+    const logs = (['info', 'warn', 'error'] as const).flatMap(m => (console[m] as unknown as { mock: { calls: unknown[][] } }).mock.calls.flat().map(String));
+    for (const s of [...segredos, t]) for (const m of [...mensagens, ...logs]) expect(m).not.toContain(s);
+  });
+  it('outra instância (módulo novo) renova sozinha, sem compartilhar o token', async () => {
+    const trocas = lwa();
+    const t1 = await obterAccessToken(new FakeCache(), credA());
+    vi.resetModules();
+    const outra = await import('../src/amazon/lwa.js');
+    const t2 = await outra.obterAccessToken(new FakeCache(), credA());
+    expect(t2).not.toBe(t1);
+    expect(trocas).toHaveLength(2);
+    expect(await obterAccessToken(new FakeCache(), credA())).toBe(t1);
+  });
+  it('403 de token inválido na SP-API: exatamente UMA troca extra e nada no Redis', async () => {
+    const amz = usarAmazon({ pedidos: [] });
+    const cli = criarClienteSpApi(contaCache(), credenciais());
+    await cli.chamar('searchOrders', { query: { lastUpdatedAfter: '2026-09-01T00:00:00Z', marketplaceIds: [BR] } });
+    amz.expirarTokens();
+    await cli.chamar('searchOrders', { query: { lastUpdatedAfter: '2026-09-01T00:00:00Z', marketplaceIds: [BR] } });
+    expect(amz.trocasLwa).toHaveLength(2);
+    expect(amz.chamadas.map(c => c.status)).toEqual([200, 403, 200]);
+    expect([...cache.store.keys()].filter(k => k.includes('amz:lwa'))).toEqual([]);
   });
 });
 

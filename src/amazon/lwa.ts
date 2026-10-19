@@ -12,7 +12,12 @@
  *
  *   ACCESS TOKEN: credencial CURTA (expires_in, hoje 3600 s), obtida trocando
  *   o refresh token neste módulo. Vai no cabeçalho `x-amz-access-token` de
- *   cada chamada. Fica no cache DA CONTA até perto de expirar.
+ *   cada chamada. Fica SÓ na memória da instância, até perto de expirar: nunca
+ *   é gravado no Redis, que não tem criptografia em repouso. Cada instância
+ *   (cold start) faz a sua troca, muito abaixo do limite da LWA. A chave da
+ *   memória é o sha256 da credencial (client id, secret e refresh token), então
+ *   contas e credenciais rotacionadas não se misturam e nenhum segredo vira
+ *   chave em texto puro.
  *
  * A outra peça, o client secret do app, expira por política (rotação a cada
  * 180 dias). Expirado, a troca falha com `invalid_client`. Os dois erros são
@@ -20,11 +25,12 @@
  *
  * Nenhum token sai deste módulo para resposta HTTP ou log.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Cache } from '../lib/cache/cache.js';
 import type { CredenciaisAmazon } from './credenciais.js';
 import { LWA_TOKEN_URL } from './contrato.js';
 
+/** Chaves que versões anteriores gravavam no Redis. Não são mais lidas nem escritas; as antigas expiram sozinhas (≤ 1 h). */
 const K = { access: 'amz:lwa:access', lock: 'amz:lwa:lock' };
 const MARGEM_RENOVACAO_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = 10_000;
@@ -41,7 +47,22 @@ export class FalhaLwa extends Error {
   }
 }
 
-interface AccessGuardado { token: string; expiraEm: number }
+interface AccessGuardado { token: string; expiraEm: number; vidaMs: number }
+
+/** Por instância: hash da credencial -> token, e renovações em andamento. */
+const memoria = new Map<string, AccessGuardado>();
+const emVoo = new Map<string, Promise<AccessGuardado>>();
+/** Último hash usado por cada objeto `cache`, para `descartarAccessToken` saber qual entrada apagar. */
+const chavePorCache = new WeakMap<Cache, string>();
+
+function chaveDa(cred: CredenciaisAmazon): string {
+  return createHash('sha256').update(`${cred.clientId}\0${cred.clientSecret}\0${cred.refreshToken}`).digest('hex');
+}
+
+/** Ainda serve se faltar mais que a margem; um token de vida curta é reaproveitado até a metade dela. */
+function aindaServe(g: AccessGuardado): boolean {
+  return g.expiraEm - Date.now() > Math.min(MARGEM_RENOVACAO_MS, g.vidaMs / 2);
+}
 
 async function trocarRefreshPorAccess(cred: CredenciaisAmazon): Promise<AccessGuardado> {
   const ctl = new AbortController();
@@ -72,44 +93,46 @@ async function trocarRefreshPorAccess(cred: CredenciaisAmazon): Promise<AccessGu
     throw new FalhaLwa('lwa_indisponivel', `HTTP ${res.status}${corpo.error ? ' ' + corpo.error : ''}`);
   }
   const segundos = Number.isFinite(corpo.expires_in) && corpo.expires_in! > 0 ? corpo.expires_in! : 3600;
-  return { token: corpo.access_token, expiraEm: Date.now() + segundos * 1000 };
+  return { token: corpo.access_token, expiraEm: Date.now() + segundos * 1000, vidaMs: segundos * 1000 };
 }
 
 /**
- * Access token válido para a conta dona de `cache` (já prefixado). Reaproveita
- * o guardado enquanto faltar mais de 5 min para expirar; senão renova sob lock,
- * para duas instâncias não trocarem o token ao mesmo tempo.
+ * Access token válido para a credencial. Reaproveita o da memória enquanto
+ * faltar mais de 5 min para expirar; senão renova. Chamadas simultâneas na
+ * mesma instância compartilham UMA renovação; instâncias diferentes renovam
+ * cada uma a sua. Falha na renovação apaga a entrada: nenhum token antigo é
+ * devolvido depois de um erro. `cache` não é lido nem escrito; só identifica
+ * a entrada para `descartarAccessToken`.
  */
 export async function obterAccessToken(cache: Cache, cred: CredenciaisAmazon, opts: { forcar?: boolean } = {}): Promise<string> {
-  const ler = async (): Promise<AccessGuardado | null> => {
-    const raw = await cache.get(K.access);
-    if (!raw) return null;
-    try { return JSON.parse(raw) as AccessGuardado; } catch { return null; }
-  };
-  if (!opts.forcar) {
-    const atual = await ler();
-    if (atual && atual.expiraEm - Date.now() > MARGEM_RENOVACAO_MS) return atual.token;
+  const chave = chaveDa(cred);
+  chavePorCache.set(cache, chave);
+  if (opts.forcar) memoria.delete(chave);
+  else {
+    const atual = memoria.get(chave);
+    if (atual && aindaServe(atual)) return atual.token;
   }
-  const dono = randomBytes(12).toString('hex');
-  const temLock = await cache.setNX(K.lock, dono, 30);
-  if (!temLock) {
-    // Outra instância está renovando: usa o atual se ainda valer.
-    const atual = await ler();
-    if (atual && atual.expiraEm > Date.now() + 10_000) return atual.token;
+  // Uma renovação em voo sempre traz um token novo: `forcar` pode se juntar a ela.
+  let voo = emVoo.get(chave);
+  if (!voo) {
+    voo = trocarRefreshPorAccess(cred)
+      .then(novo => { memoria.set(chave, novo); return novo; }, (e: unknown) => { memoria.delete(chave); throw e; })
+      .finally(() => emVoo.delete(chave));
+    emVoo.set(chave, voo);
   }
-  try {
-    const novo = await trocarRefreshPorAccess(cred);
-    const ttl = Math.max(60, Math.floor((novo.expiraEm - Date.now()) / 1000));
-    await cache.set(K.access, JSON.stringify(novo), ttl);
-    return novo.token;
-  } finally {
-    if (temLock) await cache.delIfEquals(K.lock, dono);
-  }
+  return (await voo).token;
 }
 
-/** Descarta o access token guardado (por exemplo, depois de um 403 de token inválido). */
+/**
+ * Descarta o access token guardado (por exemplo, depois de um 403 de token
+ * inválido). Com o mesmo `cache` usado em `obterAccessToken`, apaga só a
+ * entrada daquela credencial; com um `cache` desconhecido, apaga todas desta
+ * instância (custa no máximo uma troca extra por credencial).
+ */
 export async function descartarAccessToken(cache: Cache): Promise<void> {
-  await cache.del(K.access);
+  const chave = chavePorCache.get(cache);
+  if (chave) memoria.delete(chave);
+  else memoria.clear();
 }
 
 export const CHAVES_LWA = K;
