@@ -13,7 +13,7 @@ import { createSession } from '../src/lib/session.js';
 import { contaPorId, resolverContaDeAcao, resolverContasDeLeitura, descreverContas, ContaInvalidaError, type Conta } from '../src/config/contas.js';
 import { cacheDaConta } from '../src/lib/cache/conta-cache.js';
 import { OPERACOES, PEDIDOS_INCLUDED_DATA, ANUNCIOS_INCLUDED_DATA, PEDIDOS_POR_PAGINA_MAX, ANUNCIOS_POR_PAGINA_MAX } from '../src/amazon/contrato.js';
-import { lerCredenciais, variaveisAusentes } from '../src/amazon/credenciais.js';
+import { lerCredenciais, marketplaceDaConta, variaveisAusentes } from '../src/amazon/credenciais.js';
 import { obterAccessToken, descartarAccessToken, FalhaLwa, CHAVES_LWA } from '../src/amazon/lwa.js';
 import type { CredenciaisAmazon } from '../src/amazon/credenciais.js';
 import { criarClienteSpApi, ErroSpApi } from '../src/amazon/cliente.js';
@@ -180,6 +180,56 @@ describe('LWA: refresh token e access token', () => {
     expect(variaveisAusentes(conta)).toEqual(['AMZ_ALEMMAR_REFRESH_TOKEN']);
     expect(() => lerCredenciais(conta)).toThrow(/AMZ_ALEMMAR_REFRESH_TOKEN/);
     expect(() => lerCredenciais(conta)).not.toThrow(new RegExp(CREDENCIAIS_TESTE.AMZ_ALEMMAR_LWA_CLIENT_SECRET));
+  });
+});
+
+// ── 2a. Marketplace: AMZ_ALEMMAR_MARKETPLACE_ID com fallback no registro ──
+describe('marketplace da conta', () => {
+  afterEach(() => { delete process.env.AMZ_ALEMMAR_MARKETPLACE_ID; });
+  const ES = 'A1RKKUPIHCS9HS';
+  it('sem a variável, usa o registro (Brasil) e marca a origem', () => {
+    delete process.env.AMZ_ALEMMAR_MARKETPLACE_ID;
+    expect(marketplaceDaConta(conta)).toEqual({ id: BR, origem: 'registro' });
+    expect(lerCredenciais(conta).marketplaceId).toBe(BR);
+  });
+  it('variável vazia ou só espaços também cai no registro', () => {
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = '   ';
+    expect(marketplaceDaConta(conta)).toEqual({ id: BR, origem: 'registro' });
+  });
+  it('com a variável válida, ela vence o registro (com trim)', () => {
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = ` ${BR} `;
+    expect(marketplaceDaConta(conta)).toEqual({ id: BR, origem: 'ambiente' });
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = ES;
+    expect(lerCredenciais(conta).marketplaceId).toBe(ES);
+  });
+  it('variável malformada é erro com o NOME, sem o valor, e não vira ausência de credencial', () => {
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = 'brasil-xyz';
+    expect(() => marketplaceDaConta(conta)).toThrow(/AMZ_ALEMMAR_MARKETPLACE_ID/);
+    expect(() => marketplaceDaConta(conta)).not.toThrow(/brasil-xyz/);
+    expect(() => lerCredenciais(conta)).toThrow(/AMZ_ALEMMAR_MARKETPLACE_ID/);
+    expect(variaveisAusentes(conta)).toEqual([]);
+  });
+  it('passo com marketplace malformado para antes de qualquer chamada (nem LWA)', async () => {
+    process.env.MULTI_CONTA_ENABLED = 'true';
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = 'invalido';
+    const amz = usarAmazon({ pedidos: [], anuncios: [], estoqueFba: [], transacoes: [] });
+    const r = await executarPassoAmazon(contaCache(), conta);
+    expect(r).toMatchObject({ ok: false, motivo: 'marketplace_invalido', concluido: false });
+    expect(amz.trocasLwa).toHaveLength(0);
+    expect(amz.chamadas).toHaveLength(0);
+  });
+  it('passo usa o marketplace da variável em TODAS as chamadas', async () => {
+    process.env.MULTI_CONTA_ENABLED = 'true';
+    process.env.AMZ_ALEMMAR_MARKETPLACE_ID = ES;
+    const amz = usarAmazon({ pedidos: [pedidoApi('701-0000001-0000009', '2026-09-30T10:00:00Z')], anuncios: [], estoqueFba: [], transacoes: [] });
+    const r = await executarPassoAmazon(contaCache(), conta);
+    expect(r.ok).toBe(true);
+    expect(amz.chamadas.length).toBeGreaterThan(0);
+    for (const c of amz.chamadas) {
+      const ids = [c.url.searchParams.get('marketplaceIds'), c.url.searchParams.get('marketplaceId'), c.url.searchParams.get('granularityId')].filter(Boolean);
+      expect(ids.length).toBeGreaterThan(0);
+      for (const v of ids) expect(v).toBe(ES);
+    }
   });
 });
 

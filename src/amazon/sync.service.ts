@@ -16,7 +16,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Cache } from '../lib/cache/cache.js';
 import type { Conta } from '../config/contas.js';
-import { lerCredenciais, variaveisAusentes } from './credenciais.js';
+import { lerCredenciais, marketplaceDaConta, variaveisAusentes } from './credenciais.js';
 import { criarClienteSpApi, ErroSpApi, type ClienteSpApi } from './cliente.js';
 import { FalhaLwa } from './lwa.js';
 import { sincronizarPedidos, estadoPedidos } from './pedidos.js';
@@ -37,7 +37,7 @@ export type ResultadoEtapa =
 export interface ResultadoPassoAmazon {
   ok: boolean;
   conta: string;
-  motivo?: 'sync_em_andamento' | 'autorizacao_invalida' | 'credencial_app_invalida' | 'lwa_indisponivel' | 'credenciais_ausentes';
+  motivo?: 'sync_em_andamento' | 'autorizacao_invalida' | 'credencial_app_invalida' | 'lwa_indisponivel' | 'credenciais_ausentes' | 'marketplace_invalido';
   /** Todas as etapas pedidas concluíram neste passo. */
   concluido: boolean;
   etapas: Partial<Record<EtapaAmazon, ResultadoEtapa>>;
@@ -62,6 +62,9 @@ export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesP
   if (conta.canal !== 'amazon' || !conta.amazon) throw new Error(`conta ${conta.id} não é da Amazon`);
   const faltam = variaveisAusentes(conta);
   if (faltam.length && !o.cliente) return { ok: false, conta: conta.id, motivo: 'credenciais_ausentes', concluido: false, etapas: {} };
+  let marketplaceId: string;
+  try { marketplaceId = marketplaceDaConta(conta).id; }
+  catch { return { ok: false, conta: conta.id, motivo: 'marketplace_invalido', concluido: false, etapas: {} }; }
 
   const dono = randomBytes(8).toString('hex');
   if (!(await cache.setNX(K.lock, dono, 120))) return { ok: false, conta: conta.id, motivo: 'sync_em_andamento', concluido: false, etapas: {} };
@@ -75,7 +78,6 @@ export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesP
   try {
     const cred = o.cliente ? null : lerCredenciais(conta);
     const cliente = o.cliente ?? criarClienteSpApi(cache, cred!, { agora });
-    const marketplaceId = conta.amazon.marketplaceId;
     const sellerId = cred?.sellerId ?? process.env[`${conta.amazon.credenciaisEnv}_SELLER_ID`] ?? '';
 
     for (const etapa of etapas) {
@@ -140,6 +142,7 @@ export async function estadoAmazon(cache: Cache, conta: Conta) {
     conta: conta.id,
     ativa: conta.ativo,
     credenciais: { completas: variaveisAusentes(conta).length === 0, ausentes: variaveisAusentes(conta) },
+    marketplace: (() => { try { return marketplaceDaConta(conta); } catch { return { id: null, origem: 'invalido' as const }; } })(),
     pedidos: { total: pedidos?.total ?? 0, atualizadoEm: pedidos?.atualizadoEm ?? null, cobertoAte: cobPedidos.cobertoAte, jobEmAndamento: cobPedidos.jobEmAndamento },
     anuncios: { total: anuncios?.total ?? 0, atualizadoEm: anuncios?.atualizadoEm ?? null },
     estoqueFba: { estado: estadoFba, total: fba?.total ?? 0, atualizadoEm: fba?.atualizadoEm ?? null },

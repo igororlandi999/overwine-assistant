@@ -480,7 +480,7 @@ Cada operação tem um balde próprio no cache da conta. Ele começa no padrão 
 
 Autorização:
 - O refresh token vem da self-authorization. Fica no ambiente, dura muito e não é trocado.
-- O access token (cerca de 1 h) é guardado só no cache da conta.
+- O access token (cerca de 1 h) fica só na memória da instância (nunca no Redis); cada instância obtém o seu.
 - `invalid_grant` (autorização revogada) e `invalid_client` (segredo vencido; rotação a cada 180 dias) são erros distintos.
 
 Variáveis de ambiente:
@@ -488,6 +488,7 @@ Variáveis de ambiente:
 - `AMZ_ALEMMAR_LWA_CLIENT_SECRET`
 - `AMZ_ALEMMAR_REFRESH_TOKEN`
 - `AMZ_ALEMMAR_SELLER_ID` (o token de comerciante)
+- `AMZ_ALEMMAR_MARKETPLACE_ID` (opcional; ausente = `A2Q3Y263D00KWC` do `contas.json`; formato inválido bloqueia a sincronização com `marketplace_invalido`)
 
 #### Leitura nas telas existentes (`src/amazon/leitura.ts`)
 
