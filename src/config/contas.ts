@@ -27,7 +27,7 @@
  * ações (refresh, sync, seed, proxy do ML) exigem UMA conta (`conta=a`).
  */
 import registro from './contas.json' with { type: 'json' };
-import { variaveisAusentes } from '../amazon/credenciais.js';
+import { amazonHabilitada, variaveisAusentes } from '../amazon/credenciais.js';
 
 export type Canal = 'ml' | 'amazon' | 'shopee' | 'loja';
 
@@ -101,6 +101,10 @@ function ativasPorAmbiente(): Set<string> {
   return new Set(v.split(',').map(s => s.trim()).filter(Boolean));
 }
 function comAtivacao(c: Conta): Conta {
+  // Amazon: além do registro e de CONTAS_ATIVAS, exige a trava explícita
+  // <BASE>_ENABLED=true (ex.: AMZ_ALEMMAR_ENABLED). Sem ela a conta é INATIVA
+  // em todas as rotas, listas e no seletor, qualquer que seja o resto.
+  if (c.canal === 'amazon' && !amazonHabilitada(c)) return c.ativo ? { ...c, ativo: false } : c;
   return c.ativo || !ativasPorAmbiente().has(c.id) ? c : { ...c, ativo: true };
 }
 /** Visão atual (JSON + ambiente). Recalculada a cada chamada: o ambiente pode mudar nos testes. */
@@ -258,6 +262,8 @@ export function resolverContaDeAcao(param: unknown, opts: { preparacao?: boolean
  * ver validarContaParaUso.
  */
 function validarAmazonParaAcao(c: Conta, preparacao: boolean): Conta {
+  // A trava vale também no modo preparação: sem AMZ_<...>_ENABLED=true, nada sincroniza.
+  if (!amazonHabilitada(c)) throw new ContaInvalidaError('conta_inativa', c.id);
   if (!preparacao && !c.ativo) throw new ContaInvalidaError('conta_inativa', c.id);
   if (!multiContaHabilitada()) throw new ContaInvalidaError('conta_nao_habilitada', c.id);
   if (variaveisAusentes(c).length) throw new ContaInvalidaError('conta_sem_credencial', c.id);

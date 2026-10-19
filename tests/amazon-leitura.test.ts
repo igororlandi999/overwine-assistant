@@ -21,7 +21,7 @@ import { STATUS_AMAZON, projetarPedido, projetarCatalogo, modalidadeDoPedido, st
 import { normalizarPedido } from '../src/amazon/pedidos.js';
 import { normalizarAnuncio } from '../src/amazon/catalogo.js';
 import { executarPassoAmazon } from '../src/amazon/sync.service.js';
-import { MODELOS, CREDENCIAIS_TESTE, criarAmazonSimulada, exemploOficialSearchOrders, pedidoApi, anuncioApi, transacaoApi, type Cenario } from './amazon-simulada.js';
+import { MODELOS, CREDENCIAIS_TESTE, TRAVA_AMAZON_LIGADA, criarAmazonSimulada, exemploOficialSearchOrders, pedidoApi, anuncioApi, transacaoApi, type Cenario } from './amazon-simulada.js';
 import syncHandler from '../api/admin/orders-sync.js';
 import ordersHandler from '../api/orders/[resource].js';
 import refreshHandler from '../api/orders/refresh.js';
@@ -71,7 +71,7 @@ beforeEach(async () => {
   vi.setSystemTime(AGORA);
   cache = new FakeCache();
   setCacheForTests(cache);
-  Object.assign(process.env, TEST_ENV, CREDENCIAIS_TESTE, { MULTI_CONTA_ENABLED: 'true', CONTAS_ATIVAS: 'alemmar-amazon' });
+  Object.assign(process.env, TEST_ENV, CREDENCIAIS_TESTE, TRAVA_AMAZON_LIGADA, { MULTI_CONTA_ENABLED: 'true', CONTAS_ATIVAS: 'alemmar-amazon' });
   resetEnvForTests();
   conta = contaPorId('alemmar-amazon')!;
   vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -82,6 +82,7 @@ beforeEach(async () => {
 afterEach(() => {
   globalThis.fetch = fetchOriginal;
   for (const k of Object.keys(CREDENCIAIS_TESTE)) delete process.env[k];
+  delete process.env.AMZ_ALEMMAR_ENABLED;
   delete process.env.MULTI_CONTA_ENABLED;
   delete process.env.CONTAS_ATIVAS;
   vi.useRealTimers();
@@ -256,6 +257,74 @@ describe('rotas existentes servem a Amazon (conta ativada só no teste)', () => 
     vi.setSystemTime(AGORA + 3600_000);
     await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
     expect((await readManifest(amzCache(), 'ativos'))!.versao).toBe(v1);
+  });
+});
+
+// ── 3b. Trava AMZ_ALEMMAR_ENABLED ─────────────────────────────────────────
+// Cenário do deploy: credenciais presentes, CONTAS_ATIVAS=alemmar-amazon e
+// MULTI_CONTA_ENABLED=true (o beforeEach deste arquivo). Sem a trava em "true",
+// a Amazon fica inativa e NENHUMA chamada sai, nem para a LWA.
+describe('trava AMZ_ALEMMAR_ENABLED: sem "true", a Amazon fica bloqueada', () => {
+  const VALORES_QUE_NAO_LIGAM: Array<string | undefined> = [undefined, '', 'false', '0', '1', 'TRUE', 'True', 'yes', ' true', 'true '];
+  const comTrava = (v: string | undefined) => { if (v === undefined) delete process.env.AMZ_ALEMMAR_ENABLED; else process.env.AMZ_ALEMMAR_ENABLED = v; };
+
+  it('pré-condição: com a trava em "true" a conta está ativa (o resto do cenário liga a Amazon)', () => {
+    expect(process.env.AMZ_ALEMMAR_ENABLED).toBe('true');
+    expect(contaPorId('alemmar-amazon')!.ativo).toBe(true);
+  });
+
+  for (const v of VALORES_QUE_NAO_LIGAM) {
+    it(`AMZ_ALEMMAR_ENABLED=${JSON.stringify(v)}: conta inativa, rotas recusam, nada chamado nem gravado`, async () => {
+      comTrava(v);
+      const amz = usarAmazon(cenarioCompleto());
+      const c = contaPorId('alemmar-amazon')!;
+      expect(c.ativo).toBe(false);
+
+      const admin1 = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
+      expect([admin1.statusCode, admin1.json().error]).toEqual([400, 'conta_inativa']);
+      // Nem o modo preparação da admin passa a trava.
+      const admin2 = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon', preparacao: true } });
+      expect([admin2.statusCode, admin2.json().error]).toEqual([400, 'conta_inativa']);
+      const refresh = await chamar(refreshHandler, { method: 'POST', headers: auth(), body: { conta: 'alemmar-amazon' } });
+      expect([refresh.statusCode, refresh.json().error]).toEqual([400, 'conta_inativa']);
+      const leitura = await chamar(ordersHandler, { query: { resource: 'status', contas: 'alemmar-amazon' }, headers: auth() });
+      expect([leitura.statusCode, leitura.json().error]).toEqual([400, 'conta_inativa']);
+
+      // Defesa em profundidade: chamado direto, o passo também não roda.
+      const passo = await executarPassoAmazon(amzCache(), { ...c, ativo: true });
+      expect(passo).toMatchObject({ ok: false, motivo: 'amazon_desabilitada', concluido: false, etapas: {} });
+
+      expect(amz.trocasLwa).toHaveLength(0);
+      expect(amz.chamadas).toHaveLength(0);
+      expect([...cache.store.keys()].filter(k => k.startsWith('c:alemmar-amazon:'))).toEqual([]);
+    });
+  }
+
+  it('a resposta do job no GitHub com a trava desligada é a de "passo pulado" (400 conta_inativa)', async () => {
+    comTrava(undefined);
+    const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
+    // Mesmo critério do orders-sync.yml para pular sem falhar o job.
+    expect(r.statusCode).toBe(400);
+    expect(JSON.stringify(r.json())).toMatch(/"error":"conta_(inativa|nao_habilitada|sem_credencial|sem_suporte)"/);
+  });
+
+  it('a trava não substitui as outras: com "true" mas sem MULTI_CONTA_ENABLED ou sem CONTAS_ATIVAS, continua bloqueada', async () => {
+    const amz = usarAmazon(cenarioCompleto());
+    delete process.env.MULTI_CONTA_ENABLED;
+    const semFlag = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
+    expect([semFlag.statusCode, semFlag.json().error]).toEqual([400, 'conta_nao_habilitada']);
+    process.env.MULTI_CONTA_ENABLED = 'true';
+    delete process.env.CONTAS_ATIVAS;
+    const semAtivas = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
+    expect([semAtivas.statusCode, semAtivas.json().error]).toEqual([400, 'conta_inativa']);
+    expect(amz.chamadas).toHaveLength(0);
+  });
+
+  it('o Mercado Livre não depende da trava', async () => {
+    comTrava(undefined);
+    expect(contaPorId('overwine-ml')!.ativo).toBe(true);
+    const ml = await chamar(ordersHandler, { query: { resource: 'status' }, headers: auth() });
+    expect(ml.statusCode).toBe(200);
   });
 });
 

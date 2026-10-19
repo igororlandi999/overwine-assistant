@@ -22,7 +22,7 @@ import { sincronizarAnuncios, sincronizarEstoqueFba } from '../src/amazon/catalo
 import { sincronizarFinanceiro, apurarPedido, type TransacaoAmazon } from '../src/amazon/financeiro.js';
 import { lerColecao, lerManifesto } from '../src/amazon/store.js';
 import { executarPassoAmazon } from '../src/amazon/sync.service.js';
-import { MODELOS, CREDENCIAIS_TESTE, criarAmazonSimulada, exemploOficialSearchOrders, validarContraModelo, pedidoApi, anuncioApi, transacaoApi, type Cenario } from './amazon-simulada.js';
+import { MODELOS, CREDENCIAIS_TESTE, TRAVA_AMAZON_LIGADA, criarAmazonSimulada, exemploOficialSearchOrders, validarContraModelo, pedidoApi, anuncioApi, transacaoApi, type Cenario } from './amazon-simulada.js';
 import syncHandler from '../api/admin/orders-sync.js';
 import ordersHandler from '../api/orders/[resource].js';
 import refreshHandler from '../api/orders/refresh.js';
@@ -62,7 +62,7 @@ beforeEach(() => {
   vi.setSystemTime(AGORA);
   cache = new FakeCache();
   setCacheForTests(cache);
-  Object.assign(process.env, TEST_ENV, CREDENCIAIS_TESTE);
+  Object.assign(process.env, TEST_ENV, CREDENCIAIS_TESTE, TRAVA_AMAZON_LIGADA);
   delete process.env.MULTI_CONTA_ENABLED;
   delete process.env.CONTAS_ATIVAS;
   resetEnvForTests();
@@ -76,6 +76,7 @@ beforeEach(() => descartarAccessToken(new FakeCache()));
 afterEach(() => {
   globalThis.fetch = fetchOriginal;
   for (const k of Object.keys(CREDENCIAIS_TESTE)) delete process.env[k];
+  delete process.env.AMZ_ALEMMAR_ENABLED;
   delete process.env.MULTI_CONTA_ENABLED;
   delete process.env.CONTAS_ATIVAS;
   vi.useRealTimers();

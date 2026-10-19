@@ -488,6 +488,7 @@ Variáveis de ambiente:
 - `AMZ_ALEMMAR_LWA_CLIENT_SECRET`
 - `AMZ_ALEMMAR_REFRESH_TOKEN`
 - `AMZ_ALEMMAR_SELLER_ID` (o token de comerciante)
+- `AMZ_ALEMMAR_ENABLED` (trava: só `true` liga a Amazon; ausente ou outro valor = inativa, mesmo com `CONTAS_ATIVAS` e `MULTI_CONTA_ENABLED`)
 - `AMZ_ALEMMAR_MARKETPLACE_ID` (opcional; ausente = `A2Q3Y263D00KWC` do `contas.json`; formato inválido bloqueia a sincronização com `marketplace_invalido`)
 
 #### Leitura nas telas existentes (`src/amazon/leitura.ts`)

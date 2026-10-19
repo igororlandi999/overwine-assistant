@@ -7,6 +7,9 @@
  *   <BASE>_REFRESH_TOKEN      gerado na AUTORIZAÇÃO do app pela conta (self-authorization)
  *   <BASE>_SELLER_ID          token de comerciante (Merchant Token); não é segredo,
  *                             mas identifica a conta nas chamadas de anúncios
+ *   <BASE>_ENABLED            TRAVA da integração. Só o valor exato "true" liga a
+ *                             conta; ausente ou qualquer outro valor = Amazon inativa,
+ *                             mesmo com CONTAS_ATIVAS, MULTI_CONTA_ENABLED e credenciais.
  *   <BASE>_MARKETPLACE_ID     OPCIONAL. Marketplace das chamadas. Ausente = valor do
  *                             registro (contas.json; Brasil A2Q3Y263D00KWC). Presente
  *                             com formato inválido = erro, nunca cai em outro marketplace.
@@ -29,6 +32,17 @@ const SUFIXOS = ['LWA_CLIENT_ID', 'LWA_CLIENT_SECRET', 'REFRESH_TOKEN', 'SELLER_
 export function nomesDasVariaveis(conta: Pick<Conta, 'amazon'>): string[] {
   if (!conta.amazon) return [];
   return SUFIXOS.map(s => `${conta.amazon!.credenciaisEnv}_${s}`);
+}
+
+/** Nome da variável de trava da conta (ex.: AMZ_ALEMMAR_ENABLED). */
+export function nomeDaTrava(conta: Pick<Conta, 'amazon'>): string | null {
+  return conta.amazon ? `${conta.amazon.credenciaisEnv}_ENABLED` : null;
+}
+
+/** A trava explícita está ligada? Só o valor exato `"true"` liga; qualquer outro, inclusive com espaços, não. */
+export function amazonHabilitada(conta: Pick<Conta, 'amazon'>): boolean {
+  const nome = nomeDaTrava(conta);
+  return nome !== null && process.env[nome] === 'true';
 }
 
 /** Formato de um Marketplace ID da SP-API (ex.: A2Q3Y263D00KWC). */

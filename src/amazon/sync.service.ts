@@ -16,7 +16,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Cache } from '../lib/cache/cache.js';
 import type { Conta } from '../config/contas.js';
-import { lerCredenciais, marketplaceDaConta, variaveisAusentes } from './credenciais.js';
+import { amazonHabilitada, lerCredenciais, marketplaceDaConta, variaveisAusentes } from './credenciais.js';
 import { criarClienteSpApi, ErroSpApi, type ClienteSpApi } from './cliente.js';
 import { FalhaLwa } from './lwa.js';
 import { sincronizarPedidos, estadoPedidos } from './pedidos.js';
@@ -37,7 +37,7 @@ export type ResultadoEtapa =
 export interface ResultadoPassoAmazon {
   ok: boolean;
   conta: string;
-  motivo?: 'sync_em_andamento' | 'autorizacao_invalida' | 'credencial_app_invalida' | 'lwa_indisponivel' | 'credenciais_ausentes' | 'marketplace_invalido';
+  motivo?: 'sync_em_andamento' | 'autorizacao_invalida' | 'credencial_app_invalida' | 'lwa_indisponivel' | 'credenciais_ausentes' | 'marketplace_invalido' | 'amazon_desabilitada';
   /** Todas as etapas pedidas concluíram neste passo. */
   concluido: boolean;
   etapas: Partial<Record<EtapaAmazon, ResultadoEtapa>>;
@@ -60,6 +60,9 @@ export interface OpcoesPassoAmazon {
 
 export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesPassoAmazon = {}): Promise<ResultadoPassoAmazon> {
   if (conta.canal !== 'amazon' || !conta.amazon) throw new Error(`conta ${conta.id} não é da Amazon`);
+  // Defesa em profundidade: as rotas já recusam a conta sem a trava, mas o
+  // passo também não roda (nem pede token) se ela não estiver ligada.
+  if (!amazonHabilitada(conta)) return { ok: false, conta: conta.id, motivo: 'amazon_desabilitada', concluido: false, etapas: {} };
   const faltam = variaveisAusentes(conta);
   if (faltam.length && !o.cliente) return { ok: false, conta: conta.id, motivo: 'credenciais_ausentes', concluido: false, etapas: {} };
   let marketplaceId: string;
@@ -141,6 +144,7 @@ export async function estadoAmazon(cache: Cache, conta: Conta) {
   return {
     conta: conta.id,
     ativa: conta.ativo,
+    habilitada: amazonHabilitada(conta),
     credenciais: { completas: variaveisAusentes(conta).length === 0, ausentes: variaveisAusentes(conta) },
     marketplace: (() => { try { return marketplaceDaConta(conta); } catch { return { id: null, origem: 'invalido' as const }; } })(),
     pedidos: { total: pedidos?.total ?? 0, atualizadoEm: pedidos?.atualizadoEm ?? null, cobertoAte: cobPedidos.cobertoAte, jobEmAndamento: cobPedidos.jobEmAndamento },

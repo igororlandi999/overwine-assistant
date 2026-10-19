@@ -92,6 +92,9 @@ export const CREDENCIAIS_TESTE = {
   AMZ_ALEMMAR_SELLER_ID: 'A1TESTEMERCHANT',
 };
 
+/** Trava explícita da integração ligada (AMZ_ALEMMAR_ENABLED=true). Fora das credenciais de propósito. */
+export const TRAVA_AMAZON_LIGADA = { AMZ_ALEMMAR_ENABLED: 'true' };
+
 export function criarAmazonSimulada(cen: Cenario) {
   const chamadas: ChamadaRegistrada[] = [];
   const trocasLwa: URLSearchParams[] = [];
