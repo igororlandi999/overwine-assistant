@@ -17,6 +17,12 @@ export interface Cache {
   delIfEquals(key: string, value: string): Promise<boolean>;
   /** INCR com TTL na primeira escrita — usado para rate limiting. */
   incr(key: string, ttlSeconds: number): Promise<number>;
+  /**
+   * MGET — lê várias chaves de string num ÚNICO comando (a Upstash cobra por
+   * comando). Mesma ordem de `keys`; ausente vira null. Existe para a consulta
+   * de status do dashboard, que lê manifesto, status e telemetria juntos.
+   */
+  mget(keys: string[]): Promise<(string | null)[]>;
 
   /**
    * FILA (lista Redis). Existe para a fila de notificações do Mercado Livre:

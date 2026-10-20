@@ -133,7 +133,10 @@ const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 
 async function gerar(): Promise<{ rotas: unknown; estado: Record<string, unknown> }> {
   const saida: Record<string, unknown> = {};
-  const q = (resource: string, extra: Record<string, unknown> = {}) => chamar(ordersHandler, { query: { resource, alvo: 'ativos', ...extra }, headers: auth() });
+  // Status com ?diagnostico=1: é o contrato COMPLETO de antes (com tempoReal),
+  // que a fixture do código antigo registra. O status enxuto do poll é o
+  // mesmo corpo sem `tempoReal` (coberto em orders-status-barato.test.ts).
+  const q = (resource: string, extra: Record<string, unknown> = {}) => chamar(ordersHandler, { query: { resource, alvo: 'ativos', ...(resource === 'status' ? { diagnostico: '1' } : {}), ...extra }, headers: auth() });
 
   saida['status_inicial'] = await q('status');
   saida['metrics_7'] = await q('metrics', { dias: '7' });

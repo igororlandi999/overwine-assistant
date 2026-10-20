@@ -43,6 +43,7 @@ class Contador implements Cache {
   zerar() { this.n = {}; this.escritas = []; this.apagadas = []; }
   private c(m: string) { this.n[m] = (this.n[m] ?? 0) + 1; }
   get(k: string) { this.c('get'); return this.base.get(k); }
+  mget(ks: string[]) { this.c('mget'); return this.base.mget(ks); }
   async set(k: string, v: string, t?: number) {
     this.c('set');
     if (this.falharSetEm?.(k)) throw new Error('queda simulada');

@@ -70,7 +70,10 @@ const ZERO: ObsSync = {
 };
 
 export async function lerObsSync(cache: Cache): Promise<ObsSync> {
-  const bruto = await cache.get(CHAVE_OBS_SYNC);
+  return parseObsSync(await cache.get(CHAVE_OBS_SYNC));
+}
+
+export function parseObsSync(bruto: string | null): ObsSync {
   if (bruto === null) return { ...ZERO };
   try {
     const v = JSON.parse(bruto) as Partial<ObsSync>;

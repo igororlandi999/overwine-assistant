@@ -4,8 +4,8 @@
  *   - orders-store (readManifest, readPreviousManifest, readChunkByKey)
  *   - orders-sync.service (readStatus) — status já persistido pela 4b
  *
- * NUNCA: readSnapshot (carrega tudo), scan/keys/mget (a interface Cache não os
- * tem), mlFetch, rede. NUNCA expõe nomes de chunk, chaves Redis, jobId, TTL,
+ * NUNCA: readSnapshot (carrega tudo), scan/keys, mlFetch, rede. MGET só no
+ * status, para ler manifesto + status + telemetria em UM comando. NUNCA expõe nomes de chunk, chaves Redis, jobId, TTL,
  * chunkSize ou credenciais — só projeções públicas de negócio.
  *
  * Estratégia de versão (D3/F2): cursor da versão atual lê do manifesto atual;
@@ -20,10 +20,12 @@ import {
   readManifest,
   readPreviousManifest,
   readChunkByKey,
+  chaveManifesto,
+  parseManifest,
 } from '../lib/orders-store.js';
-import { readStatus } from './orders-sync.service.js';
+import { chaveStatusSync, parseStatusSync } from './orders-sync.service.js';
 import { lerObsRecebimento, lerObsProcessamento, tamanhoFila } from '../lib/orders-events.js';
-import { lerObsSync, type ObsSync } from '../lib/sync-telemetry.js';
+import { CHAVE_OBS_SYNC, parseObsSync, type ObsSync } from '../lib/sync-telemetry.js';
 import type { OrderSlim } from './orders.service.js';
 import { decodeCursor, encodeCursor, InvalidCursorError, type CursorData } from '../lib/orders-cursor.js';
 
@@ -64,7 +66,12 @@ export interface OrdersReadStatus {
   idadeCheckSegundos: number | null;
   /** Quando a última revisão profunda terminou (ver SyncStatus.ultimaRevisaoEm). */
   ultimaRevisaoEm: string | null;
-  tempoReal: OrdersRealtimeStatus;
+  /**
+   * Diagnóstico do caminho de tempo real. Só vem com `diagnostico: true`
+   * (rota: `?diagnostico=1`): custa 3 comandos Redis e o dashboard não o usa
+   * no poll de 60 s. Ausente no status normal.
+   */
+  tempoReal?: OrdersRealtimeStatus;
   /**
    * Telemetria unificada da sincronização, de todos os caminhos. É o bloco
    * para responder "por que a tela parou?" em uma leitura.
@@ -154,22 +161,29 @@ function idadeEmSegundos(updatedAt: string | null): number | null {
  * Projeção pública de manifesto + SyncStatus + telemetria de tempo real.
  * Nunca devolve os objetos crus, nem chave, nem chunk, nem credencial.
  *
- * O bloco `tempoReal` é lido só para o alvo `ativos`: é o único que a callback
- * de notificações mantém. Em `cancelados` ele vem zerado e `habilitado: false`,
+ * O bloco `tempoReal` é DIAGNÓSTICO: só é lido com `diagnostico: true`. Nesse
+ * caso, é lido só para o alvo `ativos` — o único que a callback de
+ * notificações mantém. Em `cancelados` ele vem zerado e `habilitado: false`,
  * o que é a verdade — cancelados vivem da reconciliação.
+ *
+ * Custo (10/2026): status normal = 1 MGET; com diagnóstico, +3 comandos.
  */
 export async function getReadStatus(
   cache: Cache,
   alvo: Alvo,
-  opts: { notificacoesHabilitadas?: boolean } = {}
+  opts: { notificacoesHabilitadas?: boolean; diagnostico?: boolean } = {}
 ): Promise<OrdersReadStatus> {
-  const man = await readManifest(cache, alvo);
-  const st = await readStatus(cache, alvo);
+  // Manifesto + status + telemetria em UM comando (MGET). Antes eram 3 GETs,
+  // mais 3 leituras de diagnóstico que agora só vêm sob pedido.
+  const [rawMan, rawSt, rawObs] = await cache.mget([chaveManifesto(alvo), chaveStatusSync(alvo), CHAVE_OBS_SYNC]);
+  const man = parseManifest(rawMan);
+  const st = parseStatusSync(rawSt);
   const updatedAt = man?.updatedAt ?? null;
   const agoraMs = Date.now();
-  const sincronizacao = await lerObsSync(cache);
+  const sincronizacao = parseObsSync(rawObs);
 
-  let tempoReal: OrdersRealtimeStatus = {
+  let tempoReal: OrdersRealtimeStatus | undefined;
+  if (opts.diagnostico === true) tempoReal = {
     habilitado: false,
     ultimaNotificacaoEm: null, ultimaNotificacaoTopico: null, ultimaNotificacaoPedido: null,
     ultimaNotificacaoSent: null, ultimoAckMs: null, ultimoDrenoPedidoEm: null,
@@ -182,7 +196,7 @@ export async function getReadStatus(
     ultimoErro: null, ultimoErroEm: null,
   };
 
-  if (alvo === 'ativos') {
+  if (tempoReal && alvo === 'ativos') {
     const [rec, proc, pendentes] = await Promise.all([
       lerObsRecebimento(cache),
       lerObsProcessamento(cache),
@@ -231,7 +245,7 @@ export async function getReadStatus(
     agora: new Date(agoraMs).toISOString(),
     idadeCheckSegundos: idadeEmSegundos(st?.lastSyncAt ?? null),
     ultimaRevisaoEm: st?.ultimaRevisaoEm ?? null,
-    tempoReal,
+    ...(tempoReal ? { tempoReal } : {}),
     sincronizacao,
   };
 }

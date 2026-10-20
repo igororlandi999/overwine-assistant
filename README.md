@@ -291,6 +291,13 @@ atualização, exatamente como antes.
 `GET /api/orders/status?alvo=ativos` devolve, além do que já devolvia:
 
 - `idadeSegundos` — idade do snapshot publicado;
+- `sincronizacao` — telemetria unificada da sincronização (falhas, conclusões).
+
+O bloco `tempoReal` abaixo é **diagnóstico** e só vem com
+`GET /api/orders/status?alvo=ativos&diagnostico=1` (10/2026): ele custa 3
+comandos Redis por conta e o poll de 60 s do dashboard não o usa. Sem o
+parâmetro, o status é um único MGET (manifesto + status + telemetria).
+
 - `tempoReal.habilitado` — se as notificações estão configuradas;
 - `tempoReal.ultimaNotificacaoEm` / `ultimaNotificacaoPedido` / `ultimaNotificacaoTopico`;
 - `tempoReal.ultimoPedidoAtualizadoId` / `ultimoPedidoAtualizadoEm` / `ultimaAcao`;
