@@ -292,6 +292,19 @@ async function catalogoDaConta(
   const HARD = env.ITEMS_CATALOG_HARD_TTL_S;
   const ok = (corpo: object): RespostaCatalogo => ({ status: 200, corpo: { ok: true, ...corpo } });
 
+  // Amazon: o catálogo é publicado pela sincronização da Amazon
+  // (src/amazon/leitura.ts) e só é LIDO aqui — esta rota nunca o reconstrói,
+  // e nunca chama o Mercado Livre para uma conta Amazon. Velho é servido como
+  // tal, com aviso; ausente é `not_ready`.
+  if (conta.canal === 'amazon') {
+    let manAmz: CatalogManifest | null = null;
+    try { manAmz = await readCatalogManifest(cache); } catch { manAmz = null; }
+    if (!manAmz) return { status: 409, corpo: { error: 'not_ready', code: 'amazon_catalogo_nao_sincronizado' } };
+    const items = await lerCatalogoPublicado(cache, manAmz);
+    const avisos = [...(precisaReconstruir(manAmz, HARD) ? ['amazon_catalogo_desatualizado'] : []), ...(refresh ? ['amazon_refresh_pela_sincronizacao'] : [])];
+    return ok(montarResposta(manAmz, items, precisaReconstruir(manAmz, HARD) ? 'fallback_stale' : 'snapshot', SOFT, HARD, avisos));
+  }
+
   let manifest: CatalogManifest | null = null;
   let manifestoCorrompido = false;
   try {
@@ -405,6 +418,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const lidas = contas.map(c => ({ conta: c, cache: cacheDaConta(cacheGlobal, c) }));
 
+    // O inventário (próprio × Full, dias de cobertura) é do Mercado Livre. Para
+    // a Amazon o estoque está no catálogo, separado em próprio e FBA.
+    if (resource === 'inventory' && lidas.some(l => l.conta.canal === 'amazon')) {
+      return json(res, 400, { error: 'recurso_indisponivel_no_canal', canal: 'amazon', usar: 'catalog' });
+    }
     if (resource === 'inventory') return await responderInventario(req, res, lidas);
 
     // Allowlist de parâmetros do `catalog`: 400 determinístico para qualquer outro.

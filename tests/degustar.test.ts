@@ -217,9 +217,20 @@ describe('preparação: semear e carregar a Degustar ANTES de ligá-la', () => {
     expect(seed.json().error).toBe('conta_sem_credencial');
   });
 
-  it('preparação de conta sem adaptador (amazon): conta_sem_suporte', async () => {
-    const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon', preparacao: true } });
-    expect(r.json().error).toBe('conta_sem_suporte');
+  it('Amazon: a sincronização de admin tem adaptador e exige as credenciais; as demais ações seguem sem suporte', async () => {
+    // Sem a trava AMZ_ALEMMAR_ENABLED, nem a preparação passa.
+    delete process.env.AMZ_ALEMMAR_ENABLED;
+    const travada = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon', preparacao: true } });
+    expect(travada.json().error).toBe('conta_inativa');
+    process.env.AMZ_ALEMMAR_ENABLED = 'true';
+    try {
+      const r = await chamar(syncHandler, { method: 'POST', headers: admin(), body: { alvo: 'ativos', conta: 'alemmar-amazon', preparacao: true } });
+      expect(r.json().error).toBe('conta_sem_credencial');
+      const seed = await chamar(seedHandler, { method: 'POST', headers: admin(), body: { refreshToken: 'TG-x', conta: 'alemmar-amazon' } });
+      expect(seed.json().error).toBe('conta_sem_suporte');
+    } finally {
+      delete process.env.AMZ_ALEMMAR_ENABLED;
+    }
   });
 });
 
