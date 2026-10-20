@@ -193,7 +193,10 @@ describe('rotas existentes servem a Amazon (conta ativada só no teste)', () => 
     const amz = await sincronizar(cenarioCompleto());
     const st = (await chamar(ordersHandler, { query: { resource: 'status', alvo: 'ativos', contas: 'alemmar-amazon' }, headers: auth() })).json();
     expect(st).toMatchObject({ conta: 'alemmar-amazon', canal: 'amazon', totalRegistros: 5, lastResult: 'ok' });
-    expect(st.tempoReal.habilitado).toBe(false);
+    // tempoReal é diagnóstico (só com ?diagnostico=1); na Amazon vem desabilitado.
+    expect(st).not.toHaveProperty('tempoReal');
+    const diag = (await chamar(ordersHandler, { query: { resource: 'status', alvo: 'ativos', contas: 'alemmar-amazon', diagnostico: '1' }, headers: auth() })).json();
+    expect(diag.tempoReal.habilitado).toBe(false);
     expect(st.amazon).toMatchObject({ semAbaAberta: 'reconciliacao_agendada_sem_horario_garantido', ultimoPasso: { ok: true } });
     expect(st.amazon.pedidosLidosAte).toBeTruthy();
     const lista = (await chamar(ordersHandler, { query: { resource: 'list', alvo: 'ativos', contas: 'alemmar-amazon', pageSize: '50' }, headers: auth() })).json();
