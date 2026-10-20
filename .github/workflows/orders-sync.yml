@@ -2,7 +2,16 @@ name: Atualizar snapshot de pedidos
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    # Duas frequências, sem hora repetida (cada hora dispara UM evento só):
+    # - '17 */3 * * *' (00, 03, ..., 21 UTC): todos os jobs, inclusive a
+    #   reconciliação de pedidos (`sync`), que passou de hora em hora para a
+    #   cada 3 horas em 10/2026 para poupar a cota do Redis gratuito.
+    # - '17 1-23/3,2-23/3 * * *' (as demais horas): só `logistica` e
+    #   `notificacoes`, que continuam de hora em hora.
+    # O `if:` do job `sync` compara com o texto exato do primeiro cron: se
+    # mudar a expressão aqui, mude lá também. workflow_dispatch roda tudo.
+    - cron: '17 */3 * * *'
+    - cron: '17 1-23/3,2-23/3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -28,6 +37,10 @@ jobs:
     name: Sincronizar pedidos (${{ matrix.nome }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Reconciliação só no cron de 3 em 3 horas ou manual. Nas demais horas o
+    # job fica SKIPPED e `logistica`/`notificacoes` rodam assim mesmo
+    # (`if: always()` neles).
+    if: github.event_name != 'schedule' || github.event.schedule == '17 */3 * * *'
 
     strategy:
       # Um backend fora do ar NAO pode impedir a sincronizacao do outro.
@@ -42,7 +55,7 @@ jobs:
       # Esta rotina NUNCA envia `preparacao: true`: preparar uma conta (seed,
       # carga inicial antes de ativar) é ato deliberado de quem opera, com a
       # ADMIN_KEY, e não da automação — uma conta inativa e sem tokens aqui
-      # só produziria falha vermelha de hora em hora.
+      # só produziria falha vermelha a cada execução.
       matrix:
         include:
           - nome: oficial
@@ -74,8 +87,8 @@ jobs:
           CONTA: ${{ matrix.conta }}
           # O endpoint lê no máximo ORDERS_SYNC_MAX_PAGES (5) páginas por
           # invocação e devolve committedOffset para retomar. Repetimos até
-          # concluir em vez de esperar a próxima hora: uma chamada por hora
-          # levaria dias para recuperar um atraso grande.
+          # concluir em vez de esperar a próxima execução: uma chamada por
+          # execução levaria dias para recuperar um atraso grande.
           # Teto de 6: o rate limit do endpoint é 10 chamadas por 10 minutos.
           MAX_PASSOS: '6'
         run: |
