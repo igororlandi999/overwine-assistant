@@ -165,12 +165,15 @@ describe('28. nenhuma rota importa/chama mlFetch (garantia estática)', () => {
     expect(src).not.toMatch(/mlFetch\s*\(/);
     expect(src).not.toMatch(/mercadolibre/);
   });
-  it('o read-service não importa ml-auth, não chama mlFetch/readSnapshot, nem scan/keys/mget', () => {
+  it('o read-service não importa ml-auth, não chama mlFetch/readSnapshot, nem scan/keys; mget só no status', () => {
     const src = semComentarios(readFileSync(new URL('../src/services/orders-read.service.ts', import.meta.url), 'utf-8'));
     expect(src).not.toMatch(/from\s+['"][^'"]*ml-auth/);
     expect(src).not.toMatch(/mlFetch\s*\(/);
     expect(src).not.toMatch(/readSnapshot\s*\(/); // não chama a leitura-tudo
-    expect(src).not.toMatch(/\.scan\s*\(|\.keys\s*\(|\.mget\s*\(/);
+    expect(src).not.toMatch(/\.scan\s*\(|\.keys\s*\(/);
+    // MGET: uma única chamada, com as 3 chaves fixas do status — nunca chunks.
+    expect(src.match(/\.mget\s*\(/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/\.mget\(\[chaveManifesto\(alvo\), chaveStatusSync\(alvo\), CHAVE_OBS_SYNC\]\)/);
   });
 });
 
@@ -618,7 +621,8 @@ describe('GET /api/orders/status — telemetria de tempo real', () => {
     const sess = await comSessao();
     const res = mockRes();
     await handler(
-      mockReq({ query: { resource: 'status', alvo }, headers: { authorization: `Bearer ${sess}` } }),
+      // O bloco tempoReal é diagnóstico: só vem com ?diagnostico=1.
+      mockReq({ query: { resource: 'status', alvo, diagnostico: '1' }, headers: { authorization: `Bearer ${sess}` } }),
       res
     );
     return res;

@@ -7,12 +7,13 @@
  *
  * Garantias (decisões obrigatórias):
  * - Nenhum erro de página é engolido: fetch falho → retries → passo retomável.
- * - PROGRESSO NUNCA VIVE EM BUFFER LOCAL entre invocações. Toda página
- *   confirmada da invocação é gravada num BUILD chunk isolado
- *   (orders:build:chunk:{jobId}:{i}) ANTES de o committedOffset avançar.
- *   Invariante: página buscada → toSlim → build chunk gravado → chave
- *   registrada no job → committedOffset = próximo offset real da API → job
- *   persistido.
+ * - PROGRESSO NUNCA VIVE EM BUFFER LOCAL entre invocações. Uma invocação que
+ *   NÃO conclui grava toda página confirmada num BUILD chunk isolado
+ *   (orders:build:chunk:{jobId}:{i}) e o job, antes de retornar.
+ *   Invariante persistido: build chunks gravados → chaves registradas no job
+ *   → committedOffset = próximo offset real da API → job persistido. Uma
+ *   invocação que CONCLUI decide com as páginas em memória e não as grava
+ *   (B3: sem regravar os 250 pedidos revisados quando nada mudou).
  * - Full E incremental são jobs RETOMÁVEIS com committedOffset. Nenhum dos
  *   dois publica antes de a varredura terminar. FULL termina ao atingir o total
  *   ou página vazia. INCREMENTAL termina ao (a) revisar a janela de conhecidos
@@ -35,7 +36,6 @@ import {
   type Alvo,
   type OrdersManifest,
   readManifest,
-  readSnapshot,
   readChunkByKey,
   writeChunk,
   writeBuildChunk,
@@ -53,6 +53,8 @@ export const ORDERS_SYNC_LOCK_KEY = 'orders:sync:lock';
 const LOCK_KEY = ORDERS_SYNC_LOCK_KEY;
 const jobKey = (alvo: Alvo) => `orders:sync:job:${alvo}`;
 const statusKey = (alvo: Alvo) => `orders:sync:status:${alvo}`;
+/** Chave do status da sincronização (para leituras agrupadas em um MGET). */
+export const chaveStatusSync = statusKey;
 const LIMIT = 50;
 
 /**
@@ -207,7 +209,9 @@ export async function mesclarStatus(cache: Cache, alvo: Alvo, patch: Partial<Syn
   return novo;
 }
 export async function readStatus(cache: Cache, alvo: Alvo): Promise<SyncStatus | null> {
-  const raw = await cache.get(statusKey(alvo));
+  return parseStatusSync(await cache.get(statusKey(alvo)));
+}
+export function parseStatusSync(raw: string | null): SyncStatus | null {
   if (raw === null) return null;
   try {
     return JSON.parse(raw) as SyncStatus;
@@ -355,7 +359,7 @@ export async function runSyncStep(
     }
 
     if (modo === 'incremental') {
-      return await passoIncremental(cache, fetchPage, alvo, statusFetch, cfg, jobExistente);
+      return await passoIncremental(cache, fetchPage, alvo, statusFetch, cfg, jobExistente, manifestoPublicado);
     }
     return await passoFull(cache, fetchPage, alvo, statusFetch, cfg, jobExistente);
   } finally {
@@ -388,10 +392,20 @@ interface VarrerControl {
 }
 
 /**
- * Varre páginas a partir do committedOffset do job, gravando CADA página
- * confirmada num build chunk e avançando o cursor. Retorna o desfecho da
- * varredura para o chamador decidir publicação.
- * Retorna { encerrou, paginasLidas, coletados, erro? }.
+ * Varre páginas a partir do committedOffset do job e avança o cursor.
+ * Retorna o desfecho da varredura para o chamador decidir publicação.
+ * Retorna { encerrou, paginasLidas, coletados, emMemoria, erro? }.
+ *
+ * B3 (10/2026) — persistência só quando a invocação NÃO conclui. As páginas
+ * confirmadas ficam em memória durante a invocação e:
+ * - se a varredura ENCERRA aqui, voltam em `emMemoria` e o chamador decide
+ *   sem nunca gravá-las (no caso comum, "nada mudou", nada é regravado);
+ * - se a invocação termina parcial ou com erro, viram build chunks e o job é
+ *   gravado ANTES de retornar — o mesmo estado que a gravação página a
+ *   página deixava. O progresso continua nunca vivendo em memória ENTRE
+ *   invocações.
+ * Uma queda no meio da invocação perde só as páginas dela; o job anterior
+ * (se havia) continua válido e a próxima invocação refaz essas páginas.
  */
 async function varrer(
   cache: Cache,
@@ -405,6 +419,8 @@ async function varrer(
   paginasLidas: number;
   coletados: number;
   novosColetados: number;
+  /** Páginas desta invocação NÃO gravadas (só quando encerrou). */
+  emMemoria: OrderSlim[];
   erro?: string;
   limiteExcedido?: { total: number; limite: number };
 }> {
@@ -417,23 +433,36 @@ async function varrer(
   // Estado da janela incremental, retomável (defaults p/ jobs antigos).
   let boundaryReached = job.incrementalBoundaryReached ?? false;
   let knownReviewed = job.incrementalKnownReviewed ?? 0;
+  // Páginas confirmadas nesta invocação e ainda não gravadas (ver B3 acima).
+  const pendentes: OrderSlim[][] = [];
+  const emMemoria = () => pendentes.flat();
+  // Grava as pendentes como build chunks e o job, na ordem de antes.
+  const persistir = async () => {
+    for (const p of pendentes) {
+      job.chunkKeys.push(await writeBuildChunk(cache, job.jobId, chunkIndex, p));
+      chunkIndex++;
+    }
+    pendentes.length = 0;
+    await writeJob(cache, job);
+  };
 
   // Se o job já sabe o total de uma execução anterior e ele excede o limite,
   // aborta imediatamente (nada a publicar).
   if (Number.isFinite(total) && total > cfg.maxTotal) {
-    return { encerrou: false, paginasLidas, coletados, novosColetados, limiteExcedido: { total, limite: cfg.maxTotal } };
+    return { encerrou: false, paginasLidas, coletados, novosColetados, emMemoria: [], limiteExcedido: { total, limite: cfg.maxTotal } };
   }
 
   while (paginasLidas < cfg.maxPages) {
     // Conclusão normal: cursor alcançou o total reportado pela API.
     if (offset >= total) {
-      return { encerrou: true, paginasLidas, coletados, novosColetados };
+      return { encerrou: true, paginasLidas, coletados, novosColetados, emMemoria: emMemoria() };
     }
     let page: { results: OrderInput[]; total: number };
     try {
       page = await fetchPageComRetry(fetchPage, { offset, limit: LIMIT, status }, cfg.retries);
     } catch (e) {
-      return { encerrou: false, paginasLidas, coletados, novosColetados, erro: e instanceof Error ? e.message : 'erro' };
+      await persistir();
+      return { encerrou: false, paginasLidas, coletados, novosColetados, emMemoria: [], erro: e instanceof Error ? e.message : 'erro' };
     }
     total = page.total;
     job.total = total;
@@ -442,7 +471,8 @@ async function varrer(
     // Limite de SEGURANÇA (não é conclusão): total real acima do teto → aborta
     // sem publicar, com erro explícito. Nada persistido nesta página é usado.
     if (total > cfg.maxTotal) {
-      return { encerrou: false, paginasLidas, coletados, novosColetados, limiteExcedido: { total, limite: cfg.maxTotal } };
+      // O chamador descarta job e build chunks: não há o que gravar.
+      return { encerrou: false, paginasLidas, coletados, novosColetados, emMemoria: [], limiteExcedido: { total, limite: cfg.maxTotal } };
     }
 
     // Coleta da página.
@@ -472,11 +502,9 @@ async function varrer(
       }
     }
 
-    // Persistir o confirmado desta página num BUILD chunk ANTES de avançar.
+    // Confirmado desta página: entra nas pendentes ANTES de avançar o cursor.
     if (coletadosDaPagina.length > 0) {
-      const key = await writeBuildChunk(cache, job.jobId, chunkIndex, coletadosDaPagina);
-      chunkIndex++;
-      job.chunkKeys.push(key);
+      pendentes.push(coletadosDaPagina);
       coletados += coletadosDaPagina.length;
     }
     // Estado da janela persistido junto do job (retomável) — SÓ no incremental.
@@ -488,24 +516,23 @@ async function varrer(
 
     if (page.results.length === 0) {
       job.committedOffset = total;
-      await writeJob(cache, job);
-      return { encerrou: true, paginasLidas, coletados, novosColetados };
+      return { encerrou: true, paginasLidas, coletados, novosColetados, emMemoria: emMemoria() };
     }
 
-    // Avança committedOffset para o PRÓXIMO offset real da API e persiste o job.
+    // Avança committedOffset para o PRÓXIMO offset real da API.
     offset += LIMIT;
     job.committedOffset = offset;
-    await writeJob(cache, job);
 
     // Janela de revisão atingida (incremental): encerra a varredura com o
     // committedOffset já no próximo offset da API.
     if (atingiuJanela) {
-      return { encerrou: true, paginasLidas, coletados, novosColetados };
+      return { encerrou: true, paginasLidas, coletados, novosColetados, emMemoria: emMemoria() };
     }
   }
 
-  // maxPages atingido sem encerrar: parcial, retomável.
-  return { encerrou: false, paginasLidas, coletados, novosColetados };
+  // maxPages atingido sem encerrar: parcial, retomável — grava antes de sair.
+  await persistir();
+  return { encerrou: false, paginasLidas, coletados, novosColetados, emMemoria: [] };
 }
 
 // ── passo FULL ──────────────────────────────────────────────────────────────
@@ -527,7 +554,7 @@ async function passoFull(
     baseManifestVersion: null,
     iniciadoEm: new Date().toISOString(),
   };
-  if (!jobExistente) await writeJob(cache, job);
+  // Job novo só é gravado se a invocação não concluir (varrer persiste).
 
   const r = await varrer(cache, fetchPage, job, status, cfg, { conhecido: () => false, incremental: false });
 
@@ -546,12 +573,13 @@ async function passoFull(
     return { ok: true, concluido: false, retomavel: true, committedOffset: job.committedOffset, paginasLidas: r.paginasLidas, novosPedidos: r.coletados, motivo: 'parcial' };
   }
 
-  // Concluído: ler todos os build chunks, dedup, publicar canônico, limpar.
-  const todos = await lerBuildChunks(cache, job.chunkKeys);
+  // Concluído: build chunks de invocações anteriores + páginas desta (em
+  // memória, na ordem de leitura), dedup, publicar canônico, limpar.
+  const todos = [...(await lerBuildChunks(cache, job.chunkKeys)), ...r.emMemoria];
   const unicos = dedupById(todos as unknown as OrderInput[]) as unknown as OrderSlim[];
   const manifesto = await publicarSnapshot(cache, alvo, unicos, 'full', cfg.chunkSize);
   await deleteBuildChunks(cache, job.chunkKeys);
-  await clearJob(cache, alvo);
+  if (jobExistente) await clearJob(cache, alvo);
   await writeStatus(cache, alvo, {
     ultimaVersao: manifesto.versao, totalRegistros: manifesto.totalRegistros,
     newestDate: manifesto.newestDate, lastSyncAt: manifesto.updatedAt,
@@ -567,9 +595,10 @@ async function passoIncremental(
   alvo: Alvo,
   status: 'cancelled' | undefined,
   cfg: Cfg,
-  jobExistente: SyncJob | null
+  jobExistente: SyncJob | null,
+  // Lido por runSyncStep sob o MESMO lock: reler aqui só gastava um comando.
+  manifestoBase: OrdersManifest | null
 ): Promise<SyncStepResult> {
-  const manifestoBase = await readManifest(cache, alvo);
   if (!manifestoBase) {
     // sem base: é uma carga inicial disfarçada → trata como full.
     return passoFull(cache, fetchPage, alvo, status, cfg, jobExistente);
@@ -583,7 +612,9 @@ async function passoIncremental(
     jobExistente = null;
   }
 
-  const snapshotBase = await readSnapshot(cache, alvo);
+  // Mesmo conteúdo de readSnapshot (todos os chunks do manifesto, lança se
+  // faltar um), sem reler o manifesto que já está em mãos.
+  const snapshotBase = await lerBuildChunks(cache, manifestoBase.chunks);
   const conhecidos = new Set(snapshotBase.map(o => String(o.id)));
 
   const job: SyncJob = jobExistente ?? {
@@ -596,7 +627,7 @@ async function passoIncremental(
     baseManifestVersion: manifestoBase.versao,
     iniciadoEm: new Date().toISOString(),
   };
-  if (!jobExistente) await writeJob(cache, job);
+  // Job novo só é gravado se a invocação não concluir (varrer persiste).
 
   const r = await varrer(cache, fetchPage, job, status, cfg, {
     conhecido: o => conhecidos.has(String(o.id)),
@@ -621,7 +652,7 @@ async function passoIncremental(
   // Concluído. Os build chunks contêm os pedidos REVISADOS (novos + conhecidos
   // recoletados na janela). Dedup interno (primeiro visto vence) protege contra
   // um mesmo id aparecer em páginas distintas dentro da revisão.
-  const revisadosBrutos = await lerBuildChunks(cache, job.chunkKeys);
+  const revisadosBrutos = [...(await lerBuildChunks(cache, job.chunkKeys)), ...r.emMemoria];
   const revisados = dedupById(revisadosBrutos as unknown as OrderInput[]) as unknown as OrderSlim[];
 
   // Mapa da base para classificar cada revisado: novo, atualizado ou igual.
@@ -642,7 +673,7 @@ async function passoIncremental(
   // Nada novo E nada alterado → não publica; mantém versão atual.
   if (novosPedidos === 0 && atualizados === 0) {
     await deleteBuildChunks(cache, job.chunkKeys);
-    await clearJob(cache, alvo);
+    if (jobExistente) await clearJob(cache, alvo);
     const agoraIso = new Date().toISOString();
     await writeStatus(cache, alvo, {
       ultimaVersao: manifestoBase.versao, totalRegistros: snapshotBase.length,
@@ -657,7 +688,7 @@ async function passoIncremental(
   const merged = dedupById([...revisados, ...snapshotBase] as unknown as OrderInput[]) as unknown as OrderSlim[];
   const manifesto = await publicarSnapshot(cache, alvo, merged, 'incremental', cfg.chunkSize);
   await deleteBuildChunks(cache, job.chunkKeys);
-  await clearJob(cache, alvo);
+  if (jobExistente) await clearJob(cache, alvo);
   await writeStatus(cache, alvo, {
     ultimaVersao: manifesto.versao, totalRegistros: manifesto.totalRegistros,
     newestDate: manifesto.newestDate, lastSyncAt: manifesto.updatedAt,

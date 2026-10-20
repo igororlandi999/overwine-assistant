@@ -28,6 +28,7 @@ export class FakeCache implements Cache {
     this.store.delete(k);
     return true;
   }
+  async mget(ks: string[]) { return ks.map(k => this.alive(k)); }
   async incr(k: string, ttl: number) {
     const cur = parseInt(this.alive(k) || '0') || 0;
     const n = cur + 1;

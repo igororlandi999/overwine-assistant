@@ -78,7 +78,12 @@ export function buildChunkKey(jobId: string, i: number): string {
   return `orders:build:chunk:${jobId}:${i}`;
 }
 
-function parseManifest(raw: string | null): OrdersManifest | null {
+/** Chave do manifesto publicado (para leituras agrupadas em um MGET). */
+export function chaveManifesto(alvo: Alvo): string {
+  return prefixos(alvo).manifest;
+}
+
+export function parseManifest(raw: string | null): OrdersManifest | null {
   if (raw === null) return null;
   let m: unknown;
   try {

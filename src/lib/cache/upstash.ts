@@ -48,6 +48,12 @@ export class UpstashCache implements Cache {
     return n;
   }
 
+  async mget(keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
+    const r = (await this.redis.mget<unknown[]>(...keys)) as unknown[];
+    return keys.map((_, i) => (r?.[i] === undefined || r?.[i] === null ? null : String(r[i])));
+  }
+
   async rpush(key: string, ...values: string[]): Promise<number> {
     if (values.length === 0) return this.llen(key);
     return this.redis.rpush(key, ...values);
