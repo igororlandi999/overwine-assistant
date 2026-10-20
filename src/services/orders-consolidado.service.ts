@@ -245,7 +245,7 @@ function fundirTempoReal(ts: OrdersRealtimeStatus[]): OrdersRealtimeStatus {
 export async function statusConsolidado(
   lidas: readonly ContaLida[],
   alvo: Alvo,
-  opts: { notificacoesHabilitadas?: boolean } = {}
+  opts: { notificacoesHabilitadas?: boolean; diagnostico?: boolean } = {}
 ): Promise<StatusConsolidado> {
   const porConta: Record<string, OrdersReadStatus> = {};
   const todos: OrdersReadStatus[] = [];
@@ -280,7 +280,10 @@ export async function statusConsolidado(
     agora: todos[0].agora,
     idadeCheckSegundos: todos.some(t => t.idadeCheckSegundos === null) ? null : maior(todos.map(t => t.idadeCheckSegundos)),
     ultimaRevisaoEm: todos.some(t => t.ultimaRevisaoEm === null) ? null : maisAntigo(todos.map(t => t.ultimaRevisaoEm)),
-    tempoReal: fundirTempoReal(todos.map(t => t.tempoReal)),
+    // Diagnóstico só sob pedido (ver getReadStatus).
+    ...(opts.diagnostico === true
+      ? { tempoReal: fundirTempoReal(todos.map(t => t.tempoReal as OrdersRealtimeStatus)) }
+      : {}),
     // Telemetria não se funde: é um diário por conta. No topo vai a da conta
     // mais atrasada (a que explica "por que a tela parou"); o resto, em porConta.
     sincronizacao: todos.reduce((m, t) => ((t.idadeCheckSegundos ?? Infinity) > (m.idadeCheckSegundos ?? Infinity) ? t : m), todos[0]).sincronizacao,

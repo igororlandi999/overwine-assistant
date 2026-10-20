@@ -53,6 +53,8 @@ export const ORDERS_SYNC_LOCK_KEY = 'orders:sync:lock';
 const LOCK_KEY = ORDERS_SYNC_LOCK_KEY;
 const jobKey = (alvo: Alvo) => `orders:sync:job:${alvo}`;
 const statusKey = (alvo: Alvo) => `orders:sync:status:${alvo}`;
+/** Chave do status da sincronização (para leituras agrupadas em um MGET). */
+export const chaveStatusSync = statusKey;
 const LIMIT = 50;
 
 /**
@@ -207,7 +209,9 @@ export async function mesclarStatus(cache: Cache, alvo: Alvo, patch: Partial<Syn
   return novo;
 }
 export async function readStatus(cache: Cache, alvo: Alvo): Promise<SyncStatus | null> {
-  const raw = await cache.get(statusKey(alvo));
+  return parseStatusSync(await cache.get(statusKey(alvo)));
+}
+export function parseStatusSync(raw: string | null): SyncStatus | null {
   if (raw === null) return null;
   try {
     return JSON.parse(raw) as SyncStatus;
