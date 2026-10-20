@@ -51,7 +51,10 @@ function janela(persistente: boolean): { ttlS: number; maxMs: number; renovarApo
     // Renovar o TTL de 30 dias a cada uso seria uma escrita por requisição;
     // uma por hora basta para a janela deslizante e não muda o resultado.
     ? { ttlS: PERSISTENT_SLIDING_TTL_S, maxMs: PERSISTENT_ABSOLUTE_MAX_MS, renovarAposMs: 3600_000 }
-    : { ttlS: SLIDING_TTL_S, maxMs: ABSOLUTE_MAX_MS, renovarAposMs: 60_000 };
+    // Sessão comum: renova a cada 5 min (era 1 min). Com o poll de status a
+    // cada 60 s, renovar por minuto era uma escrita a mais em quase toda
+    // consulta; numa janela deslizante de 12 h, 5 min não mudam nada.
+    : { ttlS: SLIDING_TTL_S, maxMs: ABSOLUTE_MAX_MS, renovarAposMs: 300_000 };
 }
 
 export async function createSession(
