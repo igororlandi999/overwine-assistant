@@ -48,6 +48,7 @@ import {
   type FetchItemIds, type FetchItemsBatch, type ItemBruto, type StatusCatalogo,
 } from '../../src/services/items-catalog.service.js';
 import { lerCatalogoVerificadoEm, referenciaDeFrescor } from '../../src/amazon/leitura.js';
+import { IDADE_MAX_CATALOGO_MS } from '../../src/amazon/refresh.js';
 import { LIMITES_CLASSIFICACAO, type ModoEstoque } from '../../src/services/inventory.service.js';
 import {
   lerInventario, resolverPeriodoInventario,
@@ -307,7 +308,10 @@ async function catalogoDaConta(
     const ref = { ...manAmz, updatedAt: referenciaDeFrescor(manAmz.updatedAt, verificadoEm) };
     const velho = precisaReconstruir(ref, HARD);
     const avisos = [...(velho ? ['amazon_catalogo_desatualizado'] : []), ...(refresh ? ['amazon_refresh_pela_sincronizacao'] : [])];
-    return ok({ ...montarResposta(ref, items, velho ? 'fallback_stale' : 'snapshot', SOFT, HARD, avisos), updatedAt: manAmz.updatedAt, verificadoEm });
+    // Amazon: desatualizado só depois de 6 h sem consulta completa, o mesmo prazo em
+    // que o refresh da aba volta a consultar o catálogo (ML segue com o SOFT do env).
+    const softAmz = IDADE_MAX_CATALOGO_MS / 1000;
+    return ok({ ...montarResposta(ref, items, velho ? 'fallback_stale' : 'snapshot', softAmz, HARD, avisos), updatedAt: manAmz.updatedAt, verificadoEm });
   }
 
   let manifest: CatalogManifest | null = null;
