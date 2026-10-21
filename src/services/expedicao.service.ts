@@ -266,8 +266,15 @@ export const TTL_PRAZO_AUSENTE_S = 5 * 60;
 export const COOLDOWN_429_S = 60;
 
 export const CHAVE_COOLDOWN = 'exped:cooldown';
-const chaveEnvio = (id: string) => `exped:env:${id}`;
-const chavePrazo = (id: string) => `exped:prazo:${id}`;
+/**
+ * Versão das chaves de envio e prazo. Sobe quando a forma de LER o ML muda:
+ * v2 = /lead_time com x-format-new. Resultados v1 (gravados sem o cabeçalho,
+ * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
+ * sozinhos.
+ */
+export const VERSAO_CHAVES = 'v2';
+const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
+const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
 
 /** Ids por requisição. Acima disso o dashboard fatia. */
 export const MAX_IDS = 50;

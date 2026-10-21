@@ -562,7 +562,33 @@ describe('op expedicao-envios (proxy)', () => {
     expect(urls).toEqual(Object.keys(respostas).sort());
     for (const [url, init] of spy.mock.calls) {
       expect(String(url)).not.toContain('access_token');
-      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer AT-teste');
+      const h = init?.headers as Record<string, string>;
+      expect(h.Authorization).toBe('Bearer AT-teste');
+      // Só o /lead_time pede o formato novo; envio e histórico seguem no validado.
+      expect(h['x-format-new'], String(url)).toBe(String(url).endsWith('/lead_time') ? 'true' : undefined);
     }
+  });
+
+  it('diagnóstico: compara /lead_time com e sem x-format-new, sem nada pessoal', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const novo = (init?.headers as Record<string, string>)['x-format-new'] === 'true';
+      const corpo = novo
+        ? { estimated_handling_limit: { date: '2026-10-22T00:00:00.000-03:00' }, buffering: { date: null },
+            receiver_address: { street_name: 'Rua Secreta', zip_code: '01234-000' }, buyer: { nickname: 'FULANO' },
+            shipping_method: { id: 182, name: 'Normal', type: 'standard' }, cost: 19.9 }
+        : { estimated_delivery_time: { date: '2026-10-27T00:00:00.000-03:00' }, cost: 19.9 };
+      return new Response(JSON.stringify(corpo), { status: 200 }) as unknown as Response;
+    });
+    const r = await runOp(cache, 'expedicao-diagnostico', { id: '48313826973' }, TEST_ENV.ML_USER_ID);
+    expect(r.status).toBe(200);
+    const d = r.data as { leadTimeComHeader: { campos: Record<string, unknown> }; leadTimeSemHeader: { campos: Record<string, unknown> } };
+    expect(d.leadTimeComHeader.campos['estimated_handling_limit.date']).toBe('2026-10-22T00:00:00.000-03:00');
+    expect(d.leadTimeSemHeader.campos['estimated_delivery_time.date']).toBe('2026-10-27T00:00:00.000-03:00');
+    expect(d.leadTimeComHeader.campos.cost).toBe('<number>');  // fora da lista: só o tipo
+    const texto = JSON.stringify(r.data);
+    for (const proibido of ['Rua Secreta', '01234', 'FULANO', 'receiver', 'buyer', 'shipping_method.name']) {
+      expect(texto, proibido).not.toContain(proibido);
+    }
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });
