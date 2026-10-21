@@ -15,7 +15,7 @@ import { createSession } from '../src/lib/session.js';
 import { contaPorId, type Conta } from '../src/config/contas.js';
 import { cacheDaConta } from '../src/lib/cache/conta-cache.js';
 import { type OrdersManifest, writeChunk, publishManifest, readManifest } from '../src/lib/orders-store.js';
-import { readCatalogManifest } from '../src/lib/items-store.js';
+import { readCatalogManifest, writeCatalogChunk, publishCatalog } from '../src/lib/items-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import { STATUS_VENDA_AMAZON, contaComoVenda, STATUS_VENDA } from '../src/lib/status-venda.js';
 import { STATUS_AMAZON, referenciaDeFrescor, CHAVE_CATALOGO_VERIFICADO, projetarPedido, projetarCatalogo, modalidadeDoPedido, statusDeLeitura } from '../src/amazon/leitura.js';
@@ -395,21 +395,50 @@ describe('catálogo Amazon: frescor pela última consulta completa, não pela ú
 
   it('consulta de anúncios sem sucesso não conta como verificação: continua desatualizado', async () => {
     await sincronizar(cenarioCompleto());
-    vi.setSystemTime(AGORA + 2 * H);
+    vi.setSystemTime(AGORA + 7 * H);
     usarAmazon({ ...cenarioCompleto(), semPermissao: ['searchListingsItems'] });
     const r = await executarPassoAmazon(amzCache(), conta);
     expect(r.etapas.anuncios?.status).toBe('sem_permissao');
     expect(await amzCache().get(CHAVE_CATALOGO_VERIFICADO)).toBe(new Date(AGORA).toISOString());
     const cat = await catalogo();
-    expect(cat.freshness).toMatchObject({ ageSeconds: 7200, stale: true });
+    expect(cat.freshness).toMatchObject({ ageSeconds: 7 * 3600, stale: true });
   });
 
   it('passo só de pedidos/financeiro não renova a verificação do catálogo', async () => {
     await sincronizar(cenarioCompleto());
-    vi.setSystemTime(AGORA + 2 * H);
+    vi.setSystemTime(AGORA + 7 * H);
     usarAmazon(cenarioCompleto());
     await executarPassoAmazon(amzCache(), conta, { etapas: ['pedidos', 'financeiro'] });
     expect((await catalogo()).freshness.stale).toBe(true);
+  });
+
+  it('Amazon: desatualizado só depois de 6 h sem consulta completa; updatedAt e verificadoEm mantêm o significado', async () => {
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 2 * H);
+    await sincronizar(cenarioCompleto());                                   // consulta completa, conteúdo igual
+    vi.setSystemTime(AGORA + 2 * H + 6 * H - 60_000);                       // 5 h 59 min depois da consulta
+    let cat = await catalogo();
+    expect(cat.freshness).toMatchObject({ stale: false, softTtlSeconds: 6 * 3600 });
+    expect(cat.updatedAt).toBe(new Date(AGORA).toISOString());              // última mudança de conteúdo
+    expect(cat.verificadoEm).toBe(new Date(AGORA + 2 * H).toISOString());   // última consulta completa
+    expect(cat.warnings).not.toContain('amazon_catalogo_desatualizado');
+    vi.setSystemTime(AGORA + 2 * H + 6 * H + 60_000);                       // 6 h 1 min
+    cat = await catalogo();
+    expect(cat.freshness).toMatchObject({ stale: true, softTtlSeconds: 6 * 3600 });
+    expect(cat.updatedAt).toBe(new Date(AGORA).toISOString());
+    expect(cat.verificadoEm).toBe(new Date(AGORA + 2 * H).toISOString());
+  });
+
+  it('Mercado Livre continua com a regra atual (soft TTL do ambiente, 15 min)', async () => {
+    const itemMl = { id: 'MLB1', title: 'Vinho ML', status: 'active', seller_custom_field: '21003' } as any;
+    const chave = await writeCatalogChunk(cache, 1, 0, [itemMl]);
+    await publishCatalog(cache, { versao: 1, chunks: [chave], counts: { total: 1, active: 1, paused: 0, closed: 0 }, chunkSize: 500, updatedAt: new Date(AGORA).toISOString(), complete: true });
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 30 * 60_000);
+    const ml = (await chamar(itemsHandler, { query: { resource: 'catalog', contas: 'overwine-ml' }, headers: auth() })).json();
+    expect(ml.freshness).toMatchObject({ stale: true, softTtlSeconds: 900, ageSeconds: 1800 });
+    expect(ml).not.toHaveProperty('verificadoEm');
+    expect((await catalogo()).freshness).toMatchObject({ stale: false, softTtlSeconds: 6 * 3600 });
   });
 
   it('refresh: catálogo verificado há menos de 6 h não é varrido de novo, mesmo sem mudança há mais de 6 h', async () => {
