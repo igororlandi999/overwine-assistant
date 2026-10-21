@@ -23,7 +23,7 @@ import { sincronizarPedidos, estadoPedidos } from './pedidos.js';
 import { sincronizarAnuncios, sincronizarEstoqueFba, lerEstadoEstoqueFba } from './catalogo.js';
 import { sincronizarFinanceiro, lerCoberturaFinanceira } from './financeiro.js';
 import { lerManifesto } from './store.js';
-import { publicarLeitura } from './leitura.js';
+import { publicarLeitura, CHAVE_CATALOGO_VERIFICADO } from './leitura.js';
 
 export type EtapaAmazon = 'pedidos' | 'anuncios' | 'estoque_fba' | 'financeiro';
 export const ETAPAS_AMAZON: readonly EtapaAmazon[] = ['pedidos', 'anuncios', 'estoque_fba', 'financeiro'];
@@ -127,6 +127,10 @@ export async function executarPassoAmazon(cache: Cache, conta: Conta, o: OpcoesP
       agora: new Date(agora()), origem: o.origem ?? 'incremental', checouAmazon: consultou,
       resultado: ep === 'concluida' ? 'ok' : ep === 'erro' || ep === 'sem_permissao' ? 'erro_parcial' : 'parcial',
     });
+    const fba = res.etapas.estoque_fba?.status;
+    if (res.etapas.anuncios?.status === 'concluida' && (fba === 'concluida' || fba === 'sem_permissao')) {
+      await cache.set(CHAVE_CATALOGO_VERIFICADO, new Date(agora()).toISOString());
+    }
     res.limites = await cliente.limites();
     await cache.set(K.ultimo, JSON.stringify({ em: new Date(agora()).toISOString(), ok: res.ok, motivo: res.motivo ?? null, etapas: res.etapas }));
     return res;

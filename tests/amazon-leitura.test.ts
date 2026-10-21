@@ -15,9 +15,10 @@ import { createSession } from '../src/lib/session.js';
 import { contaPorId, type Conta } from '../src/config/contas.js';
 import { cacheDaConta } from '../src/lib/cache/conta-cache.js';
 import { type OrdersManifest, writeChunk, publishManifest, readManifest } from '../src/lib/orders-store.js';
+import { readCatalogManifest } from '../src/lib/items-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
 import { STATUS_VENDA_AMAZON, contaComoVenda, STATUS_VENDA } from '../src/lib/status-venda.js';
-import { STATUS_AMAZON, projetarPedido, projetarCatalogo, modalidadeDoPedido, statusDeLeitura } from '../src/amazon/leitura.js';
+import { STATUS_AMAZON, referenciaDeFrescor, CHAVE_CATALOGO_VERIFICADO, projetarPedido, projetarCatalogo, modalidadeDoPedido, statusDeLeitura } from '../src/amazon/leitura.js';
 import { normalizarPedido } from '../src/amazon/pedidos.js';
 import { normalizarAnuncio } from '../src/amazon/catalogo.js';
 import { executarPassoAmazon } from '../src/amazon/sync.service.js';
@@ -361,6 +362,78 @@ describe('refresh com o dashboard aberto, dentro das cotas', () => {
     await publicarOverwine();
     await chamar(refreshHandler, { method: 'POST', headers: auth(), body: {} }).catch(() => null);
     expect(amz.chamadas.length).toBe(n);
+  });
+});
+
+// ── 4b. Frescor do catálogo: última consulta × última mudança ─────────────
+describe('catálogo Amazon: frescor pela última consulta completa, não pela última mudança', () => {
+  const H = 3600_000;
+  const catalogo = async () => (await chamar(itemsHandler, { query: { resource: 'catalog', contas: 'alemmar-amazon' }, headers: auth() })).json();
+  const varreuCatalogo = (amz: { chamadas: Array<{ operationId: string | null }> }, desde: number) => amz.chamadas.slice(desde).some(c => c.operationId === 'searchListingsItems');
+
+  it('referenciaDeFrescor: o mais recente dos dois; valor ausente ou mais antigo não muda nada', () => {
+    const a = '2026-10-01T12:00:00.000Z', b = '2026-10-01T14:00:00.000Z';
+    expect(referenciaDeFrescor(a, b)).toBe(b);
+    expect(referenciaDeFrescor(b, a)).toBe(b);
+    expect(referenciaDeFrescor(a, null)).toBe(a);
+  });
+
+  it('consulta completa sem mudança: não regrava o catálogo e não acusa desatualizado', async () => {
+    await sincronizar(cenarioCompleto());
+    const man1 = (await readCatalogManifest(amzCache()))!;
+    vi.setSystemTime(AGORA + 2 * H);
+    await sincronizar(cenarioCompleto());
+    const man2 = (await readCatalogManifest(amzCache()))!;
+    expect([man2.versao, man2.updatedAt, man2.chunks]).toEqual([man1.versao, man1.updatedAt, man1.chunks]);
+    const cat = await catalogo();
+    expect(cat.updatedAt).toBe(new Date(AGORA).toISOString());               // última mudança de conteúdo
+    expect(cat.verificadoEm).toBe(new Date(AGORA + 2 * H).toISOString());    // última consulta completa
+    expect(cat.freshness).toMatchObject({ ageSeconds: 0, stale: false });
+    expect(cat.source).toBe('snapshot');
+    expect(cat.warnings).not.toContain('amazon_catalogo_desatualizado');
+  });
+
+  it('consulta de anúncios sem sucesso não conta como verificação: continua desatualizado', async () => {
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 2 * H);
+    usarAmazon({ ...cenarioCompleto(), semPermissao: ['searchListingsItems'] });
+    const r = await executarPassoAmazon(amzCache(), conta);
+    expect(r.etapas.anuncios?.status).toBe('sem_permissao');
+    expect(await amzCache().get(CHAVE_CATALOGO_VERIFICADO)).toBe(new Date(AGORA).toISOString());
+    const cat = await catalogo();
+    expect(cat.freshness).toMatchObject({ ageSeconds: 7200, stale: true });
+  });
+
+  it('passo só de pedidos/financeiro não renova a verificação do catálogo', async () => {
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 2 * H);
+    usarAmazon(cenarioCompleto());
+    await executarPassoAmazon(amzCache(), conta, { etapas: ['pedidos', 'financeiro'] });
+    expect((await catalogo()).freshness.stale).toBe(true);
+  });
+
+  it('refresh: catálogo verificado há menos de 6 h não é varrido de novo, mesmo sem mudança há mais de 6 h', async () => {
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 5 * H);
+    await sincronizar(cenarioCompleto());
+    vi.setSystemTime(AGORA + 7 * H);
+    const amz = usarAmazon(cenarioCompleto());
+    const r = (await chamar(refreshHandler, { method: 'POST', headers: auth(), body: { conta: 'alemmar-amazon' } })).json();
+    expect(r.acao).toBe('sincronizado');
+    expect(varreuCatalogo(amz, 0)).toBe(false);
+    expect(r.etapas.anuncios).toBeUndefined();
+  });
+
+  it('refresh: sem verificação recente (> 6 h), o catálogo é varrido e a verificação renovada', async () => {
+    await sincronizar(cenarioCompleto());
+    await amzCache().del(CHAVE_CATALOGO_VERIFICADO);
+    vi.setSystemTime(AGORA + 7 * H);
+    const amz = usarAmazon(cenarioCompleto());
+    const r = (await chamar(refreshHandler, { method: 'POST', headers: auth(), body: { conta: 'alemmar-amazon' } })).json();
+    expect(r.etapas.anuncios?.status).toBe('concluida');
+    expect(varreuCatalogo(amz, 0)).toBe(true);
+    expect(await amzCache().get(CHAVE_CATALOGO_VERIFICADO)).toBe(new Date(AGORA + 7 * H).toISOString());
+    expect((await catalogo()).freshness.stale).toBe(false);
   });
 });
 
