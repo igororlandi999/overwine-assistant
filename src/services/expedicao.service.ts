@@ -27,6 +27,7 @@
  *   ready_to_ship/dropped_off            deixado na agência ou ponto
  *   ready_to_ship/picked_up              coletado
  *   ready_to_ship/authorized_by_carrier  aceito pela transportadora
+ *   ready_to_ship/in_hub                 já no centro da logística do ML
  *   shipped, delivered, not_delivered    já em trânsito ou além
  *
  * NÃO contam: pagamento aprovado, etiqueta gerada (ready_to_print), etiqueta
@@ -99,6 +100,11 @@ export interface EnvioExpedicao {
   substatus: string | null;
   /** Prazo oficial de postagem, 'YYYY-MM-DD' (dia, em Brasília, do expected_date do /sla). */
   prazoPostagem: string | null;
+  /**
+   * Horário-limite do SLA, como o ML enviou (`expected_date`), quando ele traz
+   * hora de verdade. null quando o prazo é só uma data (meia-noite) ou não veio.
+   */
+  prazoLimiteEm: string | null;
   /** `status` do /sla como o ML enviou (ex.: on_time, delayed), sem tradução. */
   slaStatus: string | null;
   /**
@@ -138,8 +144,24 @@ export const STATUS_DESPACHADO = new Set(['shipped', 'delivered', 'not_delivered
  */
 export const STATUS_PENDENTE = new Set(['pending', 'handling', 'ready_to_ship']);
 
-/** Substatus de ready_to_ship em que o pacote já saiu da mão do vendedor. */
-export const SUBSTATUS_DESPACHO = new Set(['dropped_off', 'picked_up', 'authorized_by_carrier']);
+/**
+ * Substatus de ready_to_ship em que o pacote já saiu da mão do vendedor.
+ * `in_hub`: o pacote está no centro da logística do ML — já foi entregue a ela
+ * (caso real 48265507555, 21/10/2026, que sem isto aparecia como atrasado).
+ */
+export const SUBSTATUS_DESPACHO = new Set(['dropped_off', 'picked_up', 'authorized_by_carrier', 'in_hub']);
+
+/**
+ * Substatus de ready_to_ship em que o pacote AINDA está com o vendedor. Lista
+ * fechada, como STATUS_PENDENTE: um substatus novo do ML não vira "pendente"
+ * (e atraso falso) por exclusão — sai como 'outro', com o substatus no aviso.
+ * Sem substatus conta como pendente.
+ */
+export const SUBSTATUS_RTS_PENDENTE = new Set([
+  'ready_to_print', 'printed', 'label_generated', 'invoice_pending', 'in_packing_list',
+  'ready_to_pack', 'packed', 'in_pickup_list', 'ready_for_pickup', 'ready_for_dropoff',
+  'waiting_for_carrier_authorization',
+]);
 
 /**
  * Status de ENVIO cancelado. Não confundir com status de PEDIDO, que tem regra
@@ -249,6 +271,15 @@ export function extrairPrazo(data: unknown): string | null {
   return diaDoPrazo(o?.expected_date) ?? diaDoPrazo(obj(o?.estimated_handling_limit)?.date);
 }
 
+/** Instante-limite do SLA, cru, só quando tem hora real (não meia-noite). */
+export function extrairLimite(data: unknown): string | null {
+  const raiz = obj(data);
+  const o = obj(raiz?.data) ?? raiz;
+  const s = str(o?.expected_date);
+  if (!s || !/T\d{2}:\d{2}/.test(s) || /T00:00:00(\.0+)?(Z|[+-]\d{2}:?\d{2})?$/.test(s)) return null;
+  return Number.isFinite(Date.parse(s)) ? s : null;
+}
+
 export function extrairSlaStatus(data: unknown): string | null {
   const raiz = obj(data);
   const o = obj(raiz?.data) ?? raiz;
@@ -298,11 +329,12 @@ export const COOLDOWN_429_S = 60;
 export const CHAVE_COOLDOWN = 'exped:cooldown';
 /**
  * Versão das chaves de envio e prazo. Sobe quando a forma de LER o ML muda:
- * v2 = /lead_time com x-format-new; v3 = prazo do /sla. Resultados v1 (gravados sem o cabeçalho,
+ * v2 = /lead_time com x-format-new; v3 = prazo do /sla; v4 = in_hub como
+ * despacho e horário-limite do SLA (resultados v3 de in_hub diziam pendente). Resultados v1 (gravados sem o cabeçalho,
  * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
  * sozinhos.
  */
-export const VERSAO_CHAVES = 'v3';
+export const VERSAO_CHAVES = 'v4';
 const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
 const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
 
@@ -358,7 +390,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
   };
 }
 
@@ -387,7 +419,7 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
@@ -396,13 +428,17 @@ async function resolverEnvio(
   if (!despachou && !STATUS_PENDENTE.has(d.status)) {
     return { ...base, situacao: 'outro', avisos: [`status_nao_mapeado:${d.status}`] };
   }
+  if (!despachou && d.status === 'ready_to_ship' && d.substatus && !SUBSTATUS_RTS_PENDENTE.has(d.substatus)) {
+    return { ...base, situacao: 'outro', avisos: [`substatus_nao_mapeado:ready_to_ship/${d.substatus}`] };
+  }
 
   // Prazo oficial: cache próprio → /sla → campo antigo do próprio envio.
   let prazo: string | null = null;
-  const prazoCache = await lerJSON<{ prazo: string | null; sla?: string | null }>(cache, chavePrazo(id));
+  const prazoCache = await lerJSON<{ prazo: string | null; sla?: string | null; limite?: string | null }>(cache, chavePrazo(id));
   if (prazoCache) {
     prazo = prazoCache.prazo;
     base.slaStatus = prazoCache.sla ?? null;
+    base.prazoLimiteEm = prazoCache.limite ?? null;
   } else {
     const rPrazo = await chamar(f.prazo);
     let lido = false;
@@ -410,6 +446,7 @@ async function resolverEnvio(
       lido = true;
       prazo = extrairPrazo(rPrazo.data);
       base.slaStatus = extrairSlaStatus(rPrazo.data);
+      base.prazoLimiteEm = prazo ? extrairLimite(rPrazo.data) : null;
       if (!prazo) base.avisos.push('sla_sem_prazo');
     } else {
       base.avisos.push(`sla_http_${rPrazo.status}`);
@@ -420,8 +457,8 @@ async function resolverEnvio(
     }
     // Prazo lido fica 20 min. Resposta 200 sem prazo fica 5 min (ausência
     // confirmada). Falha de rede ou HTTP de erro NÃO é cacheada.
-    if (prazo) await cache.set(chavePrazo(id), JSON.stringify({ prazo, sla: base.slaStatus }), TTL_PRAZO_S);
-    else if (lido) await cache.set(chavePrazo(id), JSON.stringify({ prazo: null, sla: base.slaStatus }), TTL_PRAZO_AUSENTE_S);
+    if (prazo) await cache.set(chavePrazo(id), JSON.stringify({ prazo, sla: base.slaStatus, limite: base.prazoLimiteEm }), TTL_PRAZO_S);
+    else if (lido) await cache.set(chavePrazo(id), JSON.stringify({ prazo: null, sla: base.slaStatus, limite: null }), TTL_PRAZO_AUSENTE_S);
   }
   base.prazoPostagem = prazo;
   if (!prazo) base.avisos.push('prazo_nao_informado');

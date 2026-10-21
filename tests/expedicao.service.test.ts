@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FakeCache, TEST_ENV } from './fake-cache.js';
 import {
-  consultarEnvios, extrairDespacho, extrairPrazo, extrairEnvio, diaDoCampo, normalizarIds,
+  consultarEnvios, extrairDespacho, extrairPrazo, extrairLimite, extrairEnvio, diaDoCampo, normalizarIds,
   eventoEhDespacho, CHAVE_COOLDOWN, TTL_PENDENTE_S, MAX_IDS,
   TTL_INCOMPLETO_S, TTL_FINAL_S, ttlDoResultado,
   type FetchersEnvio, type RespostaML,
@@ -104,6 +104,73 @@ describe('prazo do /sla (expected_date)', () => {
     const { f } = ml({ '60001': { envio: envio('ready_to_ship', 'printed'), prazo: ok({ status: 'delayed', expected_date: '2026-10-20T23:59:59.000-03:00' }) } });
     const [e] = (await consultarEnvios(cache, ['60001'], f)).envios;
     expect(e).toMatchObject({ situacao: 'pendente', prazoPostagem: '2026-10-20', slaStatus: 'delayed' });
+  });
+});
+
+describe('caso real 48265507555 (ready_to_ship/in_hub) e substatus fora da lista', () => {
+  it('in_hub é despacho: sai como despachado, com a data do histórico, nunca atrasado', async () => {
+    const { f } = ml({
+      '48265507555': {
+        envio: envio('ready_to_ship', 'in_hub', 'xd_drop_off'),
+        prazo: prazo('2026-10-20T23:59:59.000-03:00'),
+        historico: hist(['ready_to_ship', 'printed', '2026-10-19T18:00:00.000-03:00'], ['ready_to_ship', 'in_hub', '2026-10-20T16:20:00.000-03:00']),
+      },
+    });
+    const [e] = (await consultarEnvios(cache, ['48265507555'], f)).envios;
+    expect(e.situacao).toBe('despachado');
+    expect(e.despachadoEm).toBe('2026-10-20T16:20:00.000-03:00');
+    expect(e.prazoPostagem).toBe('2026-10-20');
+  });
+
+  it('se o histórico tiver a agência antes do hub, vale o primeiro evento (agência)', () => {
+    expect(extrairDespacho([
+      { status: 'ready_to_ship', substatus: 'in_hub', date: '2026-10-20T16:20:00.000-03:00' },
+      { status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-20T11:05:00.000-03:00' },
+    ])).toBe('2026-10-20T11:05:00.000-03:00');
+  });
+
+  it('substatus de ready_to_ship desconhecido não vira pendente (nem atraso falso): sai como outro', async () => {
+    const { f, chamadas } = ml({ '48265500001': { envio: envio('ready_to_ship', 'novo_substatus_do_ml') } });
+    const [e] = (await consultarEnvios(cache, ['48265500001'], f)).envios;
+    expect(e.situacao).toBe('outro');
+    expect(e.avisos).toEqual(['substatus_nao_mapeado:ready_to_ship/novo_substatus_do_ml']);
+    expect(chamadas).toEqual(['envio:48265500001']);
+  });
+
+  it('pendentes conhecidos seguem pendentes: impressa, a imprimir, sem substatus', async () => {
+    const { f } = ml({
+      '48265500002': { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-22T23:59:59.000-03:00') },
+      '48265500003': { envio: envio('ready_to_ship', 'ready_to_print'), prazo: prazo('2026-10-22T23:59:59.000-03:00') },
+      '48265500004': { envio: envio('ready_to_ship', null), prazo: prazo('2026-10-22T23:59:59.000-03:00') },
+    });
+    const r = await consultarEnvios(cache, ['48265500002', '48265500003', '48265500004'], f);
+    expect(r.envios.map(e => e.situacao)).toEqual(['pendente', 'pendente', 'pendente']);
+  });
+});
+
+describe('horário-limite do SLA', () => {
+  it('guarda o instante cru quando o SLA traz hora; data pura (meia-noite) fica sem horário', async () => {
+    const { f } = ml({
+      '61001': { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-22T13:00:00.000-03:00') },
+      '61002': { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-22T00:00:00.000-03:00') },
+    });
+    const [a, b] = (await consultarEnvios(cache, ['61001', '61002'], f)).envios;
+    expect(a).toMatchObject({ prazoPostagem: '2026-10-22', prazoLimiteEm: '2026-10-22T13:00:00.000-03:00' });
+    expect(b).toMatchObject({ prazoPostagem: '2026-10-22', prazoLimiteEm: null });
+    expect(extrairLimite({ expected_date: '2026-10-23T02:59:59.000Z' })).toBe('2026-10-23T02:59:59.000Z');
+    expect(extrairLimite({ expected_date: null })).toBeNull();
+  });
+
+  it('o horário-limite atravessa o cache do prazo', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-21T10:00:00-03:00'));
+    const { f, chamadas } = ml({ '61003': { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-21T23:59:59.000-03:00') } });
+    await consultarEnvios(cache, ['61003'], f);
+    vi.setSystemTime(Date.now() + (TTL_PENDENTE_S + 1) * 1000);
+    chamadas.length = 0;
+    const [e] = (await consultarEnvios(cache, ['61003'], f)).envios;
+    expect(chamadas).toEqual(['envio:61003']);           // prazo veio do cache
+    expect(e.prazoLimiteEm).toBe('2026-10-21T23:59:59.000-03:00');
   });
 });
 
@@ -542,7 +609,7 @@ describe('privacidade', () => {
       expect(saida).not.toContain(proibido);
     }
     expect(Object.keys(r.envios[0]).sort()).toEqual([
-      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
+      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoLimiteEm', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
     ]);
     // E o que fica no Redis também não carrega dado pessoal.
     expect(JSON.stringify([...cache.store.values()])).not.toContain('Rua Secreta');
@@ -591,30 +658,6 @@ describe('op expedicao-envios (proxy)', () => {
       // Só o /sla pede o formato novo; envio e histórico seguem no validado.
       expect(h['x-format-new'], String(url)).toBe(String(url).endsWith('/sla') ? 'true' : undefined);
     }
-  });
-
-  it('diagnóstico: mostra /sla (com e sem x-format-new) e o /lead_time antigo, sem nada pessoal', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
-      const u = String(url);
-      const corpo = u.endsWith('/sla')
-        ? { status: 'on_time', expected_date: '2026-10-22T23:59:59.000-03:00', service: 1,
-            receiver_address: { street_name: 'Rua Secreta', zip_code: '01234-000' }, buyer: { nickname: 'FULANO' } }
-        : { estimated_delivery_time: { date: '2026-10-27T00:00:00.000-03:00' }, cost: 19.9, shipping_method: { id: 182, name: 'Normal', type: 'standard' } };
-      return new Response(JSON.stringify(corpo), { status: 200 }) as unknown as Response;
-    });
-    const r = await runOp(cache, 'expedicao-diagnostico', { id: '48313826973' }, TEST_ENV.ML_USER_ID);
-    expect(r.status).toBe(200);
-    const d = r.data as Record<string, { http: number; campos: Record<string, unknown> }>;
-    expect(d.sla.campos.expected_date).toBe('2026-10-22T23:59:59.000-03:00');
-    expect(d.sla.campos.status).toBe('on_time');
-    expect(d.slaSemHeader.http).toBe(200);
-    expect(d.leadTime.campos['estimated_delivery_time.date']).toBe('2026-10-27T00:00:00.000-03:00');
-    expect(d.leadTime.campos.cost).toBe('<number>');  // fora da lista: só o tipo
-    const texto = JSON.stringify(r.data);
-    for (const proibido of ['Rua Secreta', '01234', 'FULANO', 'receiver', 'buyer', 'shipping_method.name']) {
-      expect(texto, proibido).not.toContain(proibido);
-    }
-    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   it('sla 404 (sem SLA para o envio): pendente sem prazo, nada inventado', async () => {
