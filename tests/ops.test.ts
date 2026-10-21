@@ -116,7 +116,7 @@ describe('allowlist do proxy', () => {
     // Inventário fechado de propósito: rota nova no proxy do Mercado Livre é
     // superfície nova de exposição, e tem que passar por aqui conscientemente.
     expect(Object.keys(OPS).sort()).toEqual([
-      'ads-billing', 'expedicao-diagnostico', 'expedicao-envios', 'items', 'items-search', 'order', 'order-discounts', 'orders',
+      'ads-billing', 'expedicao-envios', 'items', 'items-search', 'order', 'order-discounts', 'orders',
       'product-items', 'promotion-item-remove', 'promotion-item-set', 'promotion-items',
       'promotions', 'pub-anunciantes', 'pub-campanhas', 'pub-metricas', 'reputation', 'shipment', 'shipment-costs', 'sites-search', 'visits',
     ].sort());

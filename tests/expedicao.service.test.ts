@@ -208,6 +208,10 @@ describe('prazo vencido x atraso confirmado pelo Mercado Livre (/delays)', () =>
     expect(r.envios[0].avisos).toContain('delays_http_500');
     expect(r.envios[1]).toMatchObject({ atrasoML: null });
     expect(interpretarAtrasos({ status: 200, data: [] })).toEqual({ atraso: 'nao_indicado', tipos: [] });
+    // 404 só é "sem atraso" com a mensagem documentada; outro 404 é desconhecido.
+    expect(interpretarAtrasos({ status: 404, data: { message: 'Delays Not Found for shipment', error: 'not_found', status: 404 } })).toEqual({ atraso: 'nao_indicado', tipos: [] });
+    expect(interpretarAtrasos({ status: 404, data: { message: 'Shipment not found' } })).toBeNull();
+    expect(interpretarAtrasos({ status: 404, data: null })).toBeNull();
     expect(interpretarAtrasos({ status: 200, data: { type: 'sla_delayed' } })).toEqual({ atraso: 'confirmado', tipos: ['sla_delayed'] });
     void chamadas;
   });

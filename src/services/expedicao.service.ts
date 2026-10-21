@@ -524,6 +524,13 @@ async function resolverEnvio(
   return base;
 }
 
+/** O corpo do 404 diz que não há atraso para o envio (texto da documentação)? */
+export function ehDelaysNaoEncontrado(data: unknown): boolean {
+  const o = obj(data);
+  const textos = [str(o?.message), str(o?.error)].filter((t): t is string => !!t);
+  return textos.some(t => /delays?\s+not\s*found/i.test(t));
+}
+
 /** Atraso do ML é revisto a cada 10 min: muda raramente e custa 1 chamada. */
 export const TTL_ATRASO_S = 10 * 60;
 
@@ -547,7 +554,9 @@ export function prazoVencido(prazo: string | null, limite: string | null, agoraI
  * cacheado, aviso no envio) — nunca vira "sem atraso" nem "atrasado".
  */
 export function interpretarAtrasos(r: RespostaML): { atraso: 'confirmado' | 'nao_indicado'; tipos: string[] } | null {
-  if (r.status === 404) return { atraso: 'nao_indicado', tipos: [] };
+  // 404 só significa "sem atraso" com a mensagem documentada ("Delays Not Found
+  // for shipment"). Outro 404 (envio inexistente, rota, recurso) é desconhecido.
+  if (r.status === 404) return ehDelaysNaoEncontrado(r.data) ? { atraso: 'nao_indicado', tipos: [] } : null;
   if (r.status !== 200) return null;
   const raiz = obj(r.data);
   const lista: unknown = Array.isArray(r.data) ? r.data : (raiz?.delays ?? raiz?.results ?? raiz?.data);
