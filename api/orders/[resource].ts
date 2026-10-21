@@ -58,6 +58,7 @@ import { validateSession } from '../../src/lib/session.js';
 import { applyCors, rateLimitOk, readBearer, json } from '../../src/lib/http.js';
 import type { Alvo } from '../../src/lib/orders-store.js';
 import { getReadStatus, getPage } from '../../src/services/orders-read.service.js';
+import { estadoAtualizacaoAmazon } from '../../src/amazon/refresh.js';
 import { readSnapshot } from '../../src/lib/orders-store.js';
 import { montarMetrics, resolverPeriodo } from '../../src/services/orders-metrics.service.js';
 import { lerManifesto, lerMapaEnvios } from '../../src/lib/shipping-store.js';
@@ -90,8 +91,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const sess = await validateSession(cache, readBearer(req));
     if (!sess) return json(res, 401, { error: 'unauthorized' });
 
-    // Rate limit por sessão (mesma folga do proxy ML).
-    if (!(await rateLimitOk(cache, `orders-read:${sess.id.slice(0, 24)}`, 600, 60))) {
+    // Rate limit por sessão: 3000 em 5 min (a mesma média de 600/min de
+    // antes). Janela de 5 min porque cada janela NOVA custa um EXPIRE: com o
+    // poll de status a cada 60 s, a janela de 60 s pagava esse comando extra
+    // em quase toda consulta.
+    if (!(await rateLimitOk(cache, `orders-read:${sess.id.slice(0, 24)}`, 3000, 300))) {
       return json(res, 429, { error: 'rate_limited' });
     }
 
@@ -116,10 +120,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const alvo = parseAlvo(req.query.alvo);
 
     // ── Seleção que não é "a conta legada sozinha" ──────────────────────────
+    // `?diagnostico=1` acrescenta o bloco `tempoReal` (+3 comandos Redis por
+    // conta). O poll do dashboard não o pede.
+    const diagnostico = req.query.diagnostico === '1';
     if (varias && resource === 'status') {
-      return json(res, 200, await statusConsolidado(lidas, alvo, {
-        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
-      }));
+      const st = await statusConsolidado(lidas, alvo, {
+        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET), diagnostico,
+      });
+      const amz = lidas.filter(l => l.conta.canal === 'amazon');
+      if (!amz.length) return json(res, 200, st);
+      const amazon: Record<string, unknown> = {};
+      for (const l of amz) amazon[l.conta.id] = await estadoAtualizacaoAmazon(l.cache);
+      return json(res, 200, { ...st, amazon });
     }
     if (varias && resource === 'logistics') {
       return json(res, 200, await logisticaDaSelecao(lidas));
@@ -156,13 +168,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (resource === 'status') {
-      // Rota BARATA de propósito: manifesto + status + telemetria, sem tocar
-      // em chunk e sem chamar o Mercado Livre. É ela que o dashboard consulta
-      // a cada poucos dezenas de segundos para decidir se vale repaginar os
+      // Rota BARATA de propósito: manifesto + status + telemetria num único
+      // MGET, sem tocar em chunk e sem chamar o Mercado Livre. É ela que o
+      // dashboard consulta a cada 60 s para decidir se vale repaginar os
       // milhares de pedidos — a decisão sai de `versao`.
       const status = await getReadStatus(cacheDados, alvo, {
-        notificacoesHabilitadas: Boolean(getEnv().ML_WEBHOOK_SECRET),
+        // O webhook é do Mercado Livre: a Amazon não tem notificação por HTTP.
+        notificacoesHabilitadas: conta.canal === 'amazon' ? false : Boolean(getEnv().ML_WEBHOOK_SECRET),
+        diagnostico,
       });
+      if (conta.canal === 'amazon') return json(res, 200, { ...status, conta: conta.id, canal: 'amazon', amazon: await estadoAtualizacaoAmazon(cacheDados) });
       return json(res, 200, { ...status, conta: conta.id });
     }
 

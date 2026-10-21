@@ -2,7 +2,16 @@ name: Atualizar snapshot de pedidos
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    # Duas frequências, sem hora repetida (cada hora dispara UM evento só):
+    # - '17 */3 * * *' (00, 03, ..., 21 UTC): todos os jobs, inclusive a
+    #   reconciliação de pedidos (`sync`), que passou de hora em hora para a
+    #   cada 3 horas em 10/2026 para poupar a cota do Redis gratuito.
+    # - '17 1-23/3,2-23/3 * * *' (as demais horas): só `logistica` e
+    #   `notificacoes`, que continuam de hora em hora.
+    # O `if:` do job `sync` compara com o texto exato do primeiro cron: se
+    # mudar a expressão aqui, mude lá também. workflow_dispatch roda tudo.
+    - cron: '17 */3 * * *'
+    - cron: '17 1-23/3,2-23/3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -28,6 +37,10 @@ jobs:
     name: Sincronizar pedidos (${{ matrix.nome }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Reconciliação só no cron de 3 em 3 horas ou manual. Nas demais horas o
+    # job fica SKIPPED e `logistica`/`notificacoes` rodam assim mesmo
+    # (`if: always()` neles).
+    if: github.event_name != 'schedule' || github.event.schedule == '17 */3 * * *'
 
     strategy:
       # Um backend fora do ar NAO pode impedir a sincronizacao do outro.
@@ -42,7 +55,7 @@ jobs:
       # Esta rotina NUNCA envia `preparacao: true`: preparar uma conta (seed,
       # carga inicial antes de ativar) é ato deliberado de quem opera, com a
       # ADMIN_KEY, e não da automação — uma conta inativa e sem tokens aqui
-      # só produziria falha vermelha de hora em hora.
+      # só produziria falha vermelha a cada execução.
       matrix:
         include:
           - nome: oficial
@@ -74,8 +87,8 @@ jobs:
           CONTA: ${{ matrix.conta }}
           # O endpoint lê no máximo ORDERS_SYNC_MAX_PAGES (5) páginas por
           # invocação e devolve committedOffset para retomar. Repetimos até
-          # concluir em vez de esperar a próxima hora: uma chamada por hora
-          # levaria dias para recuperar um atraso grande.
+          # concluir em vez de esperar a próxima execução: uma chamada por
+          # execução levaria dias para recuperar um atraso grande.
           # Teto de 6: o rate limit do endpoint é 10 chamadas por 10 minutos.
           MAX_PASSOS: '6'
         run: |
@@ -458,3 +471,70 @@ jobs:
 
           raise SystemExit(0)
           PY
+
+  amazon:
+    # Amazon da Além Mar. RECONCILIAÇÃO, não tempo real: a Amazon não tem
+    # webhook HTTP (notificações só por SQS ou EventBridge) e o agendador do
+    # GitHub não garante horário — em setembro/2026 a mediana entre execuções
+    # deste workflow foi 4,4 h, com lacunas de até 8,6 h. Com o dashboard
+    # aberto, quem atualiza é a aba (POST /api/orders/refresh). Um passo por
+    # execução, retomável; o ritmo de cada operação é o balde da SP-API.
+    #
+    # Enquanto a conta estiver inativa (ou sem credenciais) o backend responde
+    # 400 conta_* e o passo é PULADO. Nunca envia `preparacao: true`.
+    name: Sincronizar Amazon (oficial · alemmar-amazon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Executar passo da Amazon
+        shell: bash
+        env:
+          ADMIN_KEY: ${{ secrets.OVERWINE_ADMIN_KEY }}
+          SYNC_URL: https://overwine-assistant.vercel.app/api/admin/orders-sync
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_KEY:-}" ]; then
+            echo "::error::O secret OVERWINE_ADMIN_KEY não está configurado."
+            exit 1
+          fi
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          http_code="$(
+            curl --silent --show-error --location --request POST \
+              --url "$SYNC_URL" \
+              --header "Content-Type: application/json" \
+              --header "x-admin-key: $ADMIN_KEY" \
+              --data '{"conta":"alemmar-amazon"}' \
+              --connect-timeout 15 --max-time 60 \
+              --output "$response_file" --write-out "%{http_code}"
+          )"
+          echo "HTTP: $http_code"
+          # O log deste repositório é PÚBLICO. A resposta da Amazon (contagens,
+          # janelas, limites, códigos de erro da SP-API) não é impressa: só o
+          # estado de cada etapa. O detalhe fica no backend (acao: 'estado').
+          python3 - "$response_file" <<'PY'
+          import json, re, sys
+          try:
+              r = json.load(open(sys.argv[1], encoding="utf-8"))
+          except Exception:
+              print("Resposta: (não é JSON; omitida)")
+              raise SystemExit(0)
+          if not isinstance(r, dict):
+              print("Resposta: (formato inesperado; omitida)")
+              raise SystemExit(0)
+          etapas = r.get("etapas") if isinstance(r.get("etapas"), dict) else {}
+          resumo = ", ".join(f"{k}={(v if isinstance(v, dict) else {}).get('status')}" for k, v in sorted(etapas.items()))
+          print(f"Resultado: ok={r.get('ok')}, concluido={r.get('concluido')}, motivo={r.get('motivo') or (r.get('error') if re.fullmatch(r'[a-z_]{1,40}', str(r.get('error'))) else None)}, etapas: {resumo or '-'}")
+          PY
+          if [ "$http_code" = "400" ] && grep -qE '"error":"conta_(inativa|nao_habilitada|sem_credencial|sem_suporte)"' "$response_file"; then
+            echo "::notice::Amazon ainda não está ativa no backend; passo pulado."
+            exit 0
+          fi
+          if [ "$http_code" = "429" ]; then
+            echo "::warning::Rate limit do endpoint; a próxima execução continua."
+            exit 0
+          fi
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "::error::O endpoint respondeu HTTP $http_code (autorização Amazon ou falha do passo)."
+            exit 1
+          fi

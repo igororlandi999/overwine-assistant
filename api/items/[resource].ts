@@ -47,6 +47,8 @@ import {
   reconstruirCatalogo,
   type FetchItemIds, type FetchItemsBatch, type ItemBruto, type StatusCatalogo,
 } from '../../src/services/items-catalog.service.js';
+import { lerCatalogoVerificadoEm, referenciaDeFrescor } from '../../src/amazon/leitura.js';
+import { IDADE_MAX_CATALOGO_MS } from '../../src/amazon/refresh.js';
 import { LIMITES_CLASSIFICACAO, type ModoEstoque } from '../../src/services/inventory.service.js';
 import {
   lerInventario, resolverPeriodoInventario,
@@ -292,6 +294,26 @@ async function catalogoDaConta(
   const HARD = env.ITEMS_CATALOG_HARD_TTL_S;
   const ok = (corpo: object): RespostaCatalogo => ({ status: 200, corpo: { ok: true, ...corpo } });
 
+  // Amazon: o catálogo é publicado pela sincronização da Amazon
+  // (src/amazon/leitura.ts) e só é LIDO aqui — esta rota nunca o reconstrói,
+  // e nunca chama o Mercado Livre para uma conta Amazon. Velho é servido como
+  // tal, com aviso; ausente é `not_ready`.
+  if (conta.canal === 'amazon') {
+    let manAmz: CatalogManifest | null = null;
+    try { manAmz = await readCatalogManifest(cache); } catch { manAmz = null; }
+    if (!manAmz) return { status: 409, corpo: { error: 'not_ready', code: 'amazon_catalogo_nao_sincronizado' } };
+    const items = await lerCatalogoPublicado(cache, manAmz);
+    // Frescor pela última consulta completa; `updatedAt` segue sendo a última mudança de conteúdo.
+    const verificadoEm = await lerCatalogoVerificadoEm(cache);
+    const ref = { ...manAmz, updatedAt: referenciaDeFrescor(manAmz.updatedAt, verificadoEm) };
+    const velho = precisaReconstruir(ref, HARD);
+    const avisos = [...(velho ? ['amazon_catalogo_desatualizado'] : []), ...(refresh ? ['amazon_refresh_pela_sincronizacao'] : [])];
+    // Amazon: desatualizado só depois de 6 h sem consulta completa, o mesmo prazo em
+    // que o refresh da aba volta a consultar o catálogo (ML segue com o SOFT do env).
+    const softAmz = IDADE_MAX_CATALOGO_MS / 1000;
+    return ok({ ...montarResposta(ref, items, velho ? 'fallback_stale' : 'snapshot', softAmz, HARD, avisos), updatedAt: manAmz.updatedAt, verificadoEm });
+  }
+
   let manifest: CatalogManifest | null = null;
   let manifestoCorrompido = false;
   try {
@@ -405,6 +427,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const lidas = contas.map(c => ({ conta: c, cache: cacheDaConta(cacheGlobal, c) }));
 
+    // O inventário (próprio × Full, dias de cobertura) é do Mercado Livre. Para
+    // a Amazon o estoque está no catálogo, separado em próprio e FBA.
+    if (resource === 'inventory' && lidas.some(l => l.conta.canal === 'amazon')) {
+      return json(res, 400, { error: 'recurso_indisponivel_no_canal', canal: 'amazon', usar: 'catalog' });
+    }
     if (resource === 'inventory') return await responderInventario(req, res, lidas);
 
     // Allowlist de parâmetros do `catalog`: 400 determinístico para qualquer outro.
@@ -453,6 +480,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       versoes: Object.fromEntries(partes.map(x => [x.conta.id, x.corpo.versao])),
       // O mais ANTIGO: a união só é tão fresca quanto o catálogo mais velho.
       updatedAt: pior.corpo.updatedAt,
+      // Só a Amazon informa: última consulta completa do catálogo (o frescor já usa ela).
+      ...('verificadoEm' in pior.corpo ? { verificadoEm: pior.corpo.verificadoEm } : {}),
       source: partes.map(x => String(x.corpo.source)).sort((a, b) => ORDEM_SOURCE.indexOf(a) - ORDEM_SOURCE.indexOf(b))[0],
       complete: true,
       freshness: { ...pior.corpo.freshness, stale: partes.some(x => x.corpo.freshness.stale) },
