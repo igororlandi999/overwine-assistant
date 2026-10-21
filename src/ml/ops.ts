@@ -210,7 +210,7 @@ export const OPS: Record<string, OpDef> = {
   },
 
   // 6b2) Expedição — prazo oficial de postagem e data efetiva do despacho de
-  // até 50 envios por chamada. Lê /shipments/{id}, /lead_time e /history com
+  // até 50 envios por chamada. Lê /shipments/{id}, /sla e /history com
   // cache incremental, concorrência fixa e cooldown em 429. Só ids, status e
   // datas: nenhum endereço ou dado de comprador. Ver expedicao.service.ts.
   'expedicao-envios': {
