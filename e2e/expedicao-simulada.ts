@@ -25,11 +25,15 @@ interface Caso {
   liberacao?: number;
   /** Despacho real: dias a partir de hoje e hora local. */
   despacho?: { dias: number; hora: string };
+  /** O ML reconhece atraso em /delays (senão 404). */
+  atrasoML?: boolean;
 }
 
 export interface CenarioExpedicao {
   /** shipmentId → caso */
   envios: Map<string, Caso>;
+  /** Latência simulada de cada chamada ao ML (ms), para medir desempenho. */
+  latenciaMs: number;
 }
 
 const BRT = 'America/Sao_Paulo';
@@ -43,7 +47,8 @@ const CASOS_OW: Array<[number, Caso]> = [
   [100000, { rotulo: 'a enviar hoje, etiqueta a imprimir', status: 'ready_to_ship', substatus: 'ready_to_print', logistica: 'xd_drop_off', prazo: 0 }],
   [100001, { rotulo: 'a enviar hoje, pacote com 2 pedidos', status: 'ready_to_ship', substatus: 'printed', logistica: 'xd_drop_off', prazo: 0 }],
   [100003, { rotulo: 'a enviar amanhã (coleta)', status: 'ready_to_ship', substatus: 'ready_to_print', logistica: 'cross_docking', prazo: 1 }],
-  [100004, { rotulo: 'atrasado (prazo ontem)', status: 'ready_to_ship', substatus: 'printed', logistica: 'xd_drop_off', prazo: -1 }],
+  [100004, { rotulo: 'prazo vencido ontem, ML sem atraso', status: 'ready_to_ship', substatus: 'printed', logistica: 'xd_drop_off', prazo: -1 }],
+  [100012, { rotulo: 'atraso confirmado pelo ML', status: 'ready_to_ship', substatus: 'printed', logistica: 'xd_drop_off', prazo: -2, atrasoML: true }],
   [100005, { rotulo: 'pendente sem prazo', status: 'ready_to_ship', substatus: 'ready_to_print', logistica: 'xd_drop_off', prazo: null }],
   [100006, { rotulo: 'programado (buffered)', status: 'pending', substatus: 'buffered', logistica: 'xd_drop_off', prazo: null, liberacao: 2 }],
   [100007, { rotulo: 'despachado hoje (agência)', status: 'ready_to_ship', substatus: 'dropped_off', logistica: 'xd_drop_off', prazo: 0, despacho: { dias: 0, hora: '09:40' } }],
@@ -61,8 +66,18 @@ const PACOTE: [number, number] = [100002, 100001];
 const envioDe = (pedidoId: number) => String(900000 + pedidoId);
 
 /** Altera os pedidos simulados no lugar e devolve o cenário dos envios. */
-export function aplicarCenarioExpedicao(pedidosOW: OrderInput[], pedidosDG: OrderInput[]): CenarioExpedicao {
+export function aplicarCenarioExpedicao(pedidosOW: OrderInput[], pedidosDG: OrderInput[], volume = 0, latenciaMs = 0): CenarioExpedicao {
   const envios = new Map<string, Caso>();
+  // VOLUME (medição de desempenho): outros pedidos da Overwine simulada viram
+  // envios próprios já despachados e entregues, como a maior parte da janela real.
+  const extras: Array<[number, Caso]> = [];
+  for (let i = 0; i < volume; i++) {
+    const id = 100013 + i;
+    const o = pedidosOW.find(x => Number(x.id) === id) as any;
+    if (!o) break;
+    const dias = -Math.max(1, Math.round((Date.now() - Date.parse(o.date_created)) / 86400000) - 1);
+    extras.push([id, { rotulo: 'volume', status: 'delivered', substatus: null, logistica: 'xd_drop_off', prazo: dias, despacho: { dias, hora: '15:00' } }]);
+  }
   const marcar = (lista: OrderInput[], casos: Array<[number, Caso]>) => {
     for (const [id, caso] of casos) {
       const o = lista.find(x => Number(x.id) === id) as any;
@@ -73,15 +88,16 @@ export function aplicarCenarioExpedicao(pedidosOW: OrderInput[], pedidosDG: Orde
     }
   };
   marcar(pedidosOW, CASOS_OW);
+  marcar(pedidosOW, extras);
   marcar(pedidosDG, CASOS_DG);
   const filho = pedidosOW.find(x => Number(x.id) === PACOTE[0]) as any;
   if (filho) filho.shipping = { id: Number(envioDe(PACOTE[1])), logistic_type: null };
-  return { envios };
+  return { envios, latenciaMs };
 }
 
 /** Resposta do ML simulado para as rotas de envio do cenário; null = não é do cenário. */
 export function respostaExpedicao(c: CenarioExpedicao, path: string, headers: Headers): { status: number; body: unknown } | null {
-  const m = path.match(/^\/shipments\/(\d+)(\/lead_time|\/sla|\/history)?$/);
+  const m = path.match(/^\/shipments\/(\d+)(\/lead_time|\/sla|\/history|\/delays)?$/);
   if (!m) return null;
   const caso = c.envios.get(m[1]);
   if (!caso) return null;
@@ -98,6 +114,11 @@ export function respostaExpedicao(c: CenarioExpedicao, path: string, headers: He
   }
   if (m[2] === '/lead_time') {
     return { status: 200, body: { shipping_method: { id: 1, type: 'standard', name: 'Normal' }, cost: 0, estimated_delivery_time: { date: ymd(5) + 'T00:00:00.000-03:00' } } };
+  }
+  if (m[2] === '/delays') {
+    return caso.atrasoML
+      ? { status: 200, body: [{ type: 'handling_delayed', date: ymd(-1) + 'T00:00:00.000-03:00' }] }
+      : { status: 404, body: { message: 'Delays Not Found for shipment' } };
   }
   if (m[2] === '/sla') {
     void headers;

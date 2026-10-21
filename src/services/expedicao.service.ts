@@ -113,6 +113,16 @@ export interface EnvioExpedicao {
    * `prazoPostagem`: o prazo oficial só é atribuído depois da liberação.
    */
   liberacaoEm: string | null;
+  /**
+   * Atraso segundo o PRÓPRIO Mercado Livre (GET /shipments/{id}/delays), só
+   * para pendente com prazo já vencido na nossa comparação de datas:
+   *   'confirmado'   o ML lista atraso para o envio (tipos em `atrasoTipos`)
+   *   'nao_indicado' o ML não lista atraso (404 "Delays Not Found")
+   *   null           não se aplica, ou o ML não respondeu (motivo em avisos)
+   * Prazo vencido NÃO é atraso: só 'confirmado' é.
+   */
+  atrasoML: 'confirmado' | 'nao_indicado' | null;
+  atrasoTipos: string[];
   /** Instante do primeiro evento de despacho (ISO, como o ML enviou). */
   despachadoEm: string | null;
   /** Quando o backend leu o ML pela última vez para este envio. */
@@ -130,6 +140,8 @@ export interface FetchersEnvio {
   envio(id: string): Promise<RespostaML>;
   prazo(id: string): Promise<RespostaML>;
   historico(id: string): Promise<RespostaML>;
+  /** GET /shipments/{id}/delays — atrasos que o próprio ML reconhece. */
+  atrasos(id: string): Promise<RespostaML>;
 }
 
 // ── Regras de status ────────────────────────────────────────────────────
@@ -334,16 +346,17 @@ export const CHAVE_COOLDOWN = 'exped:cooldown';
  * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
  * sozinhos.
  */
-export const VERSAO_CHAVES = 'v4';
+export const VERSAO_CHAVES = 'v5';
 const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
 const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
+const chaveAtraso = (id: string) => `exped:${VERSAO_CHAVES}:atraso:${id}`;
 
 /** Ids por requisição. Acima disso o dashboard fatia. */
 export const MAX_IDS = 50;
 /** Chamadas ao ML por requisição — cabe folgado no maxDuration de 30 s. */
-export const MAX_CHAMADAS_PADRAO = 60;
+export const MAX_CHAMADAS_PADRAO = 90;
 /** Mesma ordem de grandeza do backfill de logística (CONCORRENCIA = 8). */
-export const CONCORRENCIA_PADRAO = 4;
+export const CONCORRENCIA_PADRAO = 6;
 
 /**
  * TTL de um resultado. Final só quando nada mais muda: Full, cancelado e
@@ -390,7 +403,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, consultadoEm: null, avisos,
   };
 }
 
@@ -419,7 +432,7 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
@@ -430,6 +443,22 @@ async function resolverEnvio(
   }
   if (!despachou && d.status === 'ready_to_ship' && d.substatus && !SUBSTATUS_RTS_PENDENTE.has(d.substatus)) {
     return { ...base, situacao: 'outro', avisos: [`substatus_nao_mapeado:ready_to_ship/${d.substatus}`] };
+  }
+
+  // Já saiu: a data vem do histórico. O SLA não é consultado — prazo de quem
+  // já despachou não muda nenhum grupo da aba e custaria 1 chamada por envio.
+  if (despachou) {
+    base.situacao = 'despachado';
+    base.prazoPostagem = d.prazoNoEnvio;
+    const rHist = await chamar(f.historico);
+    if (rHist.status === 200) base.despachadoEm = extrairDespacho(rHist.data);
+    else base.avisos.push(`history_http_${rHist.status}`);
+    if (!base.despachadoEm && d.dataShippedNoEnvio) {
+      base.despachadoEm = d.dataShippedNoEnvio;
+      base.avisos.push('data_do_envio');
+    }
+    if (!base.despachadoEm) base.avisos.push('data_despacho_nao_informada');
+    return base;
   }
 
   // Prazo oficial: cache próprio → /sla → campo antigo do próprio envio.
@@ -475,19 +504,60 @@ async function resolverEnvio(
     return base;
   }
 
-  if (!despachou) return base;
-
-  // Já saiu: a data vem do histórico. Sem ela, despachado SEM data.
-  base.situacao = 'despachado';
-  const rHist = await chamar(f.historico);
-  if (rHist.status === 200) base.despachadoEm = extrairDespacho(rHist.data);
-  else base.avisos.push(`history_http_${rHist.status}`);
-  if (!base.despachadoEm && d.dataShippedNoEnvio) {
-    base.despachadoEm = d.dataShippedNoEnvio;
-    base.avisos.push('data_do_envio');
+  // Pendente com prazo VENCIDO na nossa comparação: pergunta ao ML se ele
+  // reconhece atraso. Vencido não é atrasado: só a resposta do ML confirma.
+  if (prazoVencido(prazo, base.prazoLimiteEm, agoraIso)) {
+    const c = await lerJSON<{ atraso: 'confirmado' | 'nao_indicado'; tipos: string[] }>(cache, chaveAtraso(id));
+    if (c) {
+      base.atrasoML = c.atraso; base.atrasoTipos = c.tipos;
+    } else {
+      const rA = await chamar(f.atrasos);
+      const lido = interpretarAtrasos(rA);
+      if (lido) {
+        base.atrasoML = lido.atraso; base.atrasoTipos = lido.tipos;
+        await cache.set(chaveAtraso(id), JSON.stringify(lido), TTL_ATRASO_S);
+      } else {
+        base.avisos.push(`delays_http_${rA.status}`);
+      }
+    }
   }
-  if (!base.despachadoEm) base.avisos.push('data_despacho_nao_informada');
   return base;
+}
+
+/** Atraso do ML é revisto a cada 10 min: muda raramente e custa 1 chamada. */
+export const TTL_ATRASO_S = 10 * 60;
+
+/**
+ * Prazo vencido pela NOSSA comparação: o horário-limite do SLA já passou, ou,
+ * sem horário, o dia do prazo é anterior a hoje em Brasília.
+ */
+export function prazoVencido(prazo: string | null, limite: string | null, agoraIso: string): boolean {
+  if (!prazo) return false;
+  if (limite) {
+    const t = Date.parse(limite);
+    if (Number.isFinite(t)) return t < Date.parse(agoraIso);
+  }
+  return prazo < (ymdBRT(new Date(agoraIso)) ?? '');
+}
+
+/**
+ * GET /shipments/{id}/delays. Documentação: 404 "Delays Not Found for
+ * shipment" quando não há atraso. Com atraso, uma lista de itens com `type`
+ * (ex.: handling_delayed). Formato inesperado ou outro HTTP: null (não
+ * cacheado, aviso no envio) — nunca vira "sem atraso" nem "atrasado".
+ */
+export function interpretarAtrasos(r: RespostaML): { atraso: 'confirmado' | 'nao_indicado'; tipos: string[] } | null {
+  if (r.status === 404) return { atraso: 'nao_indicado', tipos: [] };
+  if (r.status !== 200) return null;
+  const raiz = obj(r.data);
+  const lista: unknown = Array.isArray(r.data) ? r.data : (raiz?.delays ?? raiz?.results ?? raiz?.data);
+  if (!Array.isArray(lista)) {
+    const tipo = str(raiz?.type);
+    return tipo ? { atraso: 'confirmado', tipos: [tipo] } : null;
+  }
+  if (lista.length === 0) return { atraso: 'nao_indicado', tipos: [] };
+  const tipos = lista.map(e => str(obj(e)?.type) ?? 'sem_tipo');
+  return { atraso: 'confirmado', tipos: [...new Set(tipos)] };
 }
 
 /** Normaliza a lista pedida: só ids numéricos, sem repetição, na ordem. */
@@ -516,6 +586,8 @@ export interface ResultadoConsulta {
   chamadasML: number;
   /** Ids que ficaram para a próxima passada. */
   aguardando: number;
+  /** Ids respondidos direto do cache, sem chamada ao ML. */
+  doCache: number;
   cooldown: boolean;
 }
 
@@ -572,6 +644,7 @@ export async function consultarEnvios(
     envios,
     chamadasML: orc.usadas,
     aguardando: envios.filter(e => e.situacao === 'aguardando').length,
+    doCache: ids.length - aConsultar.length,
     cooldown: orc.bloqueado === 'cooldown',
   };
 }
