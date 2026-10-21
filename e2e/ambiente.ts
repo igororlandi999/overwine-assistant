@@ -27,6 +27,7 @@ import refreshHandler from '../api/orders/refresh.js';
 import itemsHandler from '../api/items/[resource].js';
 import mlHandler from '../api/ml/[op].js';
 import chatHandler from '../api/chat.js';
+import { aplicarCenarioExpedicao, respostaExpedicao, type CenarioExpedicao } from './expedicao-simulada.js';
 
 const AQUI = dirname(fileURLToPath(import.meta.url));
 
@@ -126,7 +127,7 @@ export interface Ambiente {
  * diferente do dono do token é recusada (403): é a prova de que o backend
  * nunca consulta uma loja com a credencial da outra.
  */
-function instalarMercadoLivreSimulado(lojas: Record<string, Loja>, mlLog: RegistroML[], fetchReal: typeof fetch) {
+function instalarMercadoLivreSimulado(lojas: Record<string, Loja>, mlLog: RegistroML[], fetchReal: typeof fetch, cenario: CenarioExpedicao | null = null) {
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === 'string' ? input : input.url;
     if (!url.startsWith('https://api.mercadolibre.com')) return fetchReal(input, init);
@@ -149,6 +150,9 @@ function instalarMercadoLivreSimulado(lojas: Record<string, Loja>, mlLog: Regist
     if (!loja) return j({ message: 'invalid token' }, 401);
     const p = u.pathname;
     const todos = () => [...loja.pedidos, ...loja.cancelados];
+    // Expedição simulada (só com { expedicao: true }): envios próprios do cenário.
+    const exp = cenario ? respostaExpedicao(cenario, p, h) : null;
+    if (exp) return j(exp.body, exp.status);
     let m: RegExpMatchArray | null;
 
     if (p === '/orders/search') {
@@ -224,7 +228,7 @@ async function semear(c: Cache, loja: Loja, tok: string, versao: number) {
 
 const FAIXA = `<div id="faixa-simulado" style="position:fixed;left:0;right:0;bottom:0;z-index:99999;background:#7a1f1f;color:#fff;font:600 13px/1.4 system-ui,sans-serif;padding:8px 16px;text-align:center;letter-spacing:.03em;border-top:2px solid #ffd27a">DADOS SIMULADOS &mdash; pr&eacute;via local. Pedidos, compradores, valores, tarifas e fretes s&atilde;o inventados. Nada aqui vem da Overwine nem da Degustar.</div>`;
 
-export interface OpcoesAmbiente { porta: number; faixa?: boolean; silencioso?: boolean }
+export interface OpcoesAmbiente { porta: number; faixa?: boolean; silencioso?: boolean; /** Cenário de envios próprios para a aba Expedição (prévia visual). */ expedicao?: boolean }
 
 export async function iniciarAmbiente(op: OpcoesAmbiente): Promise<Ambiente> {
   const origem = `http://127.0.0.1:${op.porta}`;
@@ -241,10 +245,11 @@ export async function iniciarAmbiente(op: OpcoesAmbiente): Promise<Ambiente> {
   if (op.silencioso) { console.info = () => {}; }
 
   const lojas = criarLojas();
+  const cenario = op.expedicao ? aplicarCenarioExpedicao(lojas[TOK_OW].pedidos, lojas[TOK_DG].pedidos) : null;
   const mlLog: RegistroML[] = [];
   const httpLog: RegistroHttp[] = [];
   const fetchReal = globalThis.fetch;
-  instalarMercadoLivreSimulado(lojas, mlLog, fetchReal);
+  instalarMercadoLivreSimulado(lojas, mlLog, fetchReal, cenario);
 
   const cacheDG = cacheDaConta(cache, contaPorId(DG)!);
   await semear(cache, lojas[TOK_OW], TOK_OW, 7);
