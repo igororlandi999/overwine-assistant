@@ -55,7 +55,7 @@ import { lerColecao, lerManifesto } from './store.js';
 import type { PedidoAmazon } from './pedidos.js';
 import type { AnuncioAmazon, EstoqueFbaAmazon, EstadoEstoqueFba } from './catalogo.js';
 import { lerEstadoEstoqueFba } from './catalogo.js';
-import type { TransacaoAmazon } from './financeiro.js';
+import { transacoesEconomicas, categoriaDaTransacao, tarifasAmazonDaTransacao, type TransacaoAmazon } from './financeiro.js';
 
 export type ClasseStatusAmazon = 'pendente' | 'aprovado' | 'cancelado' | 'nao_atendivel' | 'desconhecido';
 
@@ -299,11 +299,17 @@ async function publicarCatalogo(cache: Cache, itens: ItemLeituraAmazon[], agora:
 
 // ── Financeiro LANÇADO por pedido (evidência de reembolso) ─────────────────
 
-/** Pedidos com débito financeiro lançado (transação negativa vinculada). */
+/**
+ * Pedidos com débito financeiro lançado (transação negativa vinculada), uma
+ * ocorrência por lançamento. Etiqueta de envio (custo_envio) e repasse NÃO são
+ * débito de reembolso: ficam fora daqui.
+ */
 export function debitosPorPedido(transacoes: readonly TransacaoAmazon[]): Map<string, { valor: number; moeda: string; descricoes: string[] }> {
   const m = new Map<string, { valor: number; moeda: string; descricoes: string[] }>();
-  for (const t of transacoes) {
+  for (const t of transacoesEconomicas(transacoes).transacoes) {
     if (!t.pedidoId || !t.total || t.total.valor >= 0) continue;
+    const cat = categoriaDaTransacao(t);
+    if (cat === 'custo_envio' || cat === 'repasse') continue;
     const atual = m.get(t.pedidoId) ?? { valor: 0, moeda: t.total.moeda, descricoes: [] };
     if (atual.moeda !== t.total.moeda) continue;
     atual.valor = arred(atual.valor + t.total.valor);
@@ -331,8 +337,23 @@ export interface FinanceiroAmazonDoPeriodo {
   retidas: number;
   /** Vendas com transação NEGATIVA vinculada (possível reembolso ou ajuste), e quanto. */
   debitos: { pedidos: number; valor: number };
-  /** Lançamentos do período SEM pedido (taxas de serviço, ajustes): dinheiro lançado, não venda. */
+  /** Lançamentos OPERACIONAIS do período SEM pedido (anúncios, armazenagem, ajustes): dinheiro lançado, não venda. Sem repasses. */
   lancamentosSemPedido: { quantidade: number; valor: number };
+  /** Repasses do período (Transfer, ex.: Disbursement): saldo movido para o banco. Nem receita nem despesa; fora de qualquer soma acima. */
+  repasses: { quantidade: number; valor: number };
+  /** Etiquetas de envio compradas na Amazon (MfnPostageFee) dessas vendas: custo logístico, não reembolso. */
+  custoEnvio: { pedidos: number; valor: number };
+  /**
+   * Composição de `lancadoDessasVendas` por natureza. vendas + reembolsos +
+   * custoEnvio + outros = lancadoDessasVendas. `tarifasAmazon` é PARTE de
+   * `vendas` (a Amazon já desconta a tarifa na transação da venda), não uma
+   * parcela a somar.
+   */
+  porCategoria: { vendas: number; tarifasAmazon: number; reembolsos: number; custoEnvio: number; outros: number };
+  /** Liberações retiradas por serem o mesmo dinheiro da transação original (par DEFERRED_RELEASED + RELEASED). */
+  duplicidadesRemovidas: number;
+  /** Pares ligados de valor diferente: mantidos e apontados. */
+  paresDivergentes: number;
   moeda: string | null;
   conciliado: false;
 }
@@ -343,39 +364,60 @@ export function financeiroAmazonDoPeriodo(
   cobertura: { desde: string; ate: string } | null,
   periodo: { ini: Date; fim: Date },
 ): FinanceiroAmazonDoPeriodo {
+  const eco = transacoesEconomicas(transacoes);
   const porPedido = new Map<string, TransacaoAmazon[]>();
-  for (const t of transacoes) {
+  for (const t of eco.transacoes) {
     if (!t.pedidoId) continue;
     const l = porPedido.get(t.pedidoId) ?? [];
     l.push(t);
     porPedido.set(t.pedidoId, l);
   }
-  const debitos = debitosPorPedido(transacoes);
-  let com = 0, sem = 0, fora = 0, fat = 0, lancado = 0, retidas = 0, dPed = 0, dVal = 0;
+  const debitos = debitosPorPedido(eco.transacoes);
+  let com = 0, sem = 0, fora = 0, fat = 0, lancado = 0, retidas = 0, dPed = 0, dVal = 0, ePed = 0, eVal = 0;
+  const cat = { vendas: 0, tarifasAmazon: 0, reembolsos: 0, custoEnvio: 0, outros: 0 };
   const moedas = new Set<string>();
   for (const v of vendas) {
     const id = String(v.id);
     const ts = porPedido.get(id) ?? [];
     if (ts.length) {
       com++; fat += v.paid_amount ?? 0;
+      let envio = 0;
       for (const t of ts) {
-        if (t.total) { lancado += t.total.valor; moedas.add(t.total.moeda); }
+        if (t.total) {
+          lancado += t.total.valor; moedas.add(t.total.moeda);
+          const c = categoriaDaTransacao(t);
+          if (c === 'venda') { cat.vendas += t.total.valor; cat.tarifasAmazon += tarifasAmazonDaTransacao(t); }
+          else if (c === 'reembolso') cat.reembolsos += t.total.valor;
+          else if (c === 'custo_envio') { cat.custoEnvio += t.total.valor; envio += t.total.valor; }
+          else cat.outros += t.total.valor;
+        }
         if (t.status === 'DEFERRED') retidas++;
       }
+      if (envio) { ePed++; eVal += envio; }
     } else if (cobertura && v.date_created && v.date_created >= cobertura.desde && v.date_created <= cobertura.ate) sem++;
     else fora++;
     const d = debitos.get(id);
     if (d) { dPed++; dVal += d.valor; }
   }
   const ini = periodo.ini.toISOString(), fim = periodo.fim.toISOString();
-  const soltas = transacoes.filter(t => !t.pedidoId && t.lancadaEm && t.lancadaEm >= ini && t.lancadaEm <= fim && t.total);
-  for (const t of soltas) moedas.add(t.total!.moeda);
+  const doPeriodo = eco.transacoes.filter(t => !t.pedidoId && t.lancadaEm && t.lancadaEm >= ini && t.lancadaEm <= fim && t.total);
+  const soltas = doPeriodo.filter(t => categoriaDaTransacao(t) !== 'repasse');
+  const repasses = doPeriodo.filter(t => categoriaDaTransacao(t) === 'repasse');
+  for (const t of doPeriodo) moedas.add(t.total!.moeda);
   return {
     lidoDesde: cobertura?.desde ?? null, lidoAte: cobertura?.ate ?? null,
     pedidos: { vendas: vendas.length, comTransacoes: com, semTransacoesAteLeitura: sem, foraDaLeitura: fora },
     faturamentoComTransacoes: arred(fat), lancadoDessasVendas: arred(lancado), retidas,
     debitos: { pedidos: dPed, valor: arred(dVal) },
     lancamentosSemPedido: { quantidade: soltas.length, valor: arred(soltas.reduce((s, t) => s + t.total!.valor, 0)) },
+    repasses: { quantidade: repasses.length, valor: arred(repasses.reduce((s, t) => s + t.total!.valor, 0)) },
+    custoEnvio: { pedidos: ePed, valor: arred(eVal) },
+    porCategoria: {
+      vendas: arred(cat.vendas), tarifasAmazon: arred(cat.tarifasAmazon), reembolsos: arred(cat.reembolsos),
+      custoEnvio: arred(cat.custoEnvio), outros: arred(cat.outros),
+    },
+    duplicidadesRemovidas: eco.duplicidadesRemovidas,
+    paresDivergentes: eco.paresDivergentes,
     moeda: moedas.size === 1 ? [...moedas][0] : null,
     conciliado: false,
   };

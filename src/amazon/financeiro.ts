@@ -99,6 +99,87 @@ export function normalizarTransacao(t: ApiTransaction, conta: string): Transacao
   };
 }
 
+// ── Ocorrência econômica e categoria ───────────────────────────────────────
+
+function identificador(t: Pick<TransacaoAmazon, 'identificadores'>, nome: string): string | null {
+  return t.identificadores.find(i => i.nome === nome)?.valor ?? null;
+}
+
+export interface TransacoesEconomicas {
+  /** Uma ocorrência por lançamento. */
+  transacoes: TransacaoAmazon[];
+  /** Liberações RELEASED retiradas por serem o mesmo dinheiro da transação original. */
+  duplicidadesRemovidas: number;
+  /** Pares ligados com valor diferente: mantidos os dois e apontados, nunca resolvidos por palpite. */
+  paresDivergentes: number;
+}
+
+/**
+ * A Finances API (v2024-06-19) representa uma venda retida e depois liberada
+ * com DUAS transações de mesmo valor: a original, cujo status passa de
+ * DEFERRED a DEFERRED_RELEASED (identificador RELEASE_TRANSACTION_ID), e a da
+ * liberação, RELEASED (identificador DEFERRED_TRANSACTION_ID apontando para a
+ * original). Somar as duas conta o mesmo dinheiro duas vezes.
+ *
+ * Fica a ORIGINAL: é a mesma identidade desde que foi retida e mantém a data
+ * de lançamento — antes e depois da liberação o lançamento conta uma vez só.
+ * A RELEASED gêmea sai. Sem a original na coleção (liberação de algo lido fora
+ * da janela), a RELEASED fica: dinheiro nunca some. Retida sem liberação
+ * (DEFERRED) não tem gêmea e continua contando como retida.
+ */
+export function transacoesEconomicas(ts: readonly TransacaoAmazon[]): TransacoesEconomicas {
+  const porId = new Map(ts.map(t => [t.transactionId, t]));
+  const originalDaLiberacao = new Map<string, TransacaoAmazon>();
+  for (const t of ts) {
+    if (t.status !== 'DEFERRED' && t.status !== 'DEFERRED_RELEASED') continue;
+    const lib = identificador(t, 'RELEASE_TRANSACTION_ID');
+    if (lib) originalDaLiberacao.set(lib, t);
+  }
+  let removidas = 0, divergentes = 0;
+  const transacoes = ts.filter(t => {
+    if (t.status !== 'RELEASED') return true;
+    const refOriginal = identificador(t, 'DEFERRED_TRANSACTION_ID');
+    const original = originalDaLiberacao.get(t.transactionId) ?? (refOriginal ? porId.get(refOriginal) : undefined);
+    if (!original || original === t) return true;
+    const mesmoValor = !!t.total && !!original.total && t.total.moeda === original.total.moeda
+      && Math.round(t.total.valor * 100) === Math.round(original.total.valor * 100);
+    if (!mesmoValor) { divergentes++; return true; }
+    removidas++;
+    return false;
+  });
+  return { transacoes, duplicidadesRemovidas: removidas, paresDivergentes: divergentes };
+}
+
+/**
+ * Natureza econômica, pelos nomes da própria Amazon:
+ *   venda        Shipment (já líquida das tarifas e descontos da venda)
+ *   reembolso    Refund
+ *   custo_envio  etiqueta comprada na Amazon (ServiceFee MfnPostageFee) — frete, não reembolso
+ *   repasse      Transfer (ex.: Disbursement): saldo movido para o banco, nem receita nem despesa
+ *   outro        o resto (anúncios, armazenagem, ajustes, reembolso de inventário…)
+ */
+export type CategoriaAmazon = 'venda' | 'reembolso' | 'custo_envio' | 'repasse' | 'outro';
+export function categoriaDaTransacao(t: Pick<TransacaoAmazon, 'tipo' | 'descricao'>): CategoriaAmazon {
+  if (t.tipo === 'Transfer') return 'repasse';
+  if (t.tipo === 'Shipment') return 'venda';
+  if (t.tipo === 'Refund') return 'reembolso';
+  if (t.descricao === 'MfnPostageFee') return 'custo_envio';
+  return 'outro';
+}
+
+/** Soma dos nós `AmazonFees` da composição (sem descer dentro deles: os filhos já estão no total). */
+export function tarifasAmazonDaTransacao(t: Pick<TransacaoAmazon, 'composicao'>): number {
+  let s = 0;
+  const andar = (l: ComposicaoAmazon[]) => {
+    for (const c of l) {
+      if (c.tipo === 'AmazonFees') { s += c.valor?.valor ?? 0; continue; }
+      andar(c.partes);
+    }
+  };
+  andar(t.composicao);
+  return arred(s);
+}
+
 // ── Sincronização ──────────────────────────────────────────────────────────
 const K = { cursor: 'amz:financeiro:cursor', job: 'amz:financeiro:job' };
 
@@ -189,7 +270,7 @@ export interface FinanceiroDoPedido {
 }
 
 export function apurarPedido(p: Pick<PedidoAmazon, 'orderId' | 'criadoEm'>, transacoes: TransacaoAmazon[], cobertura: CoberturaFinanceira | null): FinanceiroDoPedido {
-  const minhas = transacoes.filter(t => t.pedidoId === p.orderId);
+  const minhas = transacoesEconomicas(transacoes.filter(t => t.pedidoId === p.orderId)).transacoes;
   const base = { orderId: p.orderId, lidoAte: cobertura?.ate ?? null, transacoes: minhas.length, retidas: minhas.filter(t => t.status === 'DEFERRED').length, conciliado: false as const };
   if (!minhas.length) {
     // Venda feita depois do fim da leitura (ou antes do início) não foi "sem transação": não foi lida.
