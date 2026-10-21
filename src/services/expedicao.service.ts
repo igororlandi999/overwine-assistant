@@ -260,10 +260,13 @@ export function ttlDoResultado(e: EnvioExpedicao): number {
   return TTL_PENDENTE_S;
 }
 
-async function lerJSON<T>(cache: Cache, k: string): Promise<T | null> {
-  const v = await cache.get(k);
+function parseJSON<T>(v: string | null): T | null {
   if (v === null) return null;
   try { return JSON.parse(v) as T; } catch { return null; }
+}
+
+async function lerJSON<T>(cache: Cache, k: string): Promise<T | null> {
+  return parseJSON<T>(await cache.get(k));
 }
 
 // ── Orçamento de chamadas (teto + 429) ──────────────────────────────────
@@ -409,16 +412,20 @@ export async function consultarEnvios(
 ): Promise<ResultadoConsulta> {
   const agoraIso = (opcoes.agora ?? new Date()).toISOString();
   const orc = new Orcamento(Math.max(0, opcoes.maxChamadas ?? MAX_CHAMADAS_PADRAO));
-  if ((await cache.get(CHAVE_COOLDOWN)) !== null) orc.bloqueado = 'cooldown';
+
+  // Cooldown e cache de TODOS os envios num único MGET: a Upstash cobra por
+  // comando, e esta consulta roda a cada atualização da aba.
+  const [cooldown, ...emCache] = await cache.mget([CHAVE_COOLDOWN, ...ids.map(chaveEnvio)]);
+  if (cooldown !== null) orc.bloqueado = 'cooldown';
 
   const saida = new Map<string, EnvioExpedicao>();
   const aConsultar: string[] = [];
 
-  for (const id of ids) {
-    const c = await lerJSON<EnvioExpedicao>(cache, chaveEnvio(id));
+  ids.forEach((id, i) => {
+    const c = parseJSON<EnvioExpedicao>(emCache[i] ?? null);
     if (c && c.id === id) saida.set(id, c);
     else aConsultar.push(id);
-  }
+  });
 
   const conc = Math.max(1, Math.min(opcoes.concorrencia ?? CONCORRENCIA_PADRAO, 8));
   let proximo = 0;

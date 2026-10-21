@@ -335,6 +335,24 @@ describe('consultarEnvios — incremental', () => {
     expect(e.despachadoEm).toBe('2026-10-19T09:01:30-03:00');
   });
 
+  it('tudo em cache: UM comando ao Redis (MGET) e zero chamadas ao ML', async () => {
+    const { f, chamadas } = ml({
+      '70010': { envio: envio('cancelled', null) },
+      '70011': { envio: envio('shipped', 'in_transit', 'fulfillment') },
+    });
+    await consultarEnvios(cache, ['70010', '70011'], f);
+    chamadas.length = 0;
+    const mget = vi.spyOn(cache, 'mget');
+    const get = vi.spyOn(cache, 'get');
+    const set = vi.spyOn(cache, 'set');
+    const r = await consultarEnvios(cache, ['70010', '70011'], f);
+    expect(mget).toHaveBeenCalledTimes(1);
+    expect(get).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+    expect(chamadas).toEqual([]);
+    expect(r.envios.map(e => e.situacao)).toEqual(['cancelado', 'full']);
+  });
+
   it('despachado SEM data não é final: volta a consultar e recupera a data depois', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-19T10:00:00-03:00'));
@@ -381,6 +399,7 @@ describe('consultarEnvios — incremental', () => {
       get: (k: string) => cache.get(p + k), set: (k: string, v: string, t?: number) => cache.set(p + k, v, t),
       del: (k: string) => cache.del(p + k), setNX: (k: string, v: string, t: number) => cache.setNX(p + k, v, t),
       delIfEquals: (k: string, v: string) => cache.delIfEquals(p + k, v), incr: (k: string, t: number) => cache.incr(p + k, t),
+      mget: (ks: string[]) => cache.mget(ks.map(k => p + k)),
       rpush: (k: string, ...v: string[]) => cache.rpush(p + k, ...v), lpopMany: (k: string, m: number) => cache.lpopMany(p + k, m),
       llen: (k: string) => cache.llen(p + k),
     });
