@@ -11,9 +11,12 @@
  * FONTES (documentação "Shipment handling" do Mercado Livre)
  *
  *   GET /shipments/{id}            status, substatus, logistic_type
- *   GET /shipments/{id}/lead_time  estimated_handling_limit.date — prazo
- *                                  oficial de postagem. "Só a data importa: o
- *                                  vendedor tem o dia inteiro indicado."
+ *   GET /shipments/{id}/sla        expected_date — prazo MÁXIMO de despacho.
+ *                                  Substitui estimated_handling_limit
+ *                                  (/lead_time), descontinuado pelo ML em
+ *                                  13/05/2025: na validação real de 21/10/2026
+ *                                  o /lead_time veio sem o campo em 52 de 52
+ *                                  envios, com ou sem x-format-new.
  *   GET /shipments/{id}/history    [{ status, substatus, date }] — quando
  *                                  cada mudança aconteceu.
  *
@@ -36,11 +39,11 @@
  *
  * O ML segura o envio até `buffering.date` ("Fecha que podrá realizar el
  * envío", doc. Mercado Envios 2) e só então libera a etiqueta. Nesse estado o
- * /lead_time responde SEM estimated_handling_limit — verificado em envios reais
- * xd_drop_off em 21/10/2026. Por isso o envio sai como 'programado', com
+ * prazo ainda não foi atribuído (verificado em envios reais xd_drop_off em
+ * 21/10/2026). Por isso o envio sai como 'programado', com
  * `liberacaoEm` em campo próprio e `prazoPostagem: null`: a data de liberação
  * não é prazo e nunca é copiada para ele. Ao sair de buffered, o envio volta
- * a ser 'pendente' e o prazo vem do /lead_time.
+ * a ser 'pendente' e o prazo vem do /sla.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * AUSENTE NÃO É ZERO
@@ -74,7 +77,7 @@
  * Nenhum dado de comprador entra ou sai daqui: só ids, status e datas.
  */
 import type { Cache } from '../lib/cache/cache.js';
-import { hojeBRT } from '../lib/datas-brt.js';
+import { hojeBRT, ymdBRT } from '../lib/datas-brt.js';
 
 // ── Tipos ───────────────────────────────────────────────────────────────
 
@@ -94,8 +97,10 @@ export interface EnvioExpedicao {
   logistica: string | null;
   status: string | null;
   substatus: string | null;
-  /** Prazo oficial de postagem, 'YYYY-MM-DD' (dia civil informado pelo ML). */
+  /** Prazo oficial de postagem, 'YYYY-MM-DD' (dia, em Brasília, do expected_date do /sla). */
   prazoPostagem: string | null;
+  /** `status` do /sla como o ML enviou (ex.: on_time, delayed), sem tradução. */
+  slaStatus: string | null;
   /**
    * Só para 'programado': dia em que o ML LIBERA o envio (etiqueta disponível),
    * de `buffering.date`. NÃO é prazo de postagem e nunca é copiado para
@@ -189,7 +194,7 @@ export interface DadosEnvio {
   status: string | null;
   substatus: string | null;
   logistica: string | null;
-  /** Fallback de prazo quando /lead_time não responde. */
+  /** Fallback de prazo quando o /sla não responde (campo antigo, descontinuado). */
   prazoNoEnvio: string | null;
   /** Fallback de data quando /history não traz o evento. */
   dataShippedNoEnvio: string | null;
@@ -220,9 +225,34 @@ export function extrairEnvio(data: unknown): DadosEnvio | null {
   };
 }
 
-/** Prazo oficial de postagem a partir de GET /shipments/{id}/lead_time. */
+/**
+ * Dia do PRAZO a partir de um instante do ML. Meia-noite exata é data pura
+ * (só a data importa): vale a data escrita. Qualquer outra hora é um INSTANTE
+ * de limite (ex.: 23:59:59 -03:00, ou o mesmo em UTC): vale o dia em Brasília.
+ */
+export function diaDoPrazo(v: unknown): string | null {
+  const s = str(v);
+  if (!s) return null;
+  if (!/T\d{2}:\d{2}/.test(s) || /T00:00:00(\.0+)?(Z|[+-]\d{2}:?\d{2})?$/.test(s)) return diaDoCampo(s);
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? ymdBRT(new Date(t)) : null;
+}
+
+/**
+ * Prazo oficial de postagem de GET /shipments/{id}/sla: `expected_date`.
+ * Aceita o objeto na raiz ou em `data` e, por compatibilidade, o campo
+ * antigo `estimated_handling_limit.date`.
+ */
 export function extrairPrazo(data: unknown): string | null {
-  return diaDoCampo(obj(obj(data)?.estimated_handling_limit)?.date);
+  const raiz = obj(data);
+  const o = obj(raiz?.data) ?? raiz;
+  return diaDoPrazo(o?.expected_date) ?? diaDoPrazo(obj(o?.estimated_handling_limit)?.date);
+}
+
+export function extrairSlaStatus(data: unknown): string | null {
+  const raiz = obj(data);
+  const o = obj(raiz?.data) ?? raiz;
+  return str(o?.status);
 }
 
 /**
@@ -260,7 +290,7 @@ export const TTL_PENDENTE_S = 120;
 export const TTL_INCOMPLETO_S = 10 * 60;
 /** Prazo oficial de um pendente: muda raramente. 20 minutos. */
 export const TTL_PRAZO_S = 20 * 60;
-/** /lead_time respondeu 200 SEM prazo: não perguntar de novo por 5 minutos. */
+/** /sla respondeu 200 SEM prazo: não perguntar de novo por 5 minutos. */
 export const TTL_PRAZO_AUSENTE_S = 5 * 60;
 /** Janela sem chamadas ao ML depois de um 429. */
 export const COOLDOWN_429_S = 60;
@@ -268,11 +298,11 @@ export const COOLDOWN_429_S = 60;
 export const CHAVE_COOLDOWN = 'exped:cooldown';
 /**
  * Versão das chaves de envio e prazo. Sobe quando a forma de LER o ML muda:
- * v2 = /lead_time com x-format-new. Resultados v1 (gravados sem o cabeçalho,
+ * v2 = /lead_time com x-format-new; v3 = prazo do /sla. Resultados v1 (gravados sem o cabeçalho,
  * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
  * sozinhos.
  */
-export const VERSAO_CHAVES = 'v2';
+export const VERSAO_CHAVES = 'v3';
 const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
 const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
 
@@ -328,7 +358,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
+    prazoPostagem: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
   };
 }
 
@@ -357,7 +387,7 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, slaStatus: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
@@ -367,20 +397,22 @@ async function resolverEnvio(
     return { ...base, situacao: 'outro', avisos: [`status_nao_mapeado:${d.status}`] };
   }
 
-  // Prazo oficial: cache próprio → /lead_time → campo do próprio envio.
+  // Prazo oficial: cache próprio → /sla → campo antigo do próprio envio.
   let prazo: string | null = null;
-  const prazoCache = await lerJSON<{ prazo: string | null }>(cache, chavePrazo(id));
+  const prazoCache = await lerJSON<{ prazo: string | null; sla?: string | null }>(cache, chavePrazo(id));
   if (prazoCache) {
     prazo = prazoCache.prazo;
+    base.slaStatus = prazoCache.sla ?? null;
   } else {
     const rPrazo = await chamar(f.prazo);
     let lido = false;
     if (rPrazo.status === 200) {
       lido = true;
       prazo = extrairPrazo(rPrazo.data);
-      if (!prazo) base.avisos.push('lead_time_sem_prazo');
+      base.slaStatus = extrairSlaStatus(rPrazo.data);
+      if (!prazo) base.avisos.push('sla_sem_prazo');
     } else {
-      base.avisos.push(`lead_time_http_${rPrazo.status}`);
+      base.avisos.push(`sla_http_${rPrazo.status}`);
     }
     if (!prazo && d.prazoNoEnvio) {
       prazo = d.prazoNoEnvio;
@@ -388,8 +420,8 @@ async function resolverEnvio(
     }
     // Prazo lido fica 20 min. Resposta 200 sem prazo fica 5 min (ausência
     // confirmada). Falha de rede ou HTTP de erro NÃO é cacheada.
-    if (prazo) await cache.set(chavePrazo(id), JSON.stringify({ prazo }), TTL_PRAZO_S);
-    else if (lido) await cache.set(chavePrazo(id), JSON.stringify({ prazo: null }), TTL_PRAZO_AUSENTE_S);
+    if (prazo) await cache.set(chavePrazo(id), JSON.stringify({ prazo, sla: base.slaStatus }), TTL_PRAZO_S);
+    else if (lido) await cache.set(chavePrazo(id), JSON.stringify({ prazo: null, sla: base.slaStatus }), TTL_PRAZO_AUSENTE_S);
   }
   base.prazoPostagem = prazo;
   if (!prazo) base.avisos.push('prazo_nao_informado');
@@ -397,7 +429,7 @@ async function resolverEnvio(
   // Programado (pending/buffered): o ML segura o envio até buffering.date e
   // só então libera a etiqueta e atribui o prazo de postagem. A data de
   // liberação sai em campo PRÓPRIO; não vira prazo, não entra em "a enviar"
-  // nem em atraso. Se o /lead_time já trouxer prazo, ele é mantido.
+  // nem em atraso. Se o /sla já trouxer prazo, ele é mantido.
   if (d.status === 'pending' && d.substatus === SUBSTATUS_PROGRAMADO) {
     base.situacao = 'programado';
     base.liberacaoEm = d.liberacao;

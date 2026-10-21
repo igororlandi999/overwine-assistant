@@ -8,7 +8,8 @@
  *
  * Formatos espelham o que a validação real de 21/10/2026 mostrou: status e
  * substatus do envio, buffering.date em UTC no programado, /history como
- * lista de { status, substatus, date }. O prazo só vem com x-format-new.
+ * lista de { status, substatus, date }. O prazo vem do /sla (expected_date);
+ * o /lead_time responde sem estimated_handling_limit, como o real desde 2025.
  * Nada aqui é dado real.
  */
 import type { OrderInput } from '../src/services/orders.service.js';
@@ -80,7 +81,7 @@ export function aplicarCenarioExpedicao(pedidosOW: OrderInput[], pedidosDG: Orde
 
 /** Resposta do ML simulado para as rotas de envio do cenário; null = não é do cenário. */
 export function respostaExpedicao(c: CenarioExpedicao, path: string, headers: Headers): { status: number; body: unknown } | null {
-  const m = path.match(/^\/shipments\/(\d+)(\/lead_time|\/history)?$/);
+  const m = path.match(/^\/shipments\/(\d+)(\/lead_time|\/sla|\/history)?$/);
   if (!m) return null;
   const caso = c.envios.get(m[1]);
   if (!caso) return null;
@@ -96,14 +97,12 @@ export function respostaExpedicao(c: CenarioExpedicao, path: string, headers: He
     };
   }
   if (m[2] === '/lead_time') {
-    const novo = headers.get('x-format-new') === 'true';
-    return {
-      status: 200, body: {
-        shipping_method: { id: 1, type: 'standard', name: 'Normal' }, cost: 0,
-        estimated_delivery_time: { date: ymd(5) + 'T00:00:00.000-03:00' },
-        ...(novo && caso.prazo !== null ? { estimated_handling_limit: { date: ymd(caso.prazo) + 'T00:00:00.000-03:00' } } : {}),
-      },
-    };
+    return { status: 200, body: { shipping_method: { id: 1, type: 'standard', name: 'Normal' }, cost: 0, estimated_delivery_time: { date: ymd(5) + 'T00:00:00.000-03:00' } } };
+  }
+  if (m[2] === '/sla') {
+    void headers;
+    if (caso.prazo === null) return { status: 200, body: { status: null, expected_date: null } };
+    return { status: 200, body: { status: caso.prazo < 0 ? 'delayed' : 'on_time', expected_date: ymd(caso.prazo) + 'T23:59:59.000-03:00', service: 1, last_updated: new Date().toISOString() } };
   }
   const ev: Array<{ status: string; substatus: string | null; date: string }> = [
     { status: 'handling', substatus: null, date: `${ymd(-2)}T10:00:00.000-03:00` },

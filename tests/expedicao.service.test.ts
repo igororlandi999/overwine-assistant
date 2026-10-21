@@ -43,7 +43,8 @@ const envio = (status: string, substatus: string | null, logistic_type = 'xd_dro
     receiver_address: { street_name: 'Rua Secreta', zip_code: '01234-000', receiver_name: 'Fulano' },
     ...extra,
   });
-const prazo = (date: string | null) => ok({ estimated_handling_limit: { date }, type: 'drop_off' });
+// Formato de GET /shipments/{id}/sla: expected_date = prazo máximo de despacho.
+const prazo = (date: string | null) => ok({ status: 'on_time', expected_date: date, service: 1, last_updated: '2026-10-21T10:00:00.000-03:00' });
 const hist = (...ev: Array<[string, string | null, string | null]>) =>
   ok(ev.map(([status, substatus, date]) => ({ status, substatus, date })));
 
@@ -80,6 +81,29 @@ describe('datas do Mercado Livre', () => {
     expect(d?.prazoNoEnvio).toBe('2026-10-21');
     expect(extrairEnvio({ status: 'x', shipping_option: { estimated_handling_limit: { date: '2026-10-25T00:00:00-03:00' } } })?.prazoNoEnvio)
       .toBe('2026-10-25');
+  });
+});
+
+describe('prazo do /sla (expected_date)', () => {
+  it('meia-noite é data pura; instante limite vale o dia em Brasília', () => {
+    expect(extrairPrazo({ expected_date: '2026-10-22T00:00:00.000-03:00' })).toBe('2026-10-22');
+    expect(extrairPrazo({ expected_date: '2026-10-22T00:00:00.000Z' })).toBe('2026-10-22');
+    expect(extrairPrazo({ expected_date: '2026-10-22T23:59:59.000-03:00' })).toBe('2026-10-22');
+    // 02:59:59 UTC de 23/10 = 23:59:59 de 22/10 em Brasília
+    expect(extrairPrazo({ expected_date: '2026-10-23T02:59:59.000Z' })).toBe('2026-10-22');
+    expect(extrairPrazo({ data: { expected_date: '2026-10-24T18:00:00.000-03:00' } })).toBe('2026-10-24');
+  });
+
+  it('sem expected_date, data inválida ou corpo estranho: null, nunca data inventada', () => {
+    for (const d of [{}, { expected_date: null }, { expected_date: 'amanhã' }, null, [], { status: 'on_time' }]) {
+      expect(extrairPrazo(d)).toBeNull();
+    }
+  });
+
+  it('status do SLA é guardado cru e não muda a classificação', async () => {
+    const { f } = ml({ '60001': { envio: envio('ready_to_ship', 'printed'), prazo: ok({ status: 'delayed', expected_date: '2026-10-20T23:59:59.000-03:00' }) } });
+    const [e] = (await consultarEnvios(cache, ['60001'], f)).envios;
+    expect(e).toMatchObject({ situacao: 'pendente', prazoPostagem: '2026-10-20', slaStatus: 'delayed' });
   });
 });
 
@@ -176,7 +200,7 @@ describe('consultarEnvios — situações', () => {
     expect(e.avisos).toEqual(expect.arrayContaining(['history_http_500', 'data_do_envio']));
   });
 
-  it('lead_time indisponível: cai para o prazo do próprio envio, marcado', async () => {
+  it('sla indisponível: cai para o prazo antigo do próprio envio, marcado', async () => {
     const { f } = ml({
       '40005': {
         envio: envio('ready_to_ship', 'ready_to_print', 'xd_drop_off', {
@@ -187,7 +211,7 @@ describe('consultarEnvios — situações', () => {
     });
     const [e] = (await consultarEnvios(cache, ['40005'], f)).envios;
     expect(e.prazoPostagem).toBe('2026-10-22');
-    expect(e.avisos).toEqual(expect.arrayContaining(['lead_time_http_404', 'prazo_do_envio']));
+    expect(e.avisos).toEqual(expect.arrayContaining(['sla_http_404', 'prazo_do_envio']));
   });
 
   it('Full para na primeira chamada e sai como full', async () => {
@@ -377,7 +401,7 @@ describe('consultarEnvios — incremental', () => {
     expect(ttlDoResultado(b)).toBe(TTL_FINAL_S);
   });
 
-  it('lead_time 200 sem prazo: ausência cacheada por 5 min; HTTP de erro não é cacheado', async () => {
+  it('sla 200 sem prazo: ausência cacheada por 5 min; HTTP de erro não é cacheado', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-19T10:00:00-03:00'));
     const sim: Record<string, EnvioSim> = {
@@ -414,7 +438,7 @@ describe('consultarEnvios — incremental', () => {
 describe('envio programado (buffered)', () => {
   // Formato observado nos envios reais 48313826973 e 48310252408 (21/10/2026):
   // pending/buffered, xd_drop_off, shipping_option.buffering.date em UTC e
-  // /lead_time respondendo 200 SEM estimated_handling_limit.
+  // /sla respondendo 200 SEM expected_date (prazo ainda não atribuído).
   const buffered = () => envio('pending', 'buffered', 'xd_drop_off', {
     shipping_option: { buffering: { date: '2026-10-23T00:00:00.000Z' } },
   });
@@ -428,11 +452,11 @@ describe('envio programado (buffered)', () => {
     expect(e.liberacaoEm).toBe('2026-10-23');   // data escrita pelo ML, não 22/10 21h
     expect(e.prazoPostagem).toBeNull();          // buffering.date NUNCA vira prazo
     expect(e.despachadoEm).toBeNull();
-    expect(e.avisos).toEqual(expect.arrayContaining(['lead_time_sem_prazo', 'prazo_nao_informado', 'prazo_atribuido_apos_liberacao']));
+    expect(e.avisos).toEqual(expect.arrayContaining(['sla_sem_prazo', 'prazo_nao_informado', 'prazo_atribuido_apos_liberacao']));
     expect(chamadas).toEqual(['envio:48313826973', 'prazo:48313826973']); // sem histórico
   });
 
-  it('se o /lead_time já trouxer prazo, o prazo oficial é mantido', async () => {
+  it('se o /sla já trouxer prazo, o prazo oficial é mantido', async () => {
     const { f } = ml({ '48310252408': { envio: buffered(), prazo: prazo('2026-10-24T00:00:00.000-03:00') } });
     const [e] = (await consultarEnvios(cache, ['48310252408'], f)).envios;
     expect(e.situacao).toBe('programado');
@@ -518,7 +542,7 @@ describe('privacidade', () => {
       expect(saida).not.toContain(proibido);
     }
     expect(Object.keys(r.envios[0]).sort()).toEqual([
-      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoPostagem', 'situacao', 'status', 'substatus',
+      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
     ]);
     // E o que fica no Redis também não carrega dado pessoal.
     expect(JSON.stringify([...cache.store.values()])).not.toContain('Rua Secreta');
@@ -547,7 +571,7 @@ describe('op expedicao-envios (proxy)', () => {
   it('chama as três rotas oficiais com Bearer e devolve o formato da aba', async () => {
     const respostas: Record<string, unknown> = {
       'https://api.mercadolibre.com/shipments/44445555': { status: 'ready_to_ship', substatus: 'dropped_off', logistic_type: 'xd_drop_off' },
-      'https://api.mercadolibre.com/shipments/44445555/lead_time': { estimated_handling_limit: { date: '2026-10-19T00:00:00.000-03:00' } },
+      'https://api.mercadolibre.com/shipments/44445555/sla': { status: 'on_time', expected_date: '2026-10-19T23:59:59.000-03:00' },
       'https://api.mercadolibre.com/shipments/44445555/history': [{ status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-19T13:00:00.000-03:00' }],
     };
     const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
@@ -564,31 +588,47 @@ describe('op expedicao-envios (proxy)', () => {
       expect(String(url)).not.toContain('access_token');
       const h = init?.headers as Record<string, string>;
       expect(h.Authorization).toBe('Bearer AT-teste');
-      // Só o /lead_time pede o formato novo; envio e histórico seguem no validado.
-      expect(h['x-format-new'], String(url)).toBe(String(url).endsWith('/lead_time') ? 'true' : undefined);
+      // Só o /sla pede o formato novo; envio e histórico seguem no validado.
+      expect(h['x-format-new'], String(url)).toBe(String(url).endsWith('/sla') ? 'true' : undefined);
     }
   });
 
-  it('diagnóstico: compara /lead_time com e sem x-format-new, sem nada pessoal', async () => {
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
-      const novo = (init?.headers as Record<string, string>)['x-format-new'] === 'true';
-      const corpo = novo
-        ? { estimated_handling_limit: { date: '2026-10-22T00:00:00.000-03:00' }, buffering: { date: null },
-            receiver_address: { street_name: 'Rua Secreta', zip_code: '01234-000' }, buyer: { nickname: 'FULANO' },
-            shipping_method: { id: 182, name: 'Normal', type: 'standard' }, cost: 19.9 }
-        : { estimated_delivery_time: { date: '2026-10-27T00:00:00.000-03:00' }, cost: 19.9 };
+  it('diagnóstico: mostra /sla (com e sem x-format-new) e o /lead_time antigo, sem nada pessoal', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const u = String(url);
+      const corpo = u.endsWith('/sla')
+        ? { status: 'on_time', expected_date: '2026-10-22T23:59:59.000-03:00', service: 1,
+            receiver_address: { street_name: 'Rua Secreta', zip_code: '01234-000' }, buyer: { nickname: 'FULANO' } }
+        : { estimated_delivery_time: { date: '2026-10-27T00:00:00.000-03:00' }, cost: 19.9, shipping_method: { id: 182, name: 'Normal', type: 'standard' } };
       return new Response(JSON.stringify(corpo), { status: 200 }) as unknown as Response;
     });
     const r = await runOp(cache, 'expedicao-diagnostico', { id: '48313826973' }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(200);
-    const d = r.data as { leadTimeComHeader: { campos: Record<string, unknown> }; leadTimeSemHeader: { campos: Record<string, unknown> } };
-    expect(d.leadTimeComHeader.campos['estimated_handling_limit.date']).toBe('2026-10-22T00:00:00.000-03:00');
-    expect(d.leadTimeSemHeader.campos['estimated_delivery_time.date']).toBe('2026-10-27T00:00:00.000-03:00');
-    expect(d.leadTimeComHeader.campos.cost).toBe('<number>');  // fora da lista: só o tipo
+    const d = r.data as Record<string, { http: number; campos: Record<string, unknown> }>;
+    expect(d.sla.campos.expected_date).toBe('2026-10-22T23:59:59.000-03:00');
+    expect(d.sla.campos.status).toBe('on_time');
+    expect(d.slaSemHeader.http).toBe(200);
+    expect(d.leadTime.campos['estimated_delivery_time.date']).toBe('2026-10-27T00:00:00.000-03:00');
+    expect(d.leadTime.campos.cost).toBe('<number>');  // fora da lista: só o tipo
     const texto = JSON.stringify(r.data);
     for (const proibido of ['Rua Secreta', '01234', 'FULANO', 'receiver', 'buyer', 'shipping_method.name']) {
       expect(texto, proibido).not.toContain(proibido);
     }
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it('sla 404 (sem SLA para o envio): pendente sem prazo, nada inventado', async () => {
+    const respostas: Record<string, [number, unknown]> = {
+      'https://api.mercadolibre.com/shipments/55556666': [200, { status: 'ready_to_ship', substatus: 'ready_to_print', logistic_type: 'xd_drop_off' }],
+      'https://api.mercadolibre.com/shipments/55556666/sla': [404, { message: 'sla not found' }],
+    };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const [st, b] = respostas[String(url)] ?? [404, {}];
+      return new Response(JSON.stringify(b), { status: st }) as unknown as Response;
+    });
+    const r = await runOp(cache, 'expedicao-envios', { ids: '55556666' }, TEST_ENV.ML_USER_ID);
+    const e = (r.data as { envios: Array<Record<string, unknown>> }).envios[0];
+    expect(e).toMatchObject({ situacao: 'pendente', prazoPostagem: null, slaStatus: null });
+    expect(e.avisos).toEqual(expect.arrayContaining(['sla_http_404', 'prazo_nao_informado']));
   });
 });
