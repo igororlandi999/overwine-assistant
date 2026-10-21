@@ -47,6 +47,7 @@ import {
   reconstruirCatalogo,
   type FetchItemIds, type FetchItemsBatch, type ItemBruto, type StatusCatalogo,
 } from '../../src/services/items-catalog.service.js';
+import { lerCatalogoVerificadoEm, referenciaDeFrescor } from '../../src/amazon/leitura.js';
 import { LIMITES_CLASSIFICACAO, type ModoEstoque } from '../../src/services/inventory.service.js';
 import {
   lerInventario, resolverPeriodoInventario,
@@ -301,8 +302,12 @@ async function catalogoDaConta(
     try { manAmz = await readCatalogManifest(cache); } catch { manAmz = null; }
     if (!manAmz) return { status: 409, corpo: { error: 'not_ready', code: 'amazon_catalogo_nao_sincronizado' } };
     const items = await lerCatalogoPublicado(cache, manAmz);
-    const avisos = [...(precisaReconstruir(manAmz, HARD) ? ['amazon_catalogo_desatualizado'] : []), ...(refresh ? ['amazon_refresh_pela_sincronizacao'] : [])];
-    return ok(montarResposta(manAmz, items, precisaReconstruir(manAmz, HARD) ? 'fallback_stale' : 'snapshot', SOFT, HARD, avisos));
+    // Frescor pela última consulta completa; `updatedAt` segue sendo a última mudança de conteúdo.
+    const verificadoEm = await lerCatalogoVerificadoEm(cache);
+    const ref = { ...manAmz, updatedAt: referenciaDeFrescor(manAmz.updatedAt, verificadoEm) };
+    const velho = precisaReconstruir(ref, HARD);
+    const avisos = [...(velho ? ['amazon_catalogo_desatualizado'] : []), ...(refresh ? ['amazon_refresh_pela_sincronizacao'] : [])];
+    return ok({ ...montarResposta(ref, items, velho ? 'fallback_stale' : 'snapshot', SOFT, HARD, avisos), updatedAt: manAmz.updatedAt, verificadoEm });
   }
 
   let manifest: CatalogManifest | null = null;
@@ -471,6 +476,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       versoes: Object.fromEntries(partes.map(x => [x.conta.id, x.corpo.versao])),
       // O mais ANTIGO: a união só é tão fresca quanto o catálogo mais velho.
       updatedAt: pior.corpo.updatedAt,
+      // Só a Amazon informa: última consulta completa do catálogo (o frescor já usa ela).
+      ...('verificadoEm' in pior.corpo ? { verificadoEm: pior.corpo.verificadoEm } : {}),
       source: partes.map(x => String(x.corpo.source)).sort((a, b) => ORDEM_SOURCE.indexOf(a) - ORDEM_SOURCE.indexOf(b))[0],
       complete: true,
       freshness: { ...pior.corpo.freshness, stale: partes.some(x => x.corpo.freshness.stale) },
