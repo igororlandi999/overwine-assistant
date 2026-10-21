@@ -23,6 +23,7 @@ import { readManifest } from '../lib/orders-store.js';
 import { readCatalogManifest } from '../lib/items-store.js';
 import { executarPassoAmazon, type EtapaAmazon, type ResultadoPassoAmazon, type OpcoesPassoAmazon } from './sync.service.js';
 import { OPERACOES, type OperacaoAmazon } from './contrato.js';
+import { lerCatalogoVerificadoEm, referenciaDeFrescor } from './leitura.js';
 
 const K = { intervalo: 'amz:refresh:intervalo' };
 export const INTERVALO_MINIMO_S = 60;
@@ -53,7 +54,8 @@ export async function refrescarAmazon(cache: Cache, conta: Conta, o: Pick<Opcoes
     }
     const etapas: EtapaAmazon[] = ['pedidos', 'financeiro'];
     const cat = await readCatalogManifest(cache).catch(() => null);
-    if (!cat || agora() - Date.parse(cat.updatedAt) > IDADE_MAX_CATALOGO_MS) etapas.push('anuncios', 'estoque_fba');
+    const refCat = cat ? referenciaDeFrescor(cat.updatedAt, await lerCatalogoVerificadoEm(cache)) : null;
+    if (!refCat || agora() - Date.parse(refCat) > IDADE_MAX_CATALOGO_MS) etapas.push('anuncios', 'estoque_fba');
     const antes = await versao();
     const r = await executarPassoAmazon(cache, conta, { ...o, etapas, orcamentoMs: 10_000, origem: 'dashboard_refresh' });
     if (r.motivo === 'sync_em_andamento') return { acao: 'sync_em_andamento', versao: antes };

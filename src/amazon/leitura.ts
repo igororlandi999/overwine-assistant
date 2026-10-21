@@ -242,6 +242,23 @@ export async function publicarLeitura(cache: Cache, opts: { agora?: Date; origem
   return { pedidos: publicouPedidos, catalogo: await publicarSoCatalogo(cache, agora) };
 }
 
+/**
+ * Última consulta COMPLETA do catálogo na Amazon (anúncios concluídos e
+ * estoque FBA concluído ou sem permissão), mesmo sem mudança de conteúdo.
+ * O manifesto do catálogo só é regravado quando o conteúdo muda, então o
+ * `updatedAt` dele é "última mudança"; o frescor usa o mais recente dos dois.
+ */
+export const CHAVE_CATALOGO_VERIFICADO = 'amz:catalogo:verificadoEm';
+
+export async function lerCatalogoVerificadoEm(cache: Cache): Promise<string | null> {
+  const v = await cache.get(CHAVE_CATALOGO_VERIFICADO).catch(() => null);
+  return typeof v === 'string' && Number.isFinite(Date.parse(v)) ? v : null;
+}
+
+export function referenciaDeFrescor(updatedAt: string, verificadoEm: string | null): string {
+  return verificadoEm && Date.parse(verificadoEm) > Date.parse(updatedAt) ? verificadoEm : updatedAt;
+}
+
 /** Catálogo só existe depois de uma varredura COMPLETA de anúncios (manifesto da coleção). */
 async function publicarSoCatalogo(cache: Cache, agora: Date): Promise<boolean> {
   if (!(await lerManifesto(cache, 'anuncios'))) return false;
