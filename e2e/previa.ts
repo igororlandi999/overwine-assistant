@@ -13,7 +13,7 @@
 import { iniciarAmbiente, SENHA, caminhoDoDashboard, DG_COBERTOS, DG_TARIFA, DG_FRETE } from './ambiente.js';
 
 const porta = Number(process.env.PREVIA_PORTA || 5600);
-const amb = await iniciarAmbiente({ porta, faixa: true, silencioso: true });
+const amb = await iniciarAmbiente({ porta, faixa: true, silencioso: true, expedicao: process.env.PREVIA_EXPEDICAO !== 'false' });
 
 console.log([
   '',

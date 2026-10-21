@@ -1,0 +1,35 @@
+/**
+ * ml-envios — adaptador de rede da expedição: as três leituras de UM envio no
+ * Mercado Livre. Mesma divisão de ml-orders.ts: o serviço não conhece rede,
+ * esta camada injeta o fetch.
+ *
+ * Devolve status + corpo e NÃO lança em HTTP de erro: quem decide o que um
+ * 404 ou um 429 significa é o serviço. Corpo ilegível vira `null`, nunca {}.
+ *
+ * Prazo: GET /shipments/{id}/sla (`expected_date`). O estimated_handling_limit
+ * do /lead_time foi descontinuado pelo ML em 13/05/2025 — a validação real de
+ * 21/10/2026 o encontrou vazio em 52 de 52 envios, com ou sem x-format-new.
+ * O /sla vai com x-format-new, como a documentação de envios faz em todas as
+ * chamadas. /shipments/{id} e /history seguem no formato já validado.
+ */
+import type { Cache } from './cache/cache.js';
+import { mlFetch } from './ml-auth.js';
+import type { FetchersEnvio, RespostaML } from '../services/expedicao.service.js';
+
+export const HEADERS_FORMATO_NOVO: Record<string, string> = { 'x-format-new': 'true' };
+
+async function ler(cache: Cache, path: string, headers?: Record<string, string>): Promise<RespostaML> {
+  const r = await mlFetch(cache, path, headers ? { headers } : {});
+  let data: unknown = null;
+  try { data = await r.json(); } catch { /* corpo vazio ou não-JSON */ }
+  return { status: r.status, data };
+}
+
+export function criarFetchersEnvio(cache: Cache): FetchersEnvio {
+  const id = (s: string) => encodeURIComponent(s);
+  return {
+    envio: s => ler(cache, `/shipments/${id(s)}`),
+    prazo: s => ler(cache, `/shipments/${id(s)}/sla`, HEADERS_FORMATO_NOVO),
+    historico: s => ler(cache, `/shipments/${id(s)}/history`),
+  };
+}

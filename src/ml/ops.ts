@@ -18,6 +18,8 @@ import { z } from 'zod';
 import { getEnv } from '../config/env.js';
 import { mlFetch } from '../lib/ml-auth.js';
 import type { Cache } from '../lib/cache/cache.js';
+import { consultarEnvios, normalizarIds, MAX_IDS } from '../services/expedicao.service.js';
+import { criarFetchersEnvio } from '../lib/ml-envios.js';
 
 // ── Helpers de filtragem ──────────────────────────────────────────────
 type Obj = Record<string, unknown>;
@@ -102,6 +104,12 @@ export interface OpDef {
   headers?: Record<string, string>;
   /** Filtra a resposta do ML para o mínimo necessário. */
   shape: (data: any) => unknown;
+  /**
+   * Execução PRÓPRIA, para a operação que não é uma chamada única ao ML (a
+   * expedição faz várias, com cache e teto). Recebe os params já validados;
+   * `path`/`shape` não são usados quando existe.
+   */
+  exec?: (cache: Cache, p: any, sellerId: string) => Promise<OpResult>;
 }
 
 /**
@@ -199,6 +207,23 @@ export const OPS: Record<string, OpDef> = {
     params: z.object({ id: digits }),
     path: p => `/shipments/${p.id}/costs`,
     shape: d => pick(d, SHIPMENT_COST_FIELDS),
+  },
+
+  // 6b2) Expedição — prazo oficial de postagem e data efetiva do despacho de
+  // até 50 envios por chamada. Lê /shipments/{id}, /sla e /history com
+  // cache incremental, concorrência fixa e cooldown em 429. Só ids, status e
+  // datas: nenhum endereço ou dado de comprador. Ver expedicao.service.ts.
+  'expedicao-envios': {
+    method: 'GET',
+    params: z.object({ ids: z.string().max(1100) }),
+    path: () => '',
+    shape: d => d,
+    exec: async (cache, p) => {
+      const ids = normalizarIds(p.ids);
+      if (!ids) return { status: 400, data: { error: `Parâmetros inválidos — ids: de 1 a ${MAX_IDS} ids numéricos separados por vírgula` } };
+      const r = await consultarEnvios(cache, ids, criarFetchersEnvio(cache));
+      return { status: 200, data: { ok: true, ...r } };
+    },
   },
 
   // 6c) Publicidade — descobre o advertiser_id da conta.
@@ -427,6 +452,7 @@ export async function runOp(cache: Cache, opName: string, rawParams: unknown, se
   }
 
   if (!/^\d+$/.test(sellerId)) return { status: 500, data: { error: 'seller_id_invalido' } };
+  if (op.exec) return op.exec(cache, parsed.data, sellerId);
   const path = op.path(parsed.data, sellerId);
 
   const init: RequestInit = { method: op.method };
