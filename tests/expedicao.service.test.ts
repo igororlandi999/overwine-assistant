@@ -409,6 +409,72 @@ describe('consultarEnvios — incremental', () => {
   });
 });
 
+// ── Envio programado (pending/buffered) — caso real validado em 21/10 ───
+
+describe('envio programado (buffered)', () => {
+  // Formato observado nos envios reais 48313826973 e 48310252408 (21/10/2026):
+  // pending/buffered, xd_drop_off, shipping_option.buffering.date em UTC e
+  // /lead_time respondendo 200 SEM estimated_handling_limit.
+  const buffered = () => envio('pending', 'buffered', 'xd_drop_off', {
+    shipping_option: { buffering: { date: '2026-10-23T00:00:00.000Z' } },
+  });
+
+  it('sai como programado, com a liberação em campo próprio e SEM prazo inventado', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-21T14:00:00-03:00'));
+    const { f, chamadas } = ml({ '48313826973': { envio: buffered(), prazo: ok({ shipping_method: { id: 1 } }) } });
+    const [e] = (await consultarEnvios(cache, ['48313826973'], f)).envios;
+    expect(e.situacao).toBe('programado');
+    expect(e.liberacaoEm).toBe('2026-10-23');   // data escrita pelo ML, não 22/10 21h
+    expect(e.prazoPostagem).toBeNull();          // buffering.date NUNCA vira prazo
+    expect(e.despachadoEm).toBeNull();
+    expect(e.avisos).toEqual(expect.arrayContaining(['lead_time_sem_prazo', 'prazo_nao_informado', 'prazo_atribuido_apos_liberacao']));
+    expect(chamadas).toEqual(['envio:48313826973', 'prazo:48313826973']); // sem histórico
+  });
+
+  it('se o /lead_time já trouxer prazo, o prazo oficial é mantido', async () => {
+    const { f } = ml({ '48310252408': { envio: buffered(), prazo: prazo('2026-10-24T00:00:00.000-03:00') } });
+    const [e] = (await consultarEnvios(cache, ['48310252408'], f)).envios;
+    expect(e.situacao).toBe('programado');
+    expect(e.prazoPostagem).toBe('2026-10-24');
+    expect(e.liberacaoEm).toBe('2026-10-23');
+  });
+
+  it('sem buffering.date: programado com liberação ausente e aviso, nunca data inventada', async () => {
+    const { f } = ml({ '48310000001': { envio: envio('pending', 'buffered', 'xd_drop_off') } });
+    const [e] = (await consultarEnvios(cache, ['48310000001'], f)).envios;
+    expect(e.situacao).toBe('programado');
+    expect(e.liberacaoEm).toBeNull();
+    expect(e.avisos).toContain('liberacao_nao_informada');
+  });
+
+  it('cache: liberação futura revista a cada 10 min; no dia da liberação, a cada 2 min', () => {
+    const p = { ...(JSON.parse('{}')), id: '1', situacao: 'programado', liberacaoEm: '2026-10-23' } as never;
+    expect(ttlDoResultado(p, '2026-10-21')).toBe(TTL_INCOMPLETO_S);
+    expect(ttlDoResultado(p, '2026-10-23')).toBe(TTL_PENDENTE_S);
+    expect(ttlDoResultado({ ...(p as object), liberacaoEm: null } as never, '2026-10-21')).toBe(TTL_PENDENTE_S);
+  });
+
+  it('liberado (ready_to_ship): vira pendente com o prazo oficial atribuído pelo ML', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-22T10:00:00-03:00'));
+    const sim: Record<string, EnvioSim> = { '48313826973': { envio: buffered(), prazo: ok({}) } };
+    const { f } = ml(sim);
+    expect((await consultarEnvios(cache, ['48313826973'], f)).envios[0].situacao).toBe('programado');
+
+    // 23/10: o ML libera a etiqueta e atribui o prazo.
+    vi.setSystemTime(new Date('2026-10-23T08:00:00-03:00'));
+    sim['48313826973'].envio = envio('ready_to_ship', 'ready_to_print', 'xd_drop_off', {
+      shipping_option: { buffering: { date: '2026-10-23T00:00:00.000Z' } },
+    });
+    sim['48313826973'].prazo = prazo('2026-10-23T00:00:00.000-03:00');
+    const [e] = (await consultarEnvios(cache, ['48313826973'], f)).envios;
+    expect(e.situacao).toBe('pendente');
+    expect(e.prazoPostagem).toBe('2026-10-23');
+    expect(e.liberacaoEm).toBeNull(); // liberação só descreve o programado
+  });
+});
+
 // ── Pedidos agrupados e entrada ─────────────────────────────────────────
 
 describe('pedidos agrupados e ids', () => {
@@ -452,7 +518,7 @@ describe('privacidade', () => {
       expect(saida).not.toContain(proibido);
     }
     expect(Object.keys(r.envios[0]).sort()).toEqual([
-      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'logistica', 'prazoPostagem', 'situacao', 'status', 'substatus',
+      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoPostagem', 'situacao', 'status', 'substatus',
     ]);
     // E o que fica no Redis também não carrega dado pessoal.
     expect(JSON.stringify([...cache.store.values()])).not.toContain('Rua Secreta');

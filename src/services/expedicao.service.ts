@@ -32,6 +32,17 @@
  * qualificado do histórico.
  *
  * ─────────────────────────────────────────────────────────────────────────
+ * ENVIO PROGRAMADO (pending/buffered)
+ *
+ * O ML segura o envio até `buffering.date` ("Fecha que podrá realizar el
+ * envío", doc. Mercado Envios 2) e só então libera a etiqueta. Nesse estado o
+ * /lead_time responde SEM estimated_handling_limit — verificado em envios reais
+ * xd_drop_off em 21/10/2026. Por isso o envio sai como 'programado', com
+ * `liberacaoEm` em campo próprio e `prazoPostagem: null`: a data de liberação
+ * não é prazo e nunca é copiada para ele. Ao sair de buffered, o envio volta
+ * a ser 'pendente' e o prazo vem do /lead_time.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
  * AUSENTE NÃO É ZERO
  *
  * Prazo ou data ausentes saem como `null`, com o motivo em `avisos`. Um envio
@@ -63,11 +74,13 @@
  * Nenhum dado de comprador entra ou sai daqui: só ids, status e datas.
  */
 import type { Cache } from '../lib/cache/cache.js';
+import { hojeBRT } from '../lib/datas-brt.js';
 
 // ── Tipos ───────────────────────────────────────────────────────────────
 
 export type Situacao =
   | 'pendente'     // ainda com o vendedor
+  | 'programado'   // pending/buffered: o ML ainda não liberou a etiqueta (ver liberacaoEm)
   | 'despachado'   // saiu da mão do vendedor
   | 'cancelado'    // envio cancelado: não sai mais
   | 'full'         // Full: despacho é do Mercado Livre, fora da expedição
@@ -83,6 +96,12 @@ export interface EnvioExpedicao {
   substatus: string | null;
   /** Prazo oficial de postagem, 'YYYY-MM-DD' (dia civil informado pelo ML). */
   prazoPostagem: string | null;
+  /**
+   * Só para 'programado': dia em que o ML LIBERA o envio (etiqueta disponível),
+   * de `buffering.date`. NÃO é prazo de postagem e nunca é copiado para
+   * `prazoPostagem`: o prazo oficial só é atribuído depois da liberação.
+   */
+  liberacaoEm: string | null;
   /** Instante do primeiro evento de despacho (ISO, como o ML enviou). */
   despachadoEm: string | null;
   /** Quando o backend leu o ML pela última vez para este envio. */
@@ -174,7 +193,12 @@ export interface DadosEnvio {
   prazoNoEnvio: string | null;
   /** Fallback de data quando /history não traz o evento. */
   dataShippedNoEnvio: string | null;
+  /** buffering.date: dia de LIBERAÇÃO do envio programado. Não é prazo. */
+  liberacao: string | null;
 }
+
+/** Substatus de pending em que o ML segura o envio até a data de liberação. */
+export const SUBSTATUS_PROGRAMADO = 'buffered';
 
 export function extrairEnvio(data: unknown): DadosEnvio | null {
   const o = obj(data);
@@ -190,6 +214,9 @@ export function extrairEnvio(data: unknown): DadosEnvio | null {
       diaDoCampo(obj(lt?.estimated_handling_limit)?.date) ??
       diaDoCampo(obj(so?.estimated_handling_limit)?.date),
     dataShippedNoEnvio: str(sh?.date_shipped),
+    liberacao:
+      diaDoCampo(obj(lt?.buffering)?.date) ??
+      diaDoCampo(obj(so?.buffering)?.date),
   };
 }
 
@@ -253,10 +280,13 @@ export const CONCORRENCIA_PADRAO = 4;
  * TTL de um resultado. Final só quando nada mais muda: Full, cancelado e
  * despachado COM data. Despachado sem data continua sendo revisto.
  */
-export function ttlDoResultado(e: EnvioExpedicao): number {
+export function ttlDoResultado(e: EnvioExpedicao, hoje: string = hojeBRT()): number {
   if (e.situacao === 'full' || e.situacao === 'cancelado') return TTL_FINAL_S;
   if (e.situacao === 'despachado') return e.despachadoEm ? TTL_FINAL_S : TTL_INCOMPLETO_S;
   if (e.situacao === 'outro') return TTL_INCOMPLETO_S;
+  // Programado com liberação FUTURA: nada muda até lá além de cancelamento.
+  // No dia da liberação (ou sem data) volta ao ritmo do pendente.
+  if (e.situacao === 'programado' && e.liberacaoEm && e.liberacaoEm > hoje) return TTL_INCOMPLETO_S;
   return TTL_PENDENTE_S;
 }
 
@@ -291,7 +321,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, despachadoEm: null, consultadoEm: null, avisos,
+    prazoPostagem: null, liberacaoEm: null, despachadoEm: null, consultadoEm: null, avisos,
   };
 }
 
@@ -320,7 +350,7 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, liberacaoEm: null, despachadoEm: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
@@ -356,6 +386,18 @@ async function resolverEnvio(
   }
   base.prazoPostagem = prazo;
   if (!prazo) base.avisos.push('prazo_nao_informado');
+
+  // Programado (pending/buffered): o ML segura o envio até buffering.date e
+  // só então libera a etiqueta e atribui o prazo de postagem. A data de
+  // liberação sai em campo PRÓPRIO; não vira prazo, não entra em "a enviar"
+  // nem em atraso. Se o /lead_time já trouxer prazo, ele é mantido.
+  if (d.status === 'pending' && d.substatus === SUBSTATUS_PROGRAMADO) {
+    base.situacao = 'programado';
+    base.liberacaoEm = d.liberacao;
+    if (!prazo) base.avisos.push('prazo_atribuido_apos_liberacao');
+    if (!d.liberacao) base.avisos.push('liberacao_nao_informada');
+    return base;
+  }
 
   if (!despachou) return base;
 
@@ -439,7 +481,7 @@ export async function consultarEnvios(
         const e = await resolverEnvio(cache, id, f, orc, agoraIso);
         saida.set(id, e);
         if (e.situacao !== 'indisponivel') {
-          await cache.set(chaveEnvio(id), JSON.stringify(e), ttlDoResultado(e));
+          await cache.set(chaveEnvio(id), JSON.stringify(e), ttlDoResultado(e, hojeBRT(opcoes.agora ?? new Date())));
         }
       } catch (err) {
         if (err instanceof LimiteML) saida.set(id, vazio(id, 'aguardando', [err.motivo]));
