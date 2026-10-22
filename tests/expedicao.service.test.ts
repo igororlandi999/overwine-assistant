@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FakeCache, TEST_ENV } from './fake-cache.js';
 import {
-  consultarEnvios, extrairDespacho, extrairPrazo, extrairLimite, extrairEnvio, diaDoCampo, normalizarIds,
+  consultarEnvios, extrairDespacho, extrairPrazo, extrairLimite, interpretarAtrasos, prazoVencido, extrairEnvio, diaDoCampo, normalizarIds,
   eventoEhDespacho, CHAVE_COOLDOWN, TTL_PENDENTE_S, MAX_IDS,
   TTL_INCOMPLETO_S, TTL_FINAL_S, ttlDoResultado,
   type FetchersEnvio, type RespostaML,
@@ -17,6 +17,7 @@ interface EnvioSim {
   envio?: RespostaML | (() => Promise<RespostaML>);
   prazo?: RespostaML;
   historico?: RespostaML;
+  atrasos?: RespostaML;
 }
 
 function ml(sim: Record<string, EnvioSim>) {
@@ -31,6 +32,7 @@ function ml(sim: Record<string, EnvioSim>) {
     },
     async prazo(id) { chamadas.push(`prazo:${id}`); return sim[id]?.prazo ?? ok({}); },
     async historico(id) { chamadas.push(`hist:${id}`); return sim[id]?.historico ?? ok([]); },
+    async atrasos(id) { chamadas.push(`atraso:${id}`); return sim[id]?.atrasos ?? { status: 404, data: { message: 'Delays Not Found for shipment' } }; },
   };
   return { f, chamadas };
 }
@@ -119,7 +121,7 @@ describe('caso real 48265507555 (ready_to_ship/in_hub) e substatus fora da lista
     const [e] = (await consultarEnvios(cache, ['48265507555'], f)).envios;
     expect(e.situacao).toBe('despachado');
     expect(e.despachadoEm).toBe('2026-10-20T16:20:00.000-03:00');
-    expect(e.prazoPostagem).toBe('2026-10-20');
+    expect(e.atrasoML).toBeNull();
   });
 
   it('se o histórico tiver a agência antes do hub, vale o primeiro evento (agência)', () => {
@@ -174,6 +176,77 @@ describe('horário-limite do SLA', () => {
   });
 });
 
+describe('prazo vencido x atraso confirmado pelo Mercado Livre (/delays)', () => {
+  // Caso real de 21/10: 4 pendentes com SLA em 20/10 12:30 que o painel do ML NÃO mostra como atrasados.
+  const agora = new Date('2026-10-21T10:00:00-03:00');
+  const pendenteVencido = (atrasos?: RespostaML) => ({
+    envio: envio('ready_to_ship', 'ready_for_pickup', 'cross_docking'),
+    prazo: ok({ status: 'on_time', expected_date: '2026-10-20T12:30:00.000-03:00' }),
+    ...(atrasos ? { atrasos } : {}),
+  });
+
+  it('vencido na nossa comparação, ML sem atraso (404): nao_indicado, nunca "atrasado"', async () => {
+    const { f, chamadas } = ml({ '70100': pendenteVencido() });
+    const [e] = (await consultarEnvios(cache, ['70100'], f, { agora })).envios;
+    expect(e).toMatchObject({ situacao: 'pendente', prazoPostagem: '2026-10-20', prazoLimiteEm: '2026-10-20T12:30:00.000-03:00', atrasoML: 'nao_indicado', atrasoTipos: [] });
+    expect(chamadas).toEqual(['envio:70100', 'prazo:70100', 'atraso:70100']);
+  });
+
+  it('ML lista atraso: confirmado, com os tipos como o ML enviou', async () => {
+    const { f } = ml({ '70101': pendenteVencido(ok([{ type: 'handling_delayed', date: '2026-10-21T00:00:00.000-03:00' }, { type: 'handling_delayed' }])) });
+    const [e] = (await consultarEnvios(cache, ['70101'], f, { agora })).envios;
+    expect(e).toMatchObject({ atrasoML: 'confirmado', atrasoTipos: ['handling_delayed'] });
+  });
+
+  it('formato inesperado ou HTTP de erro: atraso desconhecido (null), com aviso, sem cache', async () => {
+    const { f, chamadas } = ml({
+      '70102': pendenteVencido({ status: 500, data: null }),
+      '70103': pendenteVencido(ok({ algo: 'diferente' })),
+    });
+    const r = await consultarEnvios(cache, ['70102', '70103'], f, { agora, concorrencia: 1 });
+    expect(r.envios[0]).toMatchObject({ atrasoML: null });
+    expect(r.envios[0].avisos).toContain('delays_http_500');
+    expect(r.envios[1]).toMatchObject({ atrasoML: null });
+    expect(interpretarAtrasos({ status: 200, data: [] })).toEqual({ atraso: 'nao_indicado', tipos: [] });
+    // 404 só é "sem atraso" com a mensagem documentada; outro 404 é desconhecido.
+    expect(interpretarAtrasos({ status: 404, data: { message: 'Delays Not Found for shipment', error: 'not_found', status: 404 } })).toEqual({ atraso: 'nao_indicado', tipos: [] });
+    expect(interpretarAtrasos({ status: 404, data: { message: 'Shipment not found' } })).toBeNull();
+    expect(interpretarAtrasos({ status: 404, data: null })).toBeNull();
+    expect(interpretarAtrasos({ status: 200, data: { type: 'sla_delayed' } })).toEqual({ atraso: 'confirmado', tipos: ['sla_delayed'] });
+    void chamadas;
+  });
+
+  it('prazo ainda não vencido (hoje, ou horário-limite futuro): /delays não é consultado', async () => {
+    const cedo = new Date('2026-10-20T11:00:00-03:00');
+    const { f, chamadas } = ml({ '70104': pendenteVencido() });
+    const [e] = (await consultarEnvios(cache, ['70104'], f, { agora: cedo })).envios;
+    expect(e.atrasoML).toBeNull();
+    expect(chamadas).toEqual(['envio:70104', 'prazo:70104']);
+    expect(prazoVencido('2026-10-20', '2026-10-20T12:30:00.000-03:00', '2026-10-20T12:29:00.000-03:00')).toBe(false);
+    expect(prazoVencido('2026-10-20', '2026-10-20T12:30:00.000-03:00', '2026-10-20T12:31:00.000-03:00')).toBe(true);
+    expect(prazoVencido('2026-10-20', null, '2026-10-20T23:00:00.000-03:00')).toBe(false); // sem horário: o dia todo
+    expect(prazoVencido('2026-10-20', null, '2026-10-21T00:01:00.000-03:00')).toBe(true);
+  });
+
+  it('a resposta do ML sobre atraso fica em cache: a revisão do pendente não repete /delays', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(agora);
+    const { f, chamadas } = ml({ '70105': pendenteVencido() });
+    await consultarEnvios(cache, ['70105'], f);
+    vi.setSystemTime(Date.now() + (TTL_PENDENTE_S + 1) * 1000);
+    chamadas.length = 0;
+    const [e] = (await consultarEnvios(cache, ['70105'], f)).envios;
+    expect(chamadas).toEqual(['envio:70105']);
+    expect(e.atrasoML).toBe('nao_indicado');
+  });
+
+  it('programado nunca é consultado em /delays (não tem prazo de postagem ainda)', async () => {
+    const { f, chamadas } = ml({ '70106': { envio: envio('pending', 'buffered', 'xd_drop_off', { shipping_option: { buffering: { date: '2026-10-19T00:00:00.000Z' } } }), prazo: ok({}) } });
+    await consultarEnvios(cache, ['70106'], f, { agora });
+    expect(chamadas).not.toContain('atraso:70106');
+  });
+});
+
 describe('o que conta como despacho', () => {
   it('etiqueta gerada, impressa, preparação e pagamento NÃO são despacho', () => {
     expect(eventoEhDespacho('ready_to_ship', 'ready_to_print')).toBe(false);
@@ -220,16 +293,16 @@ describe('consultarEnvios — situações', () => {
     const { f, chamadas } = ml({
       '40001': { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-19T00:00:00.000-03:00') },
     });
-    const r = await consultarEnvios(cache, ['40001'], f);
+    const r = await consultarEnvios(cache, ['40001'], f, { agora: new Date('2026-10-19T09:00:00-03:00') });
     expect(r.envios[0]).toMatchObject({
       id: '40001', situacao: 'pendente', status: 'ready_to_ship', substatus: 'printed',
       prazoPostagem: '2026-10-19', despachadoEm: null,
     });
-    expect(chamadas).toEqual(['envio:40001', 'prazo:40001']); // histórico não é pedido
+    expect(chamadas).toEqual(['envio:40001', 'prazo:40001']); // histórico e /delays não são pedidos (prazo hoje)
   });
 
   it('deixado na agência: despachado com a data do histórico', async () => {
-    const { f } = ml({
+    const { f, chamadas: chamadasML } = ml({
       '40002': {
         envio: envio('ready_to_ship', 'dropped_off'),
         prazo: prazo('2026-10-20T00:00:00.000-03:00'),
@@ -237,10 +310,13 @@ describe('consultarEnvios — situações', () => {
                         ['ready_to_ship', 'dropped_off', '2026-10-19T15:12:00.000-03:00']),
       },
     });
+    const { chamadas } = { chamadas: [] as string[] };
     const [e] = (await consultarEnvios(cache, ['40002'], f)).envios;
     expect(e.situacao).toBe('despachado');
     expect(e.despachadoEm).toBe('2026-10-19T15:12:00.000-03:00');
-    expect(e.prazoPostagem).toBe('2026-10-20'); // despachado ANTES do prazo continua com o prazo
+    // Despachado não consulta o SLA: o prazo de quem já saiu não muda nenhum grupo.
+    expect(e.prazoPostagem).toBeNull();
+    void chamadas;
   });
 
   it('despachado sem data em lugar nenhum: despachado, data null, com aviso', async () => {
@@ -251,7 +327,7 @@ describe('consultarEnvios — situações', () => {
     expect(e.situacao).toBe('despachado');
     expect(e.despachadoEm).toBeNull();
     expect(e.prazoPostagem).toBeNull();
-    expect(e.avisos).toEqual(expect.arrayContaining(['data_despacho_nao_informada', 'prazo_nao_informado']));
+    expect(e.avisos).toEqual(['data_despacho_nao_informada']);
   });
 
   it('histórico falhou: usa status_history.date_shipped do envio, marcado', async () => {
@@ -363,12 +439,13 @@ describe('consultarEnvios — falhas do Mercado Livre', () => {
     const ids = ['60001', '60002', '60003', '60004'];
     for (const id of ids) sim[id] = { envio: envio('ready_to_ship', 'printed'), prazo: prazo('2026-10-19T00:00:00-03:00') };
     const { f } = ml(sim);
-    const r = await consultarEnvios(cache, ids, f, { maxChamadas: 4, concorrencia: 1 });
+    const agora = new Date('2026-10-19T09:00:00-03:00'); // prazo hoje: sem /delays
+    const r = await consultarEnvios(cache, ids, f, { maxChamadas: 4, concorrencia: 1, agora });
     expect(r.chamadasML).toBe(4);
     expect(r.envios.map(e => e.situacao)).toEqual(['pendente', 'pendente', 'aguardando', 'aguardando']);
     expect(r.aguardando).toBe(2);
     // A passada seguinte completa só os que faltavam.
-    const r2 = await consultarEnvios(cache, ids, f, { maxChamadas: 4, concorrencia: 1 });
+    const r2 = await consultarEnvios(cache, ids, f, { maxChamadas: 4, concorrencia: 1, agora });
     expect(r2.envios.every(e => e.situacao === 'pendente')).toBe(true);
     expect(r2.chamadasML).toBe(4);
   });
@@ -609,7 +686,7 @@ describe('privacidade', () => {
       expect(saida).not.toContain(proibido);
     }
     expect(Object.keys(r.envios[0]).sort()).toEqual([
-      'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoLimiteEm', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
+      'atrasoML', 'atrasoTipos', 'avisos', 'consultadoEm', 'despachadoEm', 'id', 'liberacaoEm', 'logistica', 'prazoLimiteEm', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
     ]);
     // E o que fica no Redis também não carrega dado pessoal.
     expect(JSON.stringify([...cache.store.values()])).not.toContain('Rua Secreta');
@@ -635,27 +712,31 @@ describe('op expedicao-envios (proxy)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('chama as três rotas oficiais com Bearer e devolve o formato da aba', async () => {
-    const respostas: Record<string, unknown> = {
-      'https://api.mercadolibre.com/shipments/44445555': { status: 'ready_to_ship', substatus: 'dropped_off', logistic_type: 'xd_drop_off' },
-      'https://api.mercadolibre.com/shipments/44445555/sla': { status: 'on_time', expected_date: '2026-10-19T23:59:59.000-03:00' },
-      'https://api.mercadolibre.com/shipments/44445555/history': [{ status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-19T13:00:00.000-03:00' }],
+  it('chama as rotas oficiais com Bearer: envio+histórico no despachado; envio+SLA+delays no vencido', async () => {
+    const respostas: Record<string, [number, unknown]> = {
+      'https://api.mercadolibre.com/shipments/44445555': [200, { status: 'ready_to_ship', substatus: 'dropped_off', logistic_type: 'xd_drop_off' }],
+      'https://api.mercadolibre.com/shipments/44445555/history': [200, [{ status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-19T13:00:00.000-03:00' }]],
+      'https://api.mercadolibre.com/shipments/44446666': [200, { status: 'ready_to_ship', substatus: 'printed', logistic_type: 'xd_drop_off' }],
+      'https://api.mercadolibre.com/shipments/44446666/sla': [200, { status: 'on_time', expected_date: '2026-10-19T12:30:00.000-03:00' }],
+      'https://api.mercadolibre.com/shipments/44446666/delays': [404, { message: 'Delays Not Found for shipment' }],
     };
-    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
-      new Response(JSON.stringify(respostas[String(url)] ?? {}), { status: respostas[String(url)] ? 200 : 404 }) as unknown as Response);
-    const r = await runOp(cache, 'expedicao-envios', { ids: '44445555' }, TEST_ENV.ML_USER_ID);
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const [st, b] = respostas[String(url)] ?? [404, {}];
+      return new Response(JSON.stringify(b), { status: st }) as unknown as Response;
+    });
+    const r = await runOp(cache, 'expedicao-envios', { ids: '44445555,44446666' }, TEST_ENV.ML_USER_ID);
     expect(r.status).toBe(200);
     const d = r.data as { ok: boolean; envios: Array<Record<string, unknown>>; chamadasML: number };
     expect(d.ok).toBe(true);
-    expect(d.chamadasML).toBe(3);
-    expect(d.envios[0]).toMatchObject({ situacao: 'despachado', prazoPostagem: '2026-10-19', despachadoEm: '2026-10-19T13:00:00.000-03:00' });
+    expect(d.chamadasML).toBe(5);
+    expect(d.envios[0]).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-19T13:00:00.000-03:00' });
+    expect(d.envios[1]).toMatchObject({ situacao: 'pendente', prazoPostagem: '2026-10-19', atrasoML: 'nao_indicado', slaStatus: 'on_time' });
     const urls = spy.mock.calls.map(c => String(c[0])).sort();
     expect(urls).toEqual(Object.keys(respostas).sort());
     for (const [url, init] of spy.mock.calls) {
       expect(String(url)).not.toContain('access_token');
       const h = init?.headers as Record<string, string>;
       expect(h.Authorization).toBe('Bearer AT-teste');
-      // Só o /sla pede o formato novo; envio e histórico seguem no validado.
       expect(h['x-format-new'], String(url)).toBe(String(url).endsWith('/sla') ? 'true' : undefined);
     }
   });

@@ -31,5 +31,6 @@ export function criarFetchersEnvio(cache: Cache): FetchersEnvio {
     envio: s => ler(cache, `/shipments/${id(s)}`),
     prazo: s => ler(cache, `/shipments/${id(s)}/sla`, HEADERS_FORMATO_NOVO),
     historico: s => ler(cache, `/shipments/${id(s)}/history`),
+    atrasos: s => ler(cache, `/shipments/${id(s)}/delays`),
   };
 }

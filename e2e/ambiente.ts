@@ -92,7 +92,9 @@ export function criarLojas(): Record<string, Loja> {
   const ow: Loja = { conta: OW, uid: UID_OW, item: 'MLB1000001', preco: 300, saldo: 40, vendidos: 900, pedidos: [], cancelados: [], visitasDia: 200, nivel: '5_green', apelido: 'OVERWINE-SIMULADA', fretes: new Map() };
   const dg: Loja = { conta: DG, uid: UID_DG, item: 'MLB2000001', preco: 100, saldo: 8, vendidos: 60, pedidos: [], cancelados: [], visitasDia: 30, nivel: '4_light_green', apelido: 'DEGUSTAR-SIMULADA', fretes: new Map() };
   // Overwine: 120 pedidos de R$ 300, um a cada 8 h. Degustar: 21 de R$ 100, um a cada 36 h.
-  for (let i = 0; i < 120; i++) ow.pedidos.push(pedidoML(100000 + i, 3 + i * 8, 300, ow.item, 'COMPRADOR_SIMULADO_OW', { tarifa: 40 }));
+  // PREVIA_OW_PEDIDOS: histórico maior só para medir desempenho (padrão 120, o do roteiro).
+  const nOW = Number(process.env.PREVIA_OW_PEDIDOS || 120);
+  for (let i = 0; i < nOW; i++) ow.pedidos.push(pedidoML(100000 + i, 3 + i * 8, 300, ow.item, 'COMPRADOR_SIMULADO_OW', { tarifa: 40 }));
   for (let i = 0; i < 21; i++) {
     const coberto = i < DG_COBERTOS;
     const p = pedidoML(200000 + i, 5 + i * 36, 100, dg.item, 'COMPRADOR_SIMULADO_DG', { tarifa: coberto ? DG_TARIFA : null });
@@ -152,7 +154,10 @@ function instalarMercadoLivreSimulado(lojas: Record<string, Loja>, mlLog: Regist
     const todos = () => [...loja.pedidos, ...loja.cancelados];
     // Expedição simulada (só com { expedicao: true }): envios próprios do cenário.
     const exp = cenario ? respostaExpedicao(cenario, p, h) : null;
-    if (exp) return j(exp.body, exp.status);
+    if (exp) {
+      if (cenario && cenario.latenciaMs > 0) await new Promise(r => setTimeout(r, cenario.latenciaMs));
+      return j(exp.body, exp.status);
+    }
     let m: RegExpMatchArray | null;
 
     if (p === '/orders/search') {
@@ -245,7 +250,7 @@ export async function iniciarAmbiente(op: OpcoesAmbiente): Promise<Ambiente> {
   if (op.silencioso) { console.info = () => {}; }
 
   const lojas = criarLojas();
-  const cenario = op.expedicao ? aplicarCenarioExpedicao(lojas[TOK_OW].pedidos, lojas[TOK_DG].pedidos) : null;
+  const cenario = op.expedicao ? aplicarCenarioExpedicao(lojas[TOK_OW].pedidos, lojas[TOK_DG].pedidos, Number(process.env.PREVIA_EXP_VOLUME || 0), Number(process.env.PREVIA_EXP_LATENCIA_MS || 0)) : null;
   const mlLog: RegistroML[] = [];
   const httpLog: RegistroHttp[] = [];
   const fetchReal = globalThis.fetch;
