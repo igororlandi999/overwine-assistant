@@ -49,29 +49,34 @@ export const STATUS_VENDA: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * AMAZON — lista PRÓPRIA, decidida sobre o contrato da Orders API
- * v2026-01-01 (FulfillmentStatus), não copiada da do Mercado Livre. Os
- * pedidos da Amazon chegam à leitura com o status prefixado (`amazon:`), então
- * nenhum status de um canal pode coincidir com o do outro. A tabela completa,
- * com o motivo de cada decisão, está em src/amazon/leitura.ts
- * (STATUS_AMAZON) e no README; é ela que gera este conjunto.
+ * AMAZON — regra de EXCLUSÃO, própria da Amazon (decisão do proprietário,
+ * 21/10/2026): "todo pedido Amazon entra no faturamento, exceto CANCELADO".
  *
- * Entram: pedido com pagamento autorizado, pronto para envio ou enviado
- * (UNSHIPPED, PARTIALLY_SHIPPED, SHIPPED). Ficam de fora: PENDING e
- * PENDING_AVAILABILITY (sem pagamento autorizado), CANCELLED e UNFULFILLABLE.
+ * Diferente do Mercado Livre (lista de permissão acima), na Amazon pendente,
+ * a enviar, enviado, pré-venda, não atendível e até status desconhecido
+ * entram; só `amazon:cancelled` fica fora. Os pedidos da Amazon chegam à
+ * leitura com o status prefixado (`amazon:`), então a regra nunca alcança um
+ * pedido do Mercado Livre.
+ *
+ * Vale só para o cálculo comercial: o status bruto é preservado e exibido
+ * como veio ("Pendente" continua "Pendente"). Os lançamentos financeiros da
+ * Amazon seguem sendo só o dinheiro que a Amazon lançou.
  */
-export const STATUS_VENDA_AMAZON: ReadonlySet<string> = new Set([
-  'amazon:unshipped',
-  'amazon:partially_shipped',
-  'amazon:shipped',
-]);
+export const PREFIXO_STATUS_AMAZON = 'amazon:';
+export const STATUS_CANCELADO_AMAZON = 'amazon:cancelled';
+
+/** Pedido da Amazon (status prefixado) que conta como venda: qualquer um, menos cancelado. */
+export function contaComoVendaAmazon(status: string | null | undefined): boolean {
+  return typeof status === 'string' && status.startsWith(PREFIXO_STATUS_AMAZON) && status !== STATUS_CANCELADO_AMAZON;
+}
 
 /**
  * Único predicado de status do sistema. Use SEMPRE isto — nunca compare
- * `status` com string solta, e nunca escreva `!== 'cancelled'`.
+ * `status` com string solta. Mercado Livre: lista de permissão (STATUS_VENDA).
+ * Amazon: tudo menos cancelado (contaComoVendaAmazon).
  */
 export function contaComoVenda(status: string | null | undefined): boolean {
-  return typeof status === 'string' && (STATUS_VENDA.has(status) || STATUS_VENDA_AMAZON.has(status));
+  return typeof status === 'string' && (STATUS_VENDA.has(status) || contaComoVendaAmazon(status));
 }
 
 /**
