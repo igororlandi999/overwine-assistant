@@ -19,7 +19,7 @@ import { getEnv } from '../config/env.js';
 import { mlFetch } from '../lib/ml-auth.js';
 import type { Cache } from '../lib/cache/cache.js';
 import { consultarEnvios, normalizarIds, MAX_IDS } from '../services/expedicao.service.js';
-import { criarFetchersEnvio } from '../lib/ml-envios.js';
+import { criarFetchersEnvio, diagnosticarBipagem } from '../lib/ml-envios.js';
 
 // ── Helpers de filtragem ──────────────────────────────────────────────
 type Obj = Record<string, unknown>;
@@ -224,6 +224,16 @@ export const OPS: Record<string, OpDef> = {
       const r = await consultarEnvios(cache, ids, criarFetchersEnvio(cache));
       return { status: 200, data: { ok: true, ...r } };
     },
+  },
+
+  // 6b3) TEMPORÁRIO (branch diag/) — evidência da bipagem na agência de UM
+  // envio, sem dados pessoais. Nunca vai para a main.
+  'expedicao-diagnostico': {
+    method: 'GET',
+    params: z.object({ id: digits }),
+    path: () => '',
+    shape: d => d,
+    exec: async (cache, p) => ({ status: 200, data: { ok: true, ...(await diagnosticarBipagem(cache, p.id)) } }),
   },
 
   // 6c) Publicidade — descobre o advertiser_id da conta.

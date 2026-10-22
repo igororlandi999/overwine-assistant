@@ -34,3 +34,49 @@ export function criarFetchersEnvio(cache: Cache): FetchersEnvio {
     atrasos: s => ler(cache, `/shipments/${id(s)}/delays`),
   };
 }
+
+// ── Diagnóstico TEMPORÁRIO da bipagem na agência (branch diag/, não vai para a main) ──
+//
+// Para descobrir qual evento comprova que a agência recebeu o pacote: devolve,
+// de UM envio, status/substatus/histórico com horários em todas as formas que a
+// API pública oferece (envio no formato antigo e no novo, /history, /sla e
+// /delays). Só caminhos de campo; valores apenas de status, substatus, datas,
+// tipos e ids. Qualquer caminho que lembre pessoa ou endereço é descartado.
+
+const DIAG_PROIBIDO = /(address|receiver|sender|buyer|seller_id|name|phone|email|document|doc_|zip|street|city|state_name|neighborhood|municipality|comment|geo|latitude|longitude|contact|tracking_number|identification|nickname|cost|price|amount)/i;
+const DIAG_VALOR = /(date|status|substatus|type|mode|time|limit|buffer|expected|updated|created|event|code|description|service|^\d+$|id$)/i;
+
+export function diagEstrutura(data: unknown, prof = 0, prefixo = '', out: Record<string, unknown> = {}): Record<string, unknown> {
+  if (Object.keys(out).length >= 400) return out;
+  if (data === null || typeof data !== 'object') {
+    if (prefixo) out[prefixo] = DIAG_VALOR.test(prefixo.split('.').pop() ?? '') ? data : `<${data === null ? 'null' : typeof data}>`;
+    return out;
+  }
+  if (prof >= 7) { out[prefixo || '(raiz)'] = '<profundo>'; return out; }
+  const entradas = Array.isArray(data) ? data.slice(0, 60).map((v, i) => [String(i), v] as const) : Object.entries(data);
+  if (entradas.length === 0) { if (prefixo) out[prefixo] = Array.isArray(data) ? '<lista vazia>' : '<objeto vazio>'; return out; }
+  for (const [k, v] of entradas) {
+    if (DIAG_PROIBIDO.test(k)) continue;
+    diagEstrutura(v, prof + 1, prefixo ? `${prefixo}.${k}` : k, out);
+  }
+  return out;
+}
+
+export async function diagnosticarBipagem(cache: Cache, shipmentId: string): Promise<Record<string, unknown>> {
+  const id = encodeURIComponent(shipmentId);
+  const [envio, envioNovo, historico, sla, atrasos] = await Promise.all([
+    ler(cache, `/shipments/${id}`),
+    ler(cache, `/shipments/${id}`, HEADERS_FORMATO_NOVO),
+    ler(cache, `/shipments/${id}/history`),
+    ler(cache, `/shipments/${id}/sla`, HEADERS_FORMATO_NOVO),
+    ler(cache, `/shipments/${id}/delays`),
+  ]);
+  return {
+    id: shipmentId,
+    envio: { http: envio.status, campos: diagEstrutura(envio.data) },
+    envioFormatoNovo: { http: envioNovo.status, campos: diagEstrutura(envioNovo.data) },
+    historico: { http: historico.status, campos: diagEstrutura(historico.data) },
+    sla: { http: sla.status, campos: diagEstrutura(sla.data) },
+    delays: { http: atrasos.status, campos: diagEstrutura(atrasos.data) },
+  };
+}

@@ -756,3 +756,18 @@ describe('op expedicao-envios (proxy)', () => {
     expect(e.avisos).toEqual(expect.arrayContaining(['sla_http_404', 'prazo_nao_informado']));
   });
 });
+
+describe('diagnóstico temporário da bipagem (branch diag/)', () => {
+  it('mostra status, substatus e datas de todas as fontes, sem nada pessoal', async () => {
+    const { diagEstrutura } = await import('../src/lib/ml-envios.js');
+    const d = diagEstrutura({
+      status: 'ready_to_ship', substatus: 'in_packing_list',
+      substatus_history: [{ status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-21T15:02:00.000-03:00' }],
+      receiver_address: { street_name: 'Rua Secreta' }, buyer: { nickname: 'FULANO' }, base_cost: 19.9,
+    });
+    expect(d['substatus_history.0.substatus']).toBe('dropped_off');
+    expect(d['substatus_history.0.date']).toBe('2026-10-21T15:02:00.000-03:00');
+    const texto = JSON.stringify(d);
+    for (const proibido of ['Rua Secreta', 'FULANO', 'receiver', 'buyer', '19.9']) expect(texto).not.toContain(proibido);
+  });
+});
