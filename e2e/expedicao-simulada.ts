@@ -27,6 +27,8 @@ interface Caso {
   despacho?: { dias: number; hora: string };
   /** O ML reconhece atraso em /delays (senão 404). */
   atrasoML?: boolean;
+  /** O ML NÃO registra o dropped_off (só eventos posteriores). */
+  semAgencia?: boolean;
 }
 
 export interface CenarioExpedicao {
@@ -58,6 +60,8 @@ const CASOS_OW: Array<[number, Caso]> = [
   [100011, { rotulo: 'Full fora do mapa (não aparece)', status: 'shipped', substatus: 'in_transit', logistica: 'fulfillment', prazo: null }],
   [100013, { rotulo: 'postado ontem na agência, hoje in_packing_list', status: 'ready_to_ship', substatus: 'in_packing_list', logistica: 'xd_drop_off', prazo: -1, despacho: { dias: -1, hora: '12:13' } }],
   [100014, { rotulo: 'programado, libera em 5 dias, pacote com 2 pedidos', status: 'pending', substatus: 'buffered', logistica: 'xd_drop_off', prazo: null, liberacao: 5 }],
+  [100017, { rotulo: 'entregue ontem, sem registro da bipagem', status: 'delivered', substatus: null, logistica: 'xd_drop_off', prazo: -2, despacho: { dias: -1, hora: '12:00' }, semAgencia: true }],
+  [100018, { rotulo: 'packing list sem bipagem registrada (conferir)', status: 'ready_to_ship', substatus: 'in_packing_list', logistica: 'xd_drop_off', prazo: -1, despacho: { dias: -1, hora: '12:00' }, semAgencia: true }],
   [100016, { rotulo: 'programado, libera hoje', status: 'pending', substatus: 'buffered', logistica: 'xd_drop_off', prazo: null, liberacao: 0 }],
 ];
 const CASOS_DG: Array<[number, Caso]> = [
@@ -147,7 +151,7 @@ function eventos(caso: Caso): Array<{ status: string; substatus: string | null; 
     { status: 'ready_to_ship', substatus: 'ready_to_print', date: emMenos4(-2, '10:05') },
   ];
   if (caso.despacho) {
-    ev.push({ status: 'ready_to_ship', substatus: 'dropped_off', date: emMenos4(caso.despacho.dias, caso.despacho.hora) });
+    if (!caso.semAgencia) ev.push({ status: 'ready_to_ship', substatus: 'dropped_off', date: emMenos4(caso.despacho.dias, caso.despacho.hora) });
     if (caso.substatus === 'in_packing_list') ev.push({ status: 'ready_to_ship', substatus: 'in_packing_list', date: emMenos4(caso.despacho.dias, '20:40') });
     if (caso.status !== 'ready_to_ship') ev.push({ status: 'shipped', substatus: 'in_transit', date: emMenos4(caso.despacho.dias, '18:00') });
   }

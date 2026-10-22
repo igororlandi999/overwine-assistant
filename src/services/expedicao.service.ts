@@ -124,18 +124,28 @@ export interface EnvioExpedicao {
   atrasoML: 'confirmado' | 'nao_indicado' | null;
   atrasoTipos: string[];
   /**
-   * Instante da POSTAGEM pela Overwine (ISO, exatamente como o ML enviou, com o
-   * fuso original — ex.: -04:00; quem exibe converte para Brasília).
+   * Instante REAL da BIPAGEM (entrega pela Overwine): ISO exatamente como o ML
+   * enviou, com o fuso original (ex.: -04:00); quem exibe converte para
+   * Brasília. Só é preenchido com o evento da própria entrega — nunca com uma
+   * movimentação posterior.
    */
   despachadoEm: string | null;
   /**
-   * De onde veio `despachadoEm`:
-   *   'agencia'           primeiro `dropped_off` (recebimento na agência), o marco da postagem
-   *   'evento_logistico'  sem `dropped_off`: primeiro picked_up / authorized_by_carrier / in_hub
-   *   'date_shipped'      último recurso: status_history.date_shipped (movimentação posterior)
-   *   null                sem data — o envio não entra em dia nenhum
+   * Evidência da entrega (situacao 'despachado' = já bipado):
+   *   'agencia'           `dropped_off` com data: bipagem na agência, horário confirmado
+   *   'coleta'            coleta (cross_docking) com `picked_up` datado: horário confirmado
+   *   'evento_posterior'  entrega comprovada por evento POSTERIOR (in_hub, shipped,
+   *                       delivered...), sem o registro datado da bipagem:
+   *                       despachadoEm fica null; `bipagemAte` é só um limite superior
+   *   null                não se aplica (não entregue)
    */
-  despachoFonte: 'agencia' | 'evento_logistico' | 'date_shipped' | null;
+  despachoFonte: 'agencia' | 'coleta' | 'evento_posterior' | null;
+  /**
+   * Só com despachoFonte 'evento_posterior': instante do primeiro evento
+   * posterior confiável. A bipagem aconteceu ATÉ esse instante — não é o
+   * horário da bipagem e nunca é exibido como tal. null = nem isso o ML deu.
+   */
+  bipagemAte: string | null;
   /** Quando o backend leu o ML pela última vez para este envio. */
   consultadoEm: string | null;
   avisos: string[];
@@ -247,9 +257,16 @@ export interface DadosEnvio {
   liberacao: string | null;
   /** Primeiro `dropped_off` com data em `substatus_history`: o pacote chegou à agência. */
   entregaAgencia: string | null;
-  /** Sem `dropped_off`: primeiro evento de despacho com data em `substatus_history`. */
+  /** Coleta (cross_docking): primeiro `picked_up` com data em `substatus_history`. */
+  entregaColeta: string | null;
+  /** Primeiro evento de despacho com data em `substatus_history` (qualquer). */
   despachoNoHistorico: { iso: string; substatus: string | null } | null;
 }
+
+/** Substatus da coleta pela transportadora (cross_docking). */
+export const SUBSTATUS_COLETA = 'picked_up';
+
+function ehColeta(logistica: string | null): boolean { return logistica === 'cross_docking'; }
 
 /** Substatus que registra o RECEBIMENTO do pacote na agência (drop off). */
 export const SUBSTATUS_AGENCIA = 'dropped_off';
@@ -297,9 +314,11 @@ export function extrairEnvio(data: unknown): DadosEnvio | null {
     ...(() => {
       const evs = eventosDoEnvio(o);
       const agencia = evs.find(e => e.substatus === SUBSTATUS_AGENCIA);
+      const coleta = ehColeta(str(o.logistic_type) ?? str(obj(o.logistic)?.type)) ? evs.find(e => e.substatus === SUBSTATUS_COLETA) : undefined;
       const primeiro = evs.find(e => eventoEhDespacho(e.status, e.substatus));
       return {
         entregaAgencia: agencia ? agencia.iso : null,
+        entregaColeta: coleta ? coleta.iso : null,
         despachoNoHistorico: primeiro ? { iso: primeiro.iso, substatus: primeiro.substatus } : null,
       };
     })(),
@@ -355,6 +374,30 @@ export function extrairDespacho(data: unknown): string | null {
 }
 
 /**
+ * Instante da ENTREGA pela Overwine numa lista de histórico: o primeiro
+ * `dropped_off` datado (agência); na coleta, o primeiro `picked_up` datado.
+ * Qualquer outro evento é posterior e não serve como horário de bipagem.
+ */
+export function extrairEntrega(data: unknown, coleta: boolean): { iso: string; substatus: string } | null {
+  const raiz = obj(data);
+  const lista: unknown = Array.isArray(data) ? data : (raiz?.data ?? raiz?.results);
+  if (!Array.isArray(lista)) return null;
+  let melhor: { iso: string; t: number; substatus: string } | null = null;
+  for (const e of lista) {
+    const ev = obj(e);
+    if (!ev || (ev.substatus !== SUBSTATUS_AGENCIA && !(coleta && ev.substatus === SUBSTATUS_COLETA))) continue;
+    const iso = str(ev.date);
+    if (!iso) continue;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) continue;
+    // A agência tem precedência: é o registro da própria bipagem.
+    const sub = ev.substatus as string;
+    if (!melhor || (sub === SUBSTATUS_AGENCIA && melhor.substatus !== SUBSTATUS_AGENCIA) || (sub === melhor.substatus && t < melhor.t)) melhor = { iso, t, substatus: sub };
+  }
+  return melhor ? { iso: melhor.iso, substatus: melhor.substatus } : null;
+}
+
+/**
  * Como extrairDespacho, com o substatus do evento escolhido. Um `dropped_off`
  * (agência) tem precedência sobre qualquer outro evento de despacho.
  */
@@ -382,6 +425,8 @@ export function extrairDespachoDetalhado(data: unknown): { iso: string; substatu
 
 /** Despachado, cancelado ou Full: não muda mais. 60 dias. */
 export const TTL_FINAL_S = 60 * 24 * 3600;
+/** Já bipado comprovado por evento posterior, sem o horário da bipagem: 6 h. */
+export const TTL_SEM_HORARIO_S = 6 * 3600;
 /** Pendente: revisto no máximo a cada 2 minutos. */
 export const TTL_PENDENTE_S = 120;
 /**
@@ -404,7 +449,7 @@ export const CHAVE_COOLDOWN = 'exped:cooldown';
  * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
  * sozinhos.
  */
-export const VERSAO_CHAVES = 'v6';
+export const VERSAO_CHAVES = 'v7';
 const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
 const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
 const chaveAtraso = (id: string) => `exped:${VERSAO_CHAVES}:atraso:${id}`;
@@ -422,7 +467,12 @@ export const CONCORRENCIA_PADRAO = 6;
  */
 export function ttlDoResultado(e: EnvioExpedicao, hoje: string = hojeBRT()): number {
   if (e.situacao === 'full' || e.situacao === 'cancelado') return TTL_FINAL_S;
-  if (e.situacao === 'despachado') return e.despachadoEm ? TTL_FINAL_S : TTL_INCOMPLETO_S;
+  if (e.situacao === 'despachado') {
+    if (e.despachadoEm) return TTL_FINAL_S;
+    // Entrega comprovada sem horário: o registro da bipagem raramente aparece
+    // depois. Revisto a cada 6 h, sem martelar o ML.
+    return e.despachoFonte === 'evento_posterior' && e.bipagemAte ? TTL_SEM_HORARIO_S : TTL_INCOMPLETO_S;
+  }
   if (e.situacao === 'outro') return TTL_INCOMPLETO_S;
   // Programado com liberação FUTURA: nada muda até lá além de cancelamento.
   // No dia da liberação (ou sem data) volta ao ritmo do pendente.
@@ -461,7 +511,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, consultadoEm: null, avisos,
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, bipagemAte: null, consultadoEm: null, avisos,
   };
 }
 
@@ -490,56 +540,60 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, bipagemAte: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
   if (envioCancelado(d.status)) return { ...base, situacao: 'cancelado' };
 
-  // POSTAGEM PELA OVERWINE = recebimento na agência (`dropped_off` com data em
+  // JÁ BIPADO = a agência recebeu o pacote (`dropped_off` datado no
   // substatus_history). Vale qualquer que seja o substatus atual — inclusive
-  // in_packing_list, que vem DEPOIS da agência no fluxo xd_drop_off. Sem chamada
+  // in_packing_list, que vem DEPOIS da bipagem no fluxo xd_drop_off. Sem chamada
   // extra: o histórico vem na própria leitura do envio.
   if (d.entregaAgencia) {
     return { ...base, situacao: 'despachado', prazoPostagem: d.prazoNoEnvio, despachadoEm: d.entregaAgencia, despachoFonte: 'agencia' };
   }
+  if (d.entregaColeta) {
+    return { ...base, situacao: 'despachado', prazoPostagem: d.prazoNoEnvio, despachadoEm: d.entregaColeta, despachoFonte: 'coleta' };
+  }
 
-  // Agência (xd_drop_off) só monta a packing list DEPOIS de receber o pacote:
-  // in_packing_list ali é postagem feita, mesmo se o envio não trouxe o histórico.
-  // Segue para o fallback abaixo (fonte dita, nunca data inventada).
+  // Agência que já montou a packing list sem que o ML registre o dropped_off:
+  // indício, não prova. Confirma no /history; sem confirmação vai para conferência.
   const packingNaAgencia = d.logistica === 'xd_drop_off' && d.status === 'ready_to_ship' && d.substatus === 'in_packing_list';
-  const despachou = eventoEhDespacho(d.status, d.substatus) || packingNaAgencia;
-  if (!despachou && !STATUS_PENDENTE.has(d.status)) {
+  const despachou = eventoEhDespacho(d.status, d.substatus);
+  if (!despachou && !packingNaAgencia && !STATUS_PENDENTE.has(d.status)) {
     return { ...base, situacao: 'outro', avisos: [`status_nao_mapeado:${d.status}`] };
   }
-  if (!despachou && d.status === 'ready_to_ship' && d.substatus && !SUBSTATUS_RTS_PENDENTE.has(d.substatus)) {
+  if (!despachou && !packingNaAgencia && d.status === 'ready_to_ship' && d.substatus && !SUBSTATUS_RTS_PENDENTE.has(d.substatus)) {
     return { ...base, situacao: 'outro', avisos: [`substatus_nao_mapeado:ready_to_ship/${d.substatus}`] };
   }
 
-  // Já saiu: a data vem do histórico. O SLA não é consultado — prazo de quem
-  // já despachou não muda nenhum grupo da aba e custaria 1 chamada por envio.
-  // Despachado SEM registro de agência: fallback conservador, com a fonte dita.
-  // Nunca volta a pendente por falta de histórico.
-  if (despachou) {
-    base.situacao = 'despachado';
+  if (despachou || packingNaAgencia) {
+    // Sem o registro datado da bipagem no envio: o /history pode tê-lo. Uma
+    // chamada, e o resultado fica em cache (final ou 6 h).
     base.prazoPostagem = d.prazoNoEnvio;
-    base.avisos.push('sem_registro_agencia');
-    if (packingNaAgencia) base.avisos.push('despacho_por_packing_list');
-    if (d.despachoNoHistorico) {
-      base.despachadoEm = d.despachoNoHistorico.iso; base.despachoFonte = 'evento_logistico';
-    } else {
-      // O envio não trouxe substatus_history: o /history é a próxima fonte.
-      const rHist = await chamar(f.historico);
-      if (rHist.status === 200) {
-        const h = extrairDespachoDetalhado(rHist.data);
-        if (h) { base.despachadoEm = h.iso; base.despachoFonte = h.substatus === SUBSTATUS_AGENCIA ? 'agencia' : 'evento_logistico'; }
-      } else base.avisos.push(`history_http_${rHist.status}`);
+    const rHist = await chamar(f.historico);
+    let posterior: string | null = d.despachoNoHistorico?.iso ?? null;
+    if (rHist.status === 200) {
+      const entrega = extrairEntrega(rHist.data, ehColeta(d.logistica));
+      if (entrega) {
+        return { ...base, situacao: 'despachado', despachadoEm: entrega.iso, despachoFonte: entrega.substatus === SUBSTATUS_AGENCIA ? 'agencia' : 'coleta' };
+      }
+      const h = extrairDespacho(rHist.data);
+      if (h && (!posterior || Date.parse(h) < Date.parse(posterior))) posterior = h;
+    } else base.avisos.push(`history_http_${rHist.status}`);
+
+    if (!despachou) {
+      // Só a packing list, sem bipagem registrada em lugar nenhum: NÃO concluído.
+      return { ...base, situacao: 'outro', avisos: [...base.avisos, 'packing_list_sem_bipagem'] };
     }
-    if (!base.despachadoEm && d.dataShippedNoEnvio) {
-      base.despachadoEm = d.dataShippedNoEnvio; base.despachoFonte = 'date_shipped';
-      base.avisos.push('data_do_envio');
-    }
-    if (!base.despachadoEm) base.avisos.push('data_despacho_nao_informada');
+    // Entrega comprovada por evento posterior confiável, sem o horário da bipagem.
+    // Nunca volta a pendente; nunca data inventada.
+    base.situacao = 'despachado';
+    base.despachoFonte = 'evento_posterior';
+    base.avisos.push('horario_bipagem_indisponivel');
+    base.bipagemAte = posterior ?? d.dataShippedNoEnvio ?? null;
+    if (!posterior && d.dataShippedNoEnvio) base.avisos.push('limite_pelo_date_shipped');
     return base;
   }
 

@@ -7,7 +7,7 @@ import {
   type FetchersEnvio, type RespostaML,
 } from '../src/services/expedicao.service.js';
 import { runOp } from '../src/ml/ops.js';
-import { VERSAO_CHAVES, extrairDespachoDetalhado } from '../src/services/expedicao.service.js';
+import { VERSAO_CHAVES, extrairEntrega, TTL_SEM_HORARIO_S } from '../src/services/expedicao.service.js';
 import { resetEnvForTests } from '../src/config/env.js';
 
 // ── ML simulado ─────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ describe('prazo do /sla (expected_date)', () => {
 });
 
 describe('caso real 48265507555 (ready_to_ship/in_hub) e substatus fora da lista', () => {
-  it('in_hub é despacho: sai como despachado, com a data do histórico, nunca atrasado', async () => {
+  it('in_hub sem dropped_off: já bipado comprovado por evento posterior, SEM horário de bipagem, nunca atrasado', async () => {
     const { f } = ml({
       '48265507555': {
         envio: envio('ready_to_ship', 'in_hub', 'xd_drop_off'),
@@ -121,7 +121,9 @@ describe('caso real 48265507555 (ready_to_ship/in_hub) e substatus fora da lista
     });
     const [e] = (await consultarEnvios(cache, ['48265507555'], f)).envios;
     expect(e.situacao).toBe('despachado');
-    expect(e.despachadoEm).toBe('2026-10-20T16:20:00.000-03:00');
+    expect(e.despachadoEm).toBeNull();
+    expect(e.despachoFonte).toBe('evento_posterior');
+    expect(e.bipagemAte).toBe('2026-10-20T16:20:00.000-03:00');
     expect(e.atrasoML).toBeNull();
   });
 
@@ -320,7 +322,7 @@ describe('consultarEnvios — situações', () => {
     void chamadas;
   });
 
-  it('despachado sem data em lugar nenhum: despachado, data null, com aviso', async () => {
+  it('entregue sem data em lugar nenhum: já bipado sem horário e sem limite, com aviso', async () => {
     const { f } = ml({
       '40003': { envio: envio('shipped', 'in_transit'), prazo: prazo(null), historico: ok([]) },
     });
@@ -328,11 +330,12 @@ describe('consultarEnvios — situações', () => {
     expect(e.situacao).toBe('despachado');
     expect(e.despachadoEm).toBeNull();
     expect(e.prazoPostagem).toBeNull();
-    expect(e.avisos).toEqual(['sem_registro_agencia', 'data_despacho_nao_informada']);
-    expect(e.despachoFonte).toBeNull();
+    expect(e.avisos).toEqual(['horario_bipagem_indisponivel']);
+    expect(e.despachoFonte).toBe('evento_posterior');
+    expect(e.bipagemAte).toBeNull();
   });
 
-  it('histórico falhou: usa status_history.date_shipped do envio, marcado', async () => {
+  it('histórico falhou: date_shipped vira só o LIMITE da bipagem, nunca o horário', async () => {
     const { f } = ml({
       '40004': {
         envio: envio('shipped', null, 'cross_docking', { status_history: { date_shipped: '2026-10-18T11:00:00.000-03:00' } }),
@@ -341,8 +344,9 @@ describe('consultarEnvios — situações', () => {
       },
     });
     const [e] = (await consultarEnvios(cache, ['40004'], f)).envios;
-    expect(e.despachadoEm).toBe('2026-10-18T11:00:00.000-03:00');
-    expect(e.avisos).toEqual(expect.arrayContaining(['history_http_500', 'data_do_envio']));
+    expect(e.despachadoEm).toBeNull();
+    expect(e.bipagemAte).toBe('2026-10-18T11:00:00.000-03:00');
+    expect(e.avisos).toEqual(['history_http_500', 'horario_bipagem_indisponivel', 'limite_pelo_date_shipped']);
   });
 
   it('sla indisponível: cai para o prazo antigo do próprio envio, marcado', async () => {
@@ -433,7 +437,7 @@ describe('consultarEnvios — falhas do Mercado Livre', () => {
     await cache.set(CHAVE_COOLDOWN, '1', 60);
     const [e] = (await consultarEnvios(cache, ['50008'], f)).envios;
     expect(e.situacao).toBe('despachado');
-    expect(e.despachadoEm).toBe('2026-10-17T12:00:00-03:00');
+    expect(e.bipagemAte).toBe('2026-10-17T12:00:00-03:00');
   });
 
   it('teto de chamadas: o excedente fica aguardando para a próxima passada', async () => {
@@ -688,7 +692,7 @@ describe('privacidade', () => {
       expect(saida).not.toContain(proibido);
     }
     expect(Object.keys(r.envios[0]).sort()).toEqual([
-      'atrasoML', 'atrasoTipos', 'avisos', 'consultadoEm', 'despachadoEm', 'despachoFonte', 'id', 'liberacaoEm', 'logistica', 'prazoLimiteEm', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
+      'atrasoML', 'atrasoTipos', 'avisos', 'bipagemAte', 'consultadoEm', 'despachadoEm', 'despachoFonte', 'id', 'liberacaoEm', 'logistica', 'prazoLimiteEm', 'prazoPostagem', 'situacao', 'slaStatus', 'status', 'substatus',
     ]);
     // E o que fica no Redis também não carrega dado pessoal.
     expect(JSON.stringify([...cache.store.values()])).not.toContain('Rua Secreta');
@@ -823,77 +827,121 @@ describe('postagem pela Overwine = dropped_off do substatus_history', () => {
     expect(r2.envios[0]).toMatchObject({ situacao: 'despachado', despachoFonte: 'agencia', despachadoEm: '2026-10-20T11:18:10.000-04:00' });
   });
 
-  it('chaves de cache versionadas em v6: resultado antigo (v5) não é reaproveitado', async () => {
-    expect(VERSAO_CHAVES).toBe('v6');
+  it('chaves de cache versionadas em v7: resultado antigo (v5/v6) não é reaproveitado', async () => {
+    expect(VERSAO_CHAVES).toBe('v7');
     const { f } = ml({ '48276931841': { envio: comHistorico('ready_to_ship', 'in_packing_list', [['ready_to_ship', 'dropped_off', '2026-10-21T11:13:53.000-04:00']]) } });
     await consultarEnvios(cache, ['48276931841'], f);
     const chaves = [...cache.store.keys()];
-    expect(chaves.some(k => k.includes('exped:v6:env:48276931841'))).toBe(true);
-    expect(chaves.some(k => k.includes('exped:v5:'))).toBe(false);
+    expect(chaves.some(k => k.includes('exped:v7:env:48276931841'))).toBe(true);
+    expect(chaves.some(k => /exped:v[56]:/.test(k))).toBe(false);
   });
 });
 
-describe('despachado sem dropped_off: fallback conservador com a fonte dita', () => {
-  it('sem dropped_off mas com outro evento no substatus_history: data desse evento, fonte evento_logistico', async () => {
+describe('sem dropped_off: bipagem comprovada sem horário x não confirmada', () => {
+  it('evento posterior no substatus_history: já bipado SEM horário; o evento é só o limite', async () => {
     const { f, chamadas } = ml({
-      '87001': { envio: comHistorico('ready_to_ship', 'in_hub', [['ready_to_ship', 'picked_up', '2026-10-20T14:00:00.000-04:00'], ['ready_to_ship', 'in_hub', '2026-10-21T09:00:00.000-04:00']]) },
+      '87001': { envio: comHistorico('ready_to_ship', 'in_hub', [['ready_to_ship', 'in_packing_list', '2026-10-20T13:00:00.000-04:00'], ['ready_to_ship', 'in_hub', '2026-10-21T09:00:00.000-04:00']]) },
     });
     const [e] = (await consultarEnvios(cache, ['87001'], f)).envios;
-    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-20T14:00:00.000-04:00', despachoFonte: 'evento_logistico' });
-    expect(e.avisos).toContain('sem_registro_agencia');
-    expect(chamadas).toEqual(['envio:87001']);
+    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: null, despachoFonte: 'evento_posterior', bipagemAte: '2026-10-21T09:00:00.000-04:00' });
+    expect(e.avisos).toEqual(['horario_bipagem_indisponivel']);
+    // Procura o registro da bipagem no /history antes de desistir: 1 chamada a mais.
+    expect(chamadas).toEqual(['envio:87001', 'hist:87001']);
   });
 
-  it('envio sem substatus_history: consulta /history; dropped_off lá também vale como agência', async () => {
-    const { f, chamadas } = ml({
+  it('dropped_off só no /history: horário confirmado, fonte agência', async () => {
+    const { f } = ml({
       '87002': {
         envio: envio('shipped', null),
         historico: hist(['ready_to_ship', 'dropped_off', '2026-10-19T11:20:00.000-04:00'], ['shipped', null, '2026-10-20T08:00:00.000-04:00']),
       },
     });
     const [e] = (await consultarEnvios(cache, ['87002'], f)).envios;
-    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-19T11:20:00.000-04:00', despachoFonte: 'agencia' });
-    expect(chamadas).toEqual(['envio:87002', 'hist:87002']);
+    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-19T11:20:00.000-04:00', despachoFonte: 'agencia', bipagemAte: null });
   });
 
-  it('/history prefere dropped_off mesmo que outro evento qualificado venha antes na lista', () => {
-    expect(extrairDespachoDetalhado([
-      { status: 'ready_to_ship', substatus: 'in_hub', date: '2026-10-21T09:00:00.000-04:00' },
+  it('extrairEntrega: dropped_off tem precedência sobre picked_up, mesmo posterior', () => {
+    expect(extrairEntrega([
+      { status: 'ready_to_ship', substatus: 'picked_up', date: '2026-10-21T09:00:00.000-04:00' },
       { status: 'ready_to_ship', substatus: 'dropped_off', date: '2026-10-21T11:00:00.000-04:00' },
-    ])).toEqual({ iso: '2026-10-21T11:00:00.000-04:00', substatus: 'dropped_off' });
+    ], true)).toEqual({ iso: '2026-10-21T11:00:00.000-04:00', substatus: 'dropped_off' });
+    expect(extrairEntrega([{ status: 'ready_to_ship', substatus: 'in_hub', date: '2026-10-21T09:00:00.000-04:00' }], true)).toBeNull();
+    expect(extrairEntrega([{ status: 'ready_to_ship', substatus: 'picked_up', date: '2026-10-21T09:00:00.000-04:00' }], false)).toBeNull();
   });
 
-  it('sem histórico nenhum: date_shipped como último recurso, fonte date_shipped, marcado', async () => {
-    const { f } = ml({ '87003': { envio: envio('shipped', null, 'xd_drop_off', { status_history: { date_shipped: '2026-10-21T05:00:00.000-04:00' } }), historico: ok([]) } });
-    const [e] = (await consultarEnvios(cache, ['87003'], f)).envios;
-    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-21T05:00:00.000-04:00', despachoFonte: 'date_shipped' });
-    expect(e.avisos).toEqual(['sem_registro_agencia', 'data_do_envio']);
+  it('coleta (cross_docking): picked_up datado é a entrega com horário, fonte coleta', async () => {
+    const { f, chamadas } = ml({
+      '87007': { envio: envio('shipped', null, 'cross_docking', { substatus_history: [{ status: 'ready_to_ship', substatus: 'picked_up', date: '2026-10-21T14:05:00.000-04:00' }] }) },
+    });
+    const [e] = (await consultarEnvios(cache, ['87007'], f)).envios;
+    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-21T14:05:00.000-04:00', despachoFonte: 'coleta' });
+    expect(chamadas).toEqual(['envio:87007']);
   });
 
-  it('nunca volta a pendente por falta de histórico: despachado sem data, sem data inventada', async () => {
+  it('nunca volta a pendente por falta de histórico: entregue fica já bipado, sem horário nem limite', async () => {
     const { f } = ml({ '87004': { envio: envio('delivered', null), historico: { status: 500, data: null } } });
     const [e] = (await consultarEnvios(cache, ['87004'], f)).envios;
-    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: null, despachoFonte: null });
-    expect(e.avisos).toEqual(['sem_registro_agencia', 'history_http_500', 'data_despacho_nao_informada']);
+    expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: null, despachoFonte: 'evento_posterior', bipagemAte: null });
+    expect(e.avisos).toEqual(['history_http_500', 'horario_bipagem_indisponivel']);
   });
 
-  it('agência com in_packing_list e o envio sem histórico: despachado (packing list só existe depois da agência)', async () => {
+  it('só in_packing_list, sem bipagem registrada em lugar nenhum: NÃO concluído, vai para conferência', async () => {
     const { f } = ml({
       '87005': {
         envio: envio('ready_to_ship', 'in_packing_list', 'xd_drop_off'),
-        historico: hist(['ready_to_ship', 'dropped_off', '2026-10-21T11:13:00.000-04:00']),
+        historico: hist(['ready_to_ship', 'printed', '2026-10-21T09:00:00.000-04:00'], ['ready_to_ship', 'in_packing_list', '2026-10-21T19:00:00.000-04:00']),
         prazo: prazo('2026-10-20T23:59:59.000-03:00'),
       },
     });
     const [e] = (await consultarEnvios(cache, ['87005'], f)).envios;
+    expect(e).toMatchObject({ situacao: 'outro', despachadoEm: null, despachoFonte: null });
+    expect(e.avisos).toEqual(['packing_list_sem_bipagem']);
+  });
+
+  it('in_packing_list com dropped_off só no /history: já bipado com horário', async () => {
+    const { f } = ml({
+      '87008': {
+        envio: envio('ready_to_ship', 'in_packing_list', 'xd_drop_off'),
+        historico: hist(['ready_to_ship', 'dropped_off', '2026-10-21T11:13:00.000-04:00']),
+      },
+    });
+    const [e] = (await consultarEnvios(cache, ['87008'], f)).envios;
     expect(e).toMatchObject({ situacao: 'despachado', despachadoEm: '2026-10-21T11:13:00.000-04:00', despachoFonte: 'agencia' });
-    expect(e.avisos).toEqual(['sem_registro_agencia', 'despacho_por_packing_list']);
   });
 
   it('in_packing_list fora da agência (coleta) segue a regra anterior: pendente', async () => {
     const { f } = ml({ '87006': { envio: envio('ready_to_ship', 'in_packing_list', 'cross_docking'), prazo: prazo('2026-10-23T23:59:59.000-03:00') } });
     const [e] = (await consultarEnvios(cache, ['87006'], f)).envios;
     expect(e.situacao).toBe('pendente');
+  });
+
+  it('cache: horário confirmado é final; sem horário revisto a cada 6 h; sem limite a cada 10 min', () => {
+    const b = { id: '1', situacao: 'despachado' as const, avisos: [] } as any;
+    expect(ttlDoResultado({ ...b, despachadoEm: 'x', despachoFonte: 'agencia', bipagemAte: null })).toBe(TTL_FINAL_S);
+    expect(ttlDoResultado({ ...b, despachadoEm: null, despachoFonte: 'evento_posterior', bipagemAte: 'x' })).toBe(TTL_SEM_HORARIO_S);
+    expect(ttlDoResultado({ ...b, despachadoEm: null, despachoFonte: 'evento_posterior', bipagemAte: null })).toBe(TTL_INCOMPLETO_S);
+  });
+});
+
+describe('pedido 2000019019653362 (painel ML: "A caminho"; aba mostrava Prazo vencido)', () => {
+  // O id do envio deste pedido não está nos dados que tenho; o envio abaixo é
+  // um stand-in com o MESMO quadro: in_packing_list, SLA vencido em 20/10,
+  // /delays 404 e dropped_off no substatus_history.
+  it('bipado: sai de Prazo vencido e vai para já bipado no horário da agência', async () => {
+    const { f, chamadas } = ml({
+      '99000001': {
+        envio: comHistorico('ready_to_ship', 'in_packing_list', [
+          ['ready_to_ship', 'printed', '2026-10-20T08:00:00.000-04:00'],
+          ['ready_to_ship', 'dropped_off', '2026-10-21T11:13:00.000-04:00'],
+          ['ready_to_ship', 'in_packing_list', '2026-10-21T19:40:00.000-04:00'],
+        ]),
+        prazo: { status: 200, data: { status: 'on_time', expected_date: '2026-10-20T12:30:00.000-03:00' } },
+      },
+    });
+    const [e] = (await consultarEnvios(cache, ['99000001'], f)).envios;
+    expect(e).toMatchObject({ situacao: 'despachado', despachoFonte: 'agencia', atrasoML: null, prazoPostagem: null });
+    expect(brt(e.despachadoEm!)).toBe('2026-10-21 12:13');
+    expect(chamadas).toEqual(['envio:99000001']); // nem /sla nem /delays
   });
 });
 
