@@ -505,20 +505,22 @@ A coleta é projetada no snapshot de pedidos (`orders-store`) e no catálogo (`i
 - **Inventário:** `items/inventory` responde 400 `recurso_indisponivel_no_canal`.
 - **Catálogo:** `items/catalog` só lê o que a sincronização publicou.
 
-**Status (decisão para revisão, sobre o `FulfillmentStatus` do contrato)**:
+**Status e faturamento (decisão do proprietário, 21/10/2026: "todo pedido Amazon entra no faturamento, exceto CANCELADO")**:
 
-| Status Amazon | Classe | Faturamento |
+| Status Amazon | Classe (exibição) | Faturamento |
 |---|---|---|
-| `PENDING_AVAILABILITY` (pré-venda, sem pagamento autorizado) | pendente | fora |
-| `PENDING` (pedido feito, não pronto) | pendente | fora |
+| `PENDING_AVAILABILITY` (pré-venda) | pendente | entra |
+| `PENDING` (pedido feito, não pronto) | pendente | entra |
 | `UNSHIPPED` | aprovado | entra |
 | `PARTIALLY_SHIPPED` | aprovado | entra |
 | `SHIPPED` | aprovado | entra |
-| `CANCELLED` | cancelado | fora |
-| `UNFULFILLABLE` (só FBA fora do site da Amazon) | não atendível | fora |
-| ausente ou novo | desconhecido | fora até alguém decidir |
+| `CANCELLED` | cancelado | **fora** |
+| `UNFULFILLABLE` (só FBA fora do site da Amazon) | não atendível | entra |
+| ausente ou novo | desconhecido | entra |
 
-- **Status nas telas:** chegam como `amazon:<status>`. A lista de venda da Amazon é separada da do ML em `lib/status-venda.ts`.
+- **Regra de exclusão, só na Amazon:** `contaComoVendaAmazon` em `lib/status-venda.ts` aceita qualquer `amazon:*` menos `amazon:cancelled`. O Mercado Livre continua com a lista de permissão (`paid`, `partially_refunded`).
+- **Status nas telas:** chegam como `amazon:<status>` e são exibidos como vieram. Um pedido pendente entra no faturamento e continua aparecendo como "Pendente".
+- **Financeiro:** o faturamento comercial usa todos os pedidos não cancelados; os lançamentos continuam sendo só o dinheiro lançado pela Amazon. Um pedido pendente aparece como venda sem lançamento.
 - **Item cancelado** dentro de um pedido ativo sai do valor do pedido.
 - **Faturamento do item** = subtotal `ITEM` dos proceeds menos `DISCOUNT`. Frete, imposto e embrulho ficam de fora e o total pago é guardado à parte. Sem `ITEM`, usa preço unitário × quantidade e o pedido fica marcado.
 - **Reembolso:** a Orders API não tem esse status. A evidência é uma transação negativa vinculada ao pedido, mostrada como "débito lançado". O faturamento do pedido não é reduzido automaticamente.
