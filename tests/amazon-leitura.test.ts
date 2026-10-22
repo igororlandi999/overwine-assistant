@@ -17,7 +17,7 @@ import { cacheDaConta } from '../src/lib/cache/conta-cache.js';
 import { type OrdersManifest, writeChunk, publishManifest, readManifest } from '../src/lib/orders-store.js';
 import { readCatalogManifest, writeCatalogChunk, publishCatalog } from '../src/lib/items-store.js';
 import type { OrderSlim } from '../src/services/orders.service.js';
-import { STATUS_VENDA_AMAZON, contaComoVenda, STATUS_VENDA } from '../src/lib/status-venda.js';
+import { contaComoVendaAmazon, contaComoVenda, STATUS_VENDA } from '../src/lib/status-venda.js';
 import { STATUS_AMAZON, referenciaDeFrescor, CHAVE_CATALOGO_VERIFICADO, projetarPedido, projetarCatalogo, modalidadeDoPedido, statusDeLeitura } from '../src/amazon/leitura.js';
 import { normalizarPedido } from '../src/amazon/pedidos.js';
 import { normalizarAnuncio } from '../src/amazon/catalogo.js';
@@ -136,13 +136,15 @@ describe('status Amazon: tabela própria, decidida sobre o contrato', () => {
     const en = MODELOS.orders.definitions.FulfillmentStatus.enum as string[];
     expect(Object.keys(STATUS_AMAZON).sort()).toEqual([...en].sort());
   });
-  it('só aprovados (UNSHIPPED, PARTIALLY_SHIPPED, SHIPPED) contam como venda; nada da lista do ML', () => {
-    const aprovados = Object.entries(STATUS_AMAZON).filter(([, v]) => v.classe === 'aprovado').map(([k]) => statusDeLeitura(k));
-    expect([...STATUS_VENDA_AMAZON].sort()).toEqual(aprovados.sort());
-    for (const s of Object.keys(STATUS_AMAZON)) expect(contaComoVenda(statusDeLeitura(s))).toBe(STATUS_AMAZON[s].classe === 'aprovado');
-    for (const s of STATUS_VENDA) expect(STATUS_VENDA_AMAZON.has(s)).toBe(false);
-    expect(contaComoVenda('amazon:desconhecido')).toBe(false);
-    expect(contaComoVenda('SHIPPED')).toBe(false); // sem prefixo não é status de leitura
+  it('Amazon conta tudo menos CANCELLED (regra de exclusão); a classe de exibição não muda', () => {
+    for (const s of Object.keys(STATUS_AMAZON)) expect(contaComoVenda(statusDeLeitura(s))).toBe(s !== 'CANCELLED');
+    expect(contaComoVenda(statusDeLeitura(null))).toBe(true);           // amazon:desconhecido entra
+    expect(contaComoVenda('amazon:status_que_ainda_nao_existe')).toBe(true);
+    // A classe de exibição não muda: PENDING continua "pendente".
+    expect(STATUS_AMAZON.PENDING).toMatchObject({ classe: 'pendente', rotulo: 'Pendente' });
+    // A regra da Amazon nunca alcança status do ML (sem prefixo).
+    for (const s of ['SHIPPED', 'PENDING', 'pending', 'cancelled', 'xpto']) expect(contaComoVendaAmazon(s)).toBe(false);
+    expect(contaComoVenda('SHIPPED')).toBe(false);
   });
 });
 
@@ -214,16 +216,16 @@ describe('rotas existentes servem a Amazon (conta ativada só no teste)', () => 
     expect(amz.mlChamadas).toEqual([]);
   });
 
-  it('métricas: faturamento só dos aprovados; transação lançada NÃO entra no faturamento', async () => {
+  it('métricas: faturamento de todos menos cancelados (pendente entra); transação lançada NÃO entra no faturamento', async () => {
     await sincronizar(cenarioCompleto());
     const m = (await chamar(ordersHandler, { query: { resource: 'metrics', contas: 'alemmar-amazon', from: '2026-09-01', to: '2026-10-01' }, headers: auth() })).json();
-    // Aprovados: 701-1 (SHIPPED), 701-2 (UNSHIPPED), 701-3 (PARTIALLY_SHIPPED) = 3 × 99,90. PENDING e CANCELLED fora.
-    expect(m.periodo.faturamento.bruto).toBeCloseTo(299.7, 2);
+    // 701-1 (SHIPPED), 701-2 (UNSHIPPED), 701-3 (PARTIALLY_SHIPPED), 701-4 (PENDING) = 4 × 99,90. Só CANCELLED fora.
+    expect(m.periodo.faturamento.bruto).toBeCloseTo(399.6, 2);
     expect(m.periodo.faturamento).toMatchObject({ tarifaML: null, tarifaEnv: null, liquido: null, fonte: 'transacoes_amazon' });
     const f = m.financeiro.porConta['alemmar-amazon'];
     expect(f.metodo).toBe('transacoes_amazon');
     expect(f.amazon).toMatchObject({
-      pedidos: { vendas: 3, comTransacoes: 1, semTransacoesAteLeitura: 2, foraDaLeitura: 0 },
+      pedidos: { vendas: 4, comTransacoes: 1, semTransacoesAteLeitura: 3, foraDaLeitura: 0 },
       faturamentoComTransacoes: 99.9, lancadoDessasVendas: 54.91,
       debitos: { pedidos: 1, valor: -30 }, lancamentosSemPedido: { quantidade: 1, valor: -19.9 }, conciliado: false,
     });
@@ -236,7 +238,7 @@ describe('rotas existentes servem a Amazon (conta ativada só no teste)', () => 
     const so = (await chamar(ordersHandler, { query: { resource: 'metrics', from: '2026-09-01', to: '2026-10-01' }, headers: auth() })).json();
     const m = (await chamar(ordersHandler, { query: { resource: 'metrics', contas: 'overwine-ml,alemmar-amazon', from: '2026-09-01', to: '2026-10-01' }, headers: auth() })).json();
     expect(m.consolidado).toBe(true);
-    expect(m.periodo.faturamento.bruto).toBeCloseTo(so.periodo.faturamento.bruto + 299.7, 2);
+    expect(m.periodo.faturamento.bruto).toBeCloseTo(so.periodo.faturamento.bruto + 399.6, 2);
     expect(m.periodo.faturamento.liquido).toBeNull(); // a Amazon não fecha líquido
     expect(m.financeiro.porConta['overwine-ml'].metodo).toBe('estimado_taxas_da_conta');
     expect(m.financeiro.porConta['alemmar-amazon'].metodo).toBe('transacoes_amazon');
@@ -261,6 +263,77 @@ describe('rotas existentes servem a Amazon (conta ativada só no teste)', () => 
     vi.setSystemTime(AGORA + 3600_000);
     await chamar(syncHandler, { method: 'POST', headers: admin(), body: { conta: 'alemmar-amazon' } });
     expect((await readManifest(amzCache(), 'ativos'))!.versao).toBe(v1);
+  });
+});
+
+// ── 3a. Faturamento Amazon: todos menos cancelados ────────────────────────
+describe('faturamento Amazon: tudo entra, só CANCELADO fica fora', () => {
+  // 21/10/2026 12:00 em Brasília. Hoje = 21/10; 7 dias = 15/10 a 21/10; mês = 01/10 a 21/10.
+  const AGORA_FAT = Date.parse('2026-10-21T15:00:00.000Z');
+  function pedidoValor(id: string, quando: string, status: string, valor: number) {
+    const p = pedidoApi(id, quando, { fulfillment: { fulfillmentStatus: status, fulfilledBy: 'MERCHANT' } });
+    p.orderItems[0].product.price.unitPrice.amount = valor.toFixed(2);
+    return p;
+  }
+  const cenarioFat = (): Cenario => ({
+    pedidos: [
+      pedidoValor('702-0000001-0000001', '2026-10-21T13:00:00.000Z', 'PENDING', 100),   // hoje
+      pedidoValor('702-0000002-0000002', '2026-10-21T14:00:00.000Z', 'SHIPPED', 250),   // hoje
+      pedidoValor('702-0000003-0000003', '2026-10-21T14:30:00.000Z', 'CANCELLED', 60),  // hoje, fora
+      pedidoValor('702-0000004-0000004', '2026-10-17T15:00:00.000Z', 'PENDING', 40),    // 7 dias e mês
+      pedidoValor('702-0000005-0000005', '2026-10-05T15:00:00.000Z', 'UNSHIPPED', 30),  // só mês
+      pedidoValor('702-0000008-0000008', '2026-10-10T15:00:00.000Z', 'NOVO_STATUS_FUTURO', 15), // só mês, status desconhecido
+      pedidoValor('702-0000006-0000006', '2026-09-25T15:00:00.000Z', 'PENDING', 70),    // setembro
+      pedidoValor('702-0000007-0000007', '2026-09-25T16:00:00.000Z', 'CANCELLED', 80),  // setembro, fora
+    ],
+    anuncios: [anuncioApi('21003', 12)], estoqueFba: [], transacoes: [],
+  });
+  const metricas = async (q: Record<string, string> = {}) =>
+    (await chamar(ordersHandler, { query: { resource: 'metrics', contas: 'alemmar-amazon', ...q }, headers: auth() })).json();
+
+  // A sessão criada no relógio padrão (01/10) já expirou em 21/10: nova sessão no relógio do teste.
+  beforeEach(async () => { vi.setSystemTime(AGORA_FAT); sessao = (await createSession(cache)).id; });
+
+  it('1-3. pending, shipped, unshipped e status desconhecido entram; cancelado não; o status bruto é preservado', () => {
+    expect(contaComoVenda('amazon:pending')).toBe(true);
+    expect(contaComoVenda('amazon:shipped')).toBe(true);
+    expect(contaComoVenda('amazon:unshipped')).toBe(true);
+    expect(contaComoVenda('amazon:novo_status_futuro')).toBe(true);
+    expect(contaComoVenda('amazon:cancelled')).toBe(false);
+    const d = projetarPedido(normalizarPedido(pedidoValor('702-8', '2026-10-21T13:00:00.000Z', 'NOVO_STATUS_FUTURO', 15) as any, 'alemmar-amazon'));
+    expect(d.status).toBe('amazon:novo_status_futuro');  // status original preservado
+    expect(d.amazon.classe).toBe('desconhecido');
+    const p = projetarPedido(normalizarPedido(pedidoValor('702-9', '2026-10-21T13:00:00.000Z', 'PENDING', 100) as any, 'alemmar-amazon'));
+    expect(p.status).toBe('amazon:pending');            // dado bruto não vira "pago"
+    expect(p.amazon.classe).toBe('pendente');
+    expect(p.paid_amount).toBe(100);
+  });
+
+  it('4-7, 9. mistura pendente + enviado + desconhecido + cancelado: hoje, 7 dias, mês, histórico, quantidade e ticket', async () => {
+    await sincronizar(cenarioFat());
+    const m = await metricas();
+    expect(m.janelas.hoje).toMatchObject({ receita: 350, pedidos: 2, ticketMedio: 175 });
+    expect(m.janelas.ultimos7).toMatchObject({ receita: 390, pedidos: 3, ticketMedio: 130 });
+    expect(m.janelas.mesAtual).toMatchObject({ receita: 435, pedidos: 5, ticketMedio: 87 });
+    expect(m.janelas.historico).toMatchObject({ receita: 505, pedidos: 6 });
+    expect(m.janelas.historico.ticketMedio).toBeCloseTo(84.17, 2);
+  });
+
+  it('8. período filtrado: pendente entra, cancelado fica fora', async () => {
+    await sincronizar(cenarioFat());
+    const set = await metricas({ from: '2026-09-20', to: '2026-09-30' });
+    expect(set.periodo.faturamento.bruto).toBeCloseTo(70, 2);
+    expect(set.financeiro.porConta['alemmar-amazon'].amazon.pedidos.vendas).toBe(1);
+    const tudo = await metricas({ from: '2026-09-01', to: '2026-10-21' });
+    expect(tudo.periodo.faturamento.bruto).toBeCloseTo(505, 2);
+    expect(tudo.financeiro.porConta['alemmar-amazon'].amazon.pedidos.vendas).toBe(6);
+  });
+
+  it('10. Mercado Livre sem regressão: a lista do ML e os status do ML não mudam', () => {
+    expect([...STATUS_VENDA].sort()).toEqual(['paid', 'partially_refunded']);
+    for (const s of ['pending', 'payment_required', 'payment_in_process', 'cancelled', 'invalid']) expect(contaComoVenda(s)).toBe(false);
+    expect(contaComoVenda('paid')).toBe(true);
+    expect(contaComoVenda('partially_refunded')).toBe(true);
   });
 });
 
