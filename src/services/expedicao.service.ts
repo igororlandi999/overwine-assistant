@@ -123,8 +123,19 @@ export interface EnvioExpedicao {
    */
   atrasoML: 'confirmado' | 'nao_indicado' | null;
   atrasoTipos: string[];
-  /** Instante do primeiro evento de despacho (ISO, como o ML enviou). */
+  /**
+   * Instante da POSTAGEM pela Overwine (ISO, exatamente como o ML enviou, com o
+   * fuso original — ex.: -04:00; quem exibe converte para Brasília).
+   */
   despachadoEm: string | null;
+  /**
+   * De onde veio `despachadoEm`:
+   *   'agencia'           primeiro `dropped_off` (recebimento na agência), o marco da postagem
+   *   'evento_logistico'  sem `dropped_off`: primeiro picked_up / authorized_by_carrier / in_hub
+   *   'date_shipped'      último recurso: status_history.date_shipped (movimentação posterior)
+   *   null                sem data — o envio não entra em dia nenhum
+   */
+  despachoFonte: 'agencia' | 'evento_logistico' | 'date_shipped' | null;
   /** Quando o backend leu o ML pela última vez para este envio. */
   consultadoEm: string | null;
   avisos: string[];
@@ -234,6 +245,33 @@ export interface DadosEnvio {
   dataShippedNoEnvio: string | null;
   /** buffering.date: dia de LIBERAÇÃO do envio programado. Não é prazo. */
   liberacao: string | null;
+  /** Primeiro `dropped_off` com data em `substatus_history`: o pacote chegou à agência. */
+  entregaAgencia: string | null;
+  /** Sem `dropped_off`: primeiro evento de despacho com data em `substatus_history`. */
+  despachoNoHistorico: { iso: string; substatus: string | null } | null;
+}
+
+/** Substatus que registra o RECEBIMENTO do pacote na agência (drop off). */
+export const SUBSTATUS_AGENCIA = 'dropped_off';
+
+/**
+ * Lista de eventos `{ status, substatus, date }` do próprio envio
+ * (`substatus_history`). Aceita a lista na raiz do envio; eventos sem data
+ * válida são ignorados.
+ */
+export function eventosDoEnvio(o: Record<string, unknown> | null): Array<{ status: string | null; substatus: string | null; iso: string; t: number }> {
+  const lista = o?.substatus_history;
+  if (!Array.isArray(lista)) return [];
+  const out: Array<{ status: string | null; substatus: string | null; iso: string; t: number }> = [];
+  for (const e of lista) {
+    const ev = obj(e);
+    const iso = str(ev?.date);
+    if (!ev || !iso) continue;
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) continue;
+    out.push({ status: str(ev.status), substatus: str(ev.substatus), iso, t });
+  }
+  return out.sort((a, b) => a.t - b.t);
 }
 
 /** Substatus de pending em que o ML segura o envio até a data de liberação. */
@@ -248,7 +286,7 @@ export function extrairEnvio(data: unknown): DadosEnvio | null {
   return {
     status: str(o.status),
     substatus: str(o.substatus),
-    logistica: str(o.logistic_type),
+    logistica: str(o.logistic_type) ?? str(obj(o.logistic)?.type),
     prazoNoEnvio:
       diaDoCampo(obj(lt?.estimated_handling_limit)?.date) ??
       diaDoCampo(obj(so?.estimated_handling_limit)?.date),
@@ -256,6 +294,15 @@ export function extrairEnvio(data: unknown): DadosEnvio | null {
     liberacao:
       diaDoCampo(obj(lt?.buffering)?.date) ??
       diaDoCampo(obj(so?.buffering)?.date),
+    ...(() => {
+      const evs = eventosDoEnvio(o);
+      const agencia = evs.find(e => e.substatus === SUBSTATUS_AGENCIA);
+      const primeiro = evs.find(e => eventoEhDespacho(e.status, e.substatus));
+      return {
+        entregaAgencia: agencia ? agencia.iso : null,
+        despachoNoHistorico: primeiro ? { iso: primeiro.iso, substatus: primeiro.substatus } : null,
+      };
+    })(),
   };
 }
 
@@ -304,10 +351,19 @@ export function extrairSlaStatus(data: unknown): string | null {
  * endpoints vizinhos). Eventos sem data válida são ignorados, nunca viram 0.
  */
 export function extrairDespacho(data: unknown): string | null {
+  return extrairDespachoDetalhado(data)?.iso ?? null;
+}
+
+/**
+ * Como extrairDespacho, com o substatus do evento escolhido. Um `dropped_off`
+ * (agência) tem precedência sobre qualquer outro evento de despacho.
+ */
+export function extrairDespachoDetalhado(data: unknown): { iso: string; substatus: string | null } | null {
   const raiz = obj(data);
   const lista: unknown = Array.isArray(data) ? data : (raiz?.data ?? raiz?.results);
   if (!Array.isArray(lista)) return null;
-  let melhor: { iso: string; t: number } | null = null;
+  let agencia: { iso: string; t: number } | null = null;
+  let melhor: { iso: string; t: number; substatus: string | null } | null = null;
   for (const e of lista) {
     const ev = obj(e);
     if (!ev || !eventoEhDespacho(ev.status, ev.substatus)) continue;
@@ -315,9 +371,11 @@ export function extrairDespacho(data: unknown): string | null {
     if (!iso) continue;
     const t = Date.parse(iso);
     if (!Number.isFinite(t)) continue;
-    if (!melhor || t < melhor.t) melhor = { iso, t };
+    if (ev.substatus === SUBSTATUS_AGENCIA && (!agencia || t < agencia.t)) agencia = { iso, t };
+    if (!melhor || t < melhor.t) melhor = { iso, t, substatus: str(ev.substatus) };
   }
-  return melhor ? melhor.iso : null;
+  if (agencia) return { iso: agencia.iso, substatus: SUBSTATUS_AGENCIA };
+  return melhor ? { iso: melhor.iso, substatus: melhor.substatus } : null;
 }
 
 // ── Cache ───────────────────────────────────────────────────────────────
@@ -346,7 +404,7 @@ export const CHAVE_COOLDOWN = 'exped:cooldown';
  * inclusive despachados com 60 dias de cache) deixam de ser lidos e expiram
  * sozinhos.
  */
-export const VERSAO_CHAVES = 'v5';
+export const VERSAO_CHAVES = 'v6';
 const chaveEnvio = (id: string) => `exped:${VERSAO_CHAVES}:env:${id}`;
 const chavePrazo = (id: string) => `exped:${VERSAO_CHAVES}:prazo:${id}`;
 const chaveAtraso = (id: string) => `exped:${VERSAO_CHAVES}:atraso:${id}`;
@@ -403,7 +461,7 @@ class Orcamento {
 function vazio(id: string, situacao: Situacao, avisos: string[] = []): EnvioExpedicao {
   return {
     id, situacao, logistica: null, status: null, substatus: null,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, consultadoEm: null, avisos,
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, consultadoEm: null, avisos,
   };
 }
 
@@ -432,12 +490,25 @@ async function resolverEnvio(
 
   const base: EnvioExpedicao = {
     id, situacao: 'pendente', logistica: d.logistica, status: d.status, substatus: d.substatus,
-    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, consultadoEm: agoraIso, avisos: [],
+    prazoPostagem: null, prazoLimiteEm: null, slaStatus: null, liberacaoEm: null, atrasoML: null, atrasoTipos: [], despachadoEm: null, despachoFonte: null, consultadoEm: agoraIso, avisos: [],
   };
 
   if (ehFull(d.logistica)) return { ...base, situacao: 'full' };
   if (envioCancelado(d.status)) return { ...base, situacao: 'cancelado' };
-  const despachou = eventoEhDespacho(d.status, d.substatus);
+
+  // POSTAGEM PELA OVERWINE = recebimento na agência (`dropped_off` com data em
+  // substatus_history). Vale qualquer que seja o substatus atual — inclusive
+  // in_packing_list, que vem DEPOIS da agência no fluxo xd_drop_off. Sem chamada
+  // extra: o histórico vem na própria leitura do envio.
+  if (d.entregaAgencia) {
+    return { ...base, situacao: 'despachado', prazoPostagem: d.prazoNoEnvio, despachadoEm: d.entregaAgencia, despachoFonte: 'agencia' };
+  }
+
+  // Agência (xd_drop_off) só monta a packing list DEPOIS de receber o pacote:
+  // in_packing_list ali é postagem feita, mesmo se o envio não trouxe o histórico.
+  // Segue para o fallback abaixo (fonte dita, nunca data inventada).
+  const packingNaAgencia = d.logistica === 'xd_drop_off' && d.status === 'ready_to_ship' && d.substatus === 'in_packing_list';
+  const despachou = eventoEhDespacho(d.status, d.substatus) || packingNaAgencia;
   if (!despachou && !STATUS_PENDENTE.has(d.status)) {
     return { ...base, situacao: 'outro', avisos: [`status_nao_mapeado:${d.status}`] };
   }
@@ -447,14 +518,25 @@ async function resolverEnvio(
 
   // Já saiu: a data vem do histórico. O SLA não é consultado — prazo de quem
   // já despachou não muda nenhum grupo da aba e custaria 1 chamada por envio.
+  // Despachado SEM registro de agência: fallback conservador, com a fonte dita.
+  // Nunca volta a pendente por falta de histórico.
   if (despachou) {
     base.situacao = 'despachado';
     base.prazoPostagem = d.prazoNoEnvio;
-    const rHist = await chamar(f.historico);
-    if (rHist.status === 200) base.despachadoEm = extrairDespacho(rHist.data);
-    else base.avisos.push(`history_http_${rHist.status}`);
+    base.avisos.push('sem_registro_agencia');
+    if (packingNaAgencia) base.avisos.push('despacho_por_packing_list');
+    if (d.despachoNoHistorico) {
+      base.despachadoEm = d.despachoNoHistorico.iso; base.despachoFonte = 'evento_logistico';
+    } else {
+      // O envio não trouxe substatus_history: o /history é a próxima fonte.
+      const rHist = await chamar(f.historico);
+      if (rHist.status === 200) {
+        const h = extrairDespachoDetalhado(rHist.data);
+        if (h) { base.despachadoEm = h.iso; base.despachoFonte = h.substatus === SUBSTATUS_AGENCIA ? 'agencia' : 'evento_logistico'; }
+      } else base.avisos.push(`history_http_${rHist.status}`);
+    }
     if (!base.despachadoEm && d.dataShippedNoEnvio) {
-      base.despachadoEm = d.dataShippedNoEnvio;
+      base.despachadoEm = d.dataShippedNoEnvio; base.despachoFonte = 'date_shipped';
       base.avisos.push('data_do_envio');
     }
     if (!base.despachadoEm) base.avisos.push('data_despacho_nao_informada');
