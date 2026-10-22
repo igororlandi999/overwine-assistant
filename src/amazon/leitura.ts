@@ -50,7 +50,6 @@ import {
   readManifest, writeChunk, publishManifest, type Alvo, type OrdersManifest, type OrigemPublicacao,
 } from '../lib/orders-store.js';
 import { readCatalogManifest, writeCatalogChunk, publishCatalog, type CatalogManifest } from '../lib/items-store.js';
-import { STATUS_VENDA_AMAZON } from '../lib/status-venda.js';
 import { lerColecao, lerManifesto } from './store.js';
 import type { PedidoAmazon } from './pedidos.js';
 import type { AnuncioAmazon, EstoqueFbaAmazon, EstadoEstoqueFba } from './catalogo.js';
@@ -335,8 +334,6 @@ export function debitosPorPedido(transacoes: readonly TransacaoAmazon[]): Map<st
   }
   return m;
 }
-
-export const STATUS_DE_LEITURA_QUE_CONTAM: readonly string[] = [...STATUS_VENDA_AMAZON];
 
 // ── Financeiro da conta Amazon no período (para a consolidação) ────────────
 
