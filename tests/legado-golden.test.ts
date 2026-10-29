@@ -17,6 +17,10 @@
  *
  * Para REGERAR a fixture (só quando uma mudança de comportamento for
  * intencional e revisada): `GOLDEN_UPDATE=1 npx vitest run tests/legado-golden.test.ts`.
+ *
+ * Regerada na FASE A2b (base 2f3f7bc). Único delta, aditivo e revisado:
+ * `periodo.pedidos` e `periodo.unidades` nas três respostas de `metrics`
+ * (6 linhas a mais; nenhuma linha existente alterada).
  * Nenhum dado real: ids, valores e nomes são sintéticos; TEST_ENV é falso.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';

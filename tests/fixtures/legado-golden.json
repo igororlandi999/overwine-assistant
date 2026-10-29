@@ -151,6 +151,8 @@
       "fonte": "dashboard_legado",
       "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
      },
+     "pedidos": 19,
+     "unidades": 28,
      "porItem": [
       {
        "itemId": "MLB100",
@@ -314,6 +316,8 @@
       "fonte": "dashboard_legado",
       "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
      },
+     "pedidos": 278,
+     "unidades": 416,
      "porItem": [
       {
        "itemId": "MLB100",
@@ -2222,6 +2226,8 @@
       "fonte": "dashboard_legado",
       "metodologia": "Percentuais fixos sobre o faturamento bruto: tarifa ML (comissão + impostos) 14,8% e tarifa de envio (custo logístico) 14,4%, médias reais da planilha de custos. Não refletem fees por pedido da API."
      },
+     "pedidos": 40,
+     "unidades": 60,
      "porItem": [
       {
        "itemId": "MLB104",
