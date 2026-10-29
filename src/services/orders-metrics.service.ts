@@ -18,6 +18,15 @@
  *                         tarifas de config/taxas.json (estimado: true).
  *                         Paridade: calcLiquidoPeriodo e renderCardReputacao.
  *
+ *  periodo.pedidos      → sales-metrics.calcularMetricas (a MESMA de janelas)
+ *  periodo.unidades       contaComoVenda ∩ periodo selecionado (mesma janela
+ *                         BRT de periodo.faturamento); cada pedido UMA vez;
+ *                         unidades sobre TODOS os order_items (quantity ?? 1,
+ *                         0 permanece 0). Pedido valido sem item.id conta como
+ *                         pedido. Sem recorte de cobertura, como faturamento.
+ *                         Sao os TOTAIS oficiais do periodo: porItem nao os
+ *                         substitui (ver abaixo).
+ *
  *  periodo.porItem      → orders.vendasPorItem
  *                         exclui 'cancelled' (pendentes CONTAM); indexa SOMENTE
  *                         order_items[0]; receita = paid_amount do pedido
@@ -58,6 +67,7 @@ import {
 } from './orders.service.js';
 import {
   calcularConsulta,
+  calcularMetricas,
   type CoberturaSnapshot,
   type MetricasVendas,
   type PeriodoYmd,
@@ -132,6 +142,15 @@ export interface MetricsResponse {
     fromYmd: string;
     toYmd: string;
     faturamento: FaturamentoPublico;
+    /**
+     * Pedidos validos (contaComoVenda) do periodo, cada um UMA vez. Total
+     * oficial: Σ porItem.pedidos NAO o substitui (pedido sem item.id no 1o
+     * item fica fora de porItem).
+     */
+    pedidos: number;
+    /** Σ quantity de TODOS os order_items desses pedidos (quantity ?? 1). */
+    unidades: number;
+    /** Distribuicao POR ITEM (legado: so order_items[0]). Nao e total. */
     porItem: ItemPeriodo[];
   };
   reputacao60d: {
@@ -229,6 +248,9 @@ export function montarMetrics(
   const ini = brtStartOfDay(periodo.fromYmd);
   const fim = brtEndOfDay(periodo.toYmd);
   const fat = faturamentoPeriodo(pedidos, ini, fim);
+  // Totais oficiais do periodo: mesma funcao de janelas, mesma janela BRT de
+  // faturamentoPeriodo (brtStartOfDay(from)..brtEndOfDay(to)), sem cobertura.
+  const totais = calcularMetricas(pedidos, periodo);
   const porItem: ItemPeriodo[] = Array.from(vendasPorItem(pedidos, ini, fim).values())
     .map(v => ({ itemId: v.itemId, pedidos: v.pedidos, unidades: v.unidades, receita: v.receita }))
     .sort((a, b) => (b.receita - a.receita) || a.itemId.localeCompare(b.itemId));
@@ -295,6 +317,8 @@ export function montarMetrics(
         fonte: fat.fonte,
         metodologia: fat.metodologia,
       },
+      pedidos: totais.pedidos,
+      unidades: totais.unidades,
       porItem,
     },
     reputacao60d: { fromYmd: repDe, toYmd: hoje, bruto: fatRep.bruto },
