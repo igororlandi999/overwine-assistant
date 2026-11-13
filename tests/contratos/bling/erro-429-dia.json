@@ -1,0 +1,1 @@
+{ "error": { "type": "TOO_MANY_REQUESTS", "message": "Limite de requisições atingido.", "description": "Limite de requisições por dia atingido, tente novamente amanhã.", "limit": 120000, "period": "day" } }

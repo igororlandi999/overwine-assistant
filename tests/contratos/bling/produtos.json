@@ -1,0 +1,6 @@
+{
+  "data": [
+    { "id": 16100000001, "idProdutoPai": null, "nome": "Garrafa (fictício)", "codigo": "UNI-TESTE", "preco": 99.9, "precoCusto": 40, "estoque": { "saldoVirtualTotal": 11 }, "tipo": "P", "situacao": "A", "formato": "S", "descricaoCurta": "", "imagemURL": "" },
+    { "id": 16100000002, "idProdutoPai": null, "nome": "Kit 2 garrafas (fictício)", "codigo": "KIT-TESTE-2", "preco": 199.9, "precoCusto": 80, "estoque": { "saldoVirtualTotal": 5 }, "tipo": "P", "situacao": "A", "formato": "E", "descricaoCurta": "", "imagemURL": "" }
+  ]
+}
