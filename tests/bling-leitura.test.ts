@@ -14,7 +14,7 @@ beforeEach(async () => {
   cache = new FakeCache();
   ligarBling();
   r = relogio();
-  await cache.set(K.cadeia, JSON.stringify({ access: 'tok', expiresAt: r.agora() + 3600_000, refresh: 'rt' }));
+  await cache.set(K.cadeia, JSON.stringify({ access: 'tok', expiresAt: r.agora() + 3600_000, refresh: 'rt', geracao: 'g-teste' }));
 });
 afterEach(() => limparBling());
 

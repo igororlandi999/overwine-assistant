@@ -3,8 +3,9 @@
  *
  * É o único mecanismo de isolamento de dados entre contas, e por isso ele
  * cobre a interface `Cache` INTEIRA: strings, TTL, lock (setNX), compare-and-
- * delete atômico (delIfEquals, que no Upstash é um script Lua — a chave
- * prefixada é passada ao script, então o CAD continua atômico), contadores
+ * delete e compare-and-set atômicos (delIfEquals e setIfEquals, que no
+ * Upstash são scripts Lua — a chave prefixada é passada ao script, então
+ * continuam atômicos), contadores
  * (incr), leitura múltipla (mget, cada chave prefixada) e a fila (rpush/lpopMany/llen). Stores, serviços, locks, cooldowns,
  * telemetria e os tokens do Mercado Livre (`ml:*`, em ml-auth) usam só essa
  * interface, então ficam isolados por construção, sem que nenhum deles
@@ -45,6 +46,7 @@ class CachePrefixado implements Cache {
   del(key: string) { return this.base.del(this.k(key)); }
   setNX(key: string, value: string, ttlSeconds: number) { return this.base.setNX(this.k(key), value, ttlSeconds); }
   delIfEquals(key: string, value: string) { return this.base.delIfEquals(this.k(key), value); }
+  setIfEquals(key: string, expected: string, value: string, ttlSeconds: number) { return this.base.setIfEquals(this.k(key), expected, value, ttlSeconds); }
   incr(key: string, ttlSeconds: number) { return this.base.incr(this.k(key), ttlSeconds); }
   mget(keys: string[]) { return this.base.mget(keys.map(key => this.k(key))); }
   rpush(key: string, ...values: string[]) { return this.base.rpush(this.k(key), ...values); }
@@ -53,4 +55,4 @@ class CachePrefixado implements Cache {
 }
 
 /** Métodos que a interface `Cache` tem hoje. O teste de reflexão compara com o FakeCache. */
-export const METODOS_CACHE = ['get', 'set', 'del', 'setNX', 'delIfEquals', 'incr', 'mget', 'rpush', 'lpopMany', 'llen'] as const;
+export const METODOS_CACHE = ['get', 'set', 'del', 'setNX', 'delIfEquals', 'setIfEquals', 'incr', 'mget', 'rpush', 'lpopMany', 'llen'] as const;

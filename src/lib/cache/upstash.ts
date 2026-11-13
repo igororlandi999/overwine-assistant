@@ -6,6 +6,10 @@ import { getEnv } from '../../config/env.js';
 const CAD_SCRIPT =
   'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end';
 
+/** Lua: grava com TTL só se o valor atual bater (compare-and-set atômico). */
+const CAS_SCRIPT =
+  'if redis.call("GET", KEYS[1]) == ARGV[1] then redis.call("SET", KEYS[1], ARGV[2], "EX", ARGV[3]) return 1 else return 0 end';
+
 export class UpstashCache implements Cache {
   private redis: Redis;
 
@@ -39,6 +43,12 @@ export class UpstashCache implements Cache {
 
   async delIfEquals(key: string, value: string): Promise<boolean> {
     const res = await this.redis.eval(CAD_SCRIPT, [key], [value]);
+    return res === 1;
+  }
+
+  async setIfEquals(key: string, expected: string, value: string, ttlSeconds: number): Promise<boolean> {
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) throw new Error('setIfEquals exige TTL inteiro positivo');
+    const res = await this.redis.eval(CAS_SCRIPT, [key], [expected, value, String(ttlSeconds)]);
     return res === 1;
   }
 

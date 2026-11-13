@@ -53,6 +53,7 @@ class Contador implements Cache {
   del(k: string) { this.c('del'); this.apagadas.push(k); return this.base.del(k); }
   setNX(k: string, v: string, t: number) { this.c('setNX'); return this.base.setNX(k, v, t); }
   delIfEquals(k: string, v: string) { this.c('delIfEquals'); return this.base.delIfEquals(k, v); }
+  setIfEquals(k: string, e: string, v: string, t: number) { this.c('setIfEquals'); return this.base.setIfEquals(k, e, v, t); }
   incr(k: string, t: number) { this.c('incr'); return this.base.incr(k, t); }
   rpush(k: string, ...v: string[]) { this.c('rpush'); return this.base.rpush(k, ...v); }
   lpopMany(k: string, m: number) { this.c('lpopMany'); return this.base.lpopMany(k, m); }

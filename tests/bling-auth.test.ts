@@ -23,8 +23,9 @@ const cadeia = async () => {
   const raw = await cache.get(K.cadeia);
   return raw ? JSON.parse(raw) as { access: string; expiresAt: number; refresh: string } : null;
 };
+let seqGeracao = 0;
 const gravar = (access: string, expiresAt: number, refresh: string) =>
-  cache.set(K.cadeia, JSON.stringify({ access, expiresAt, refresh }));
+  cache.set(K.cadeia, JSON.stringify({ access, expiresAt, refresh, geracao: `g${++seqGeracao}` }));
 
 async function stateValido(): Promise<string> {
   const { url } = await iniciarAutorizacao(cache);
@@ -177,7 +178,7 @@ describe('concluirAutorizacao', () => {
 
   it('nova autorização limpa o efeito de uma recusa anterior (impressão diferente)', async () => {
     await gravar('velho', 0, 'rt-recusado');
-    await cache.set(K.recusado, impressao('rt-recusado'));
+    await cache.set(K.recusado, impressao((await cache.get(K.cadeia))!));
     const state = await stateValido();
     const s = simular({ [TOKEN_URL]: [tokenOk({ refresh_token: 'rt-novo' })] });
     await concluirAutorizacao(cache, { code: 'c', state }, deps(s.fetch));
@@ -212,14 +213,16 @@ describe('obterAccessToken', () => {
     await gravar('velho', r.agora() + 60_000, 'rt-antigo');
     const s = simular({ [TOKEN_URL]: [tokenOk({ access_token: 'novo', refresh_token: 'rt-novo' })] });
     const sets = vi.spyOn(cache, 'set');
+    const cas = vi.spyOn(cache, 'setIfEquals');
     const tok = await obterAccessToken(cache, deps(s.fetch, r));
     expect(tok).toEqual({ token: 'novo', expiresAt: r.agora() + 21600_000 });
     const corpo = new URLSearchParams(String(s.chamadas[0].init.body));
     expect(corpo.get('grant_type')).toBe('refresh_token');
     expect(corpo.get('refresh_token')).toBe('rt-antigo');
     expect(cabecalhos(s.chamadas[0].init)['enable-jwt']).toBe('1');
-    expect(await cadeia()).toEqual({ access: 'novo', expiresAt: r.agora() + 21600_000, refresh: 'rt-novo' });
-    expect(sets.mock.calls.filter(c => c[0] === K.cadeia)).toHaveLength(1);
+    expect(await cadeia()).toMatchObject({ access: 'novo', expiresAt: r.agora() + 21600_000, refresh: 'rt-novo' });
+    expect(sets.mock.calls.filter(c => c[0] === K.cadeia)).toHaveLength(0);
+    expect(cas.mock.calls.filter(c => c[0] === K.cadeia)).toHaveLength(1);
     expect(await cache.get(K.lock)).toBeNull();
   });
 
@@ -234,7 +237,7 @@ describe('obterAccessToken', () => {
     await gravar('a1', 0, 'rt-1');
     const antes = await cache.get(K.cadeia);
     const s = simular({ [TOKEN_URL]: [tokenOk({ access_token: 'a2', refresh_token: 'rt-2' })] });
-    vi.spyOn(cache, 'set').mockRejectedValueOnce(new Error('redis fora'));
+    vi.spyOn(cache, 'setIfEquals').mockRejectedValueOnce(new Error('redis fora'));
     await expect(obterAccessToken(cache, deps(s.fetch))).rejects.toThrow('redis fora');
     expect(await cache.get(K.cadeia)).toBe(antes);
     expect(await cache.get(K.lock)).toBeNull();
@@ -248,7 +251,7 @@ describe('obterAccessToken', () => {
     expect(e).toBeInstanceOf(BlingAutorizacaoError);
     expect(e.message).not.toContain('rt-morto');
     expect(await cache.get(K.cadeia)).toBe(antes);
-    expect(await cache.get(K.recusado)).toBe(impressao('rt-morto'));
+    expect(await cache.get(K.recusado)).toBe(impressao(antes!));
     expect(await cache.get(K.recusado)).not.toContain('rt-morto');
     await expect(obterAccessToken(cache, deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
     expect(s.chamadas).toHaveLength(1);
@@ -355,5 +358,123 @@ describe('estadoAutorizacao', () => {
 
   it('sem cadeia: reautorização necessária', async () => {
     expect(await estadoAutorizacao(cache)).toEqual({ autorizado: false, accessValidoAte: null, reautorizacaoNecessaria: true });
+  });
+});
+
+describe('concorrência na renovação (compare-and-set da cadeia)', () => {
+  /**
+   * Reproduz duas instâncias: A segura o lock e está dentro da chamada ao
+   * Bling; durante a chamada, o lock dela expira e B renova e publica. Só
+   * então a resposta de A chega.
+   */
+  async function corrida(opts: { rotaciona: boolean }) {
+    const r = relogio();
+    await gravar('a0', 0, 'rt-0');
+    const respostaA = { access_token: 'a-de-A', expires_in: 21600, ...(opts.rotaciona ? { refresh_token: 'rt-A' } : {}) };
+    const respostaB = { access_token: 'a-de-B', expires_in: 21600, ...(opts.rotaciona ? { refresh_token: 'rt-B' } : {}) };
+    let respostaDeB: Promise<unknown> | null = null;
+    const fetchA = (async () => {
+      // Lock de A expira no meio da chamada; B entra, renova e publica.
+      cache.store.delete(K.lock);
+      const sB = simular({ [TOKEN_URL]: [{ status: 200, corpo: respostaB }] });
+      respostaDeB = obterAccessToken(cache, deps(sB.fetch, r));
+      await respostaDeB;
+      return new Response(JSON.stringify(respostaA), { status: 200 });
+    }) as typeof fetch;
+    const tokA = await obterAccessToken(cache, deps(fetchA, r));
+    return { tokA, tokB: await respostaDeB!, final: await cadeia() };
+  }
+
+  it('refresh NÃO rotativo + lock expirado: a escrita atrasada de A não sobrescreve a cadeia de B, e A devolve o token de B', async () => {
+    const { tokA, tokB, final } = await corrida({ rotaciona: false });
+    expect(final).toMatchObject({ access: 'a-de-B', refresh: 'rt-0' });
+    expect(tokA).toEqual(tokB);
+    expect((tokA as { token: string }).token).toBe('a-de-B');
+  });
+
+  it('refresh rotativo + lock expirado: idem, a cadeia vencedora (de B) permanece', async () => {
+    const { tokA, final } = await corrida({ rotaciona: true });
+    expect(final).toMatchObject({ access: 'a-de-B', refresh: 'rt-B' });
+    expect((tokA as { token: string }).token).toBe('a-de-B');
+  });
+
+  it('refresh NÃO rotativo: A recebe 400 depois que B publicou com o MESMO refresh; a cadeia de B continua utilizável', async () => {
+    const r = relogio();
+    await gravar('a0', 0, 'rt-0');
+    const fetchA = (async () => {
+      cache.store.delete(K.lock);
+      const sB = simular({ [TOKEN_URL]: [{ status: 200, corpo: { access_token: 'a-de-B', expires_in: 21600 } }] });
+      await obterAccessToken(cache, deps(sB.fetch, r));
+      return new Response(JSON.stringify({ error: { type: 'invalid_grant' } }), { status: 400 });
+    }) as typeof fetch;
+    await expect(obterAccessToken(cache, deps(fetchA, r))).rejects.toBeInstanceOf(BlingAutorizacaoError);
+    expect(await cadeia()).toMatchObject({ access: 'a-de-B', refresh: 'rt-0' });
+    const s = simular({});
+    expect((await obterAccessToken(cache, deps(s.fetch, r))).token).toBe('a-de-B');
+    expect((await estadoAutorizacao(cache, r.agora())).autorizado).toBe(true);
+    // Quando o token de B vencer, a renovação dele NÃO pode estar bloqueada pela recusa de A.
+    r.avancar(21600_000);
+    const s2 = simular({ [TOKEN_URL]: [{ status: 200, corpo: { access_token: 'a-seguinte', expires_in: 21600 } }] });
+    expect((await obterAccessToken(cache, deps(s2.fetch, r))).token).toBe('a-seguinte');
+  });
+
+  it('cadeias com os mesmos tokens ainda se distinguem: cada escrita tem geração própria', async () => {
+    await gravar('a0', 0, 'rt-0');
+    const s = simular({ [TOKEN_URL]: [tokenOk({ access_token: 'igual', refresh_token: 'rt-igual' }), tokenOk({ access_token: 'igual', refresh_token: 'rt-igual' })] });
+    await obterAccessToken(cache, deps(s.fetch));
+    const g1 = (await cadeia() as any).geracao;
+    await obterAccessToken(cache, deps(s.fetch), { rejeitado: 'igual' });
+    const g2 = (await cadeia() as any).geracao;
+    expect(g1).toMatch(/^[a-f0-9]{16}$/);
+    expect(g2).not.toBe(g1);
+  });
+
+  it('vencedora sem token utilizável: erro temporário, sem devolver o token não persistido', async () => {
+    const r = relogio();
+    await gravar('a0', 0, 'rt-0');
+    const f = (async () => {
+      // Outra escrita troca a cadeia por uma que JÁ está vencida.
+      await gravar('vencido', r.agora() - 1, 'rt-x');
+      return new Response(JSON.stringify({ access_token: 'nao-persistido', expires_in: 21600 }), { status: 200 });
+    }) as typeof fetch;
+    const e = await obterAccessToken(cache, deps(f, r)).catch((x: any) => x);
+    expect(e).toBeInstanceOf(BlingHttpError);
+    expect(e.status).toBe(409);
+    expect(JSON.stringify(e)).not.toContain('nao-persistido');
+    expect(await cadeia()).toMatchObject({ access: 'vencido' });
+  });
+
+  it('lock expirado sem concorrente: A conclui e publica normalmente (o CAS, não o lock, decide)', async () => {
+    const r = relogio();
+    await gravar('a0', 0, 'rt-0');
+    const f = (async () => {
+      cache.store.delete(K.lock);
+      return new Response(JSON.stringify({ access_token: 'a-de-A', expires_in: 21600 }), { status: 200 });
+    }) as typeof fetch;
+    expect((await obterAccessToken(cache, deps(f, r))).token).toBe('a-de-A');
+    expect(await cadeia()).toMatchObject({ access: 'a-de-A' });
+  });
+
+  it('lock expirado e retomado por B: A não libera o lock de B', async () => {
+    const r = relogio();
+    await gravar('a0', 0, 'rt-0');
+    const f = (async () => {
+      cache.store.delete(K.lock);
+      await cache.setNX(K.lock, 'lock-de-B', 30);
+      return new Response(JSON.stringify({ access_token: 'a-de-A', expires_in: 21600 }), { status: 200 });
+    }) as typeof fetch;
+    await obterAccessToken(cache, deps(f, r));
+    expect(await cache.get(K.lock)).toBe('lock-de-B');
+  });
+
+  it('falha de persistência no compare-and-set: erro propagado, cadeia anterior intacta, token novo não devolvido', async () => {
+    await gravar('a0', 0, 'rt-0');
+    const antes = await cache.get(K.cadeia);
+    const s = simular({ [TOKEN_URL]: [tokenOk({ access_token: 'a-novo' })] });
+    vi.spyOn(cache, 'setIfEquals').mockRejectedValueOnce(new Error('redis fora'));
+    const e = await obterAccessToken(cache, deps(s.fetch)).catch((x: any) => x);
+    expect(e.message).toBe('redis fora');
+    expect(await cache.get(K.cadeia)).toBe(antes);
+    expect(await cache.get(K.lock)).toBeNull();
   });
 });

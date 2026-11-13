@@ -15,6 +15,13 @@ export interface Cache {
    * e já foi adquirido por outra. Retorna true se apagou.
    */
   delIfEquals(key: string, value: string): Promise<boolean>;
+  /**
+   * Compare-and-set ATÔMICO: grava `value` (com TTL) somente se o valor atual
+   * for exatamente `expected`. Retorna true se gravou. Existe para a cadeia de
+   * tokens do Bling: uma instância com estado antigo (lock expirado no meio
+   * da renovação) não pode sobrescrever uma cadeia mais nova.
+   */
+  setIfEquals(key: string, expected: string, value: string, ttlSeconds: number): Promise<boolean>;
   /** INCR com TTL na primeira escrita — usado para rate limiting. */
   incr(key: string, ttlSeconds: number): Promise<number>;
   /**

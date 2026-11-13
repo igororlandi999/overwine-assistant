@@ -50,6 +50,12 @@ describe('1. cobertura da interface', () => {
     expect(await c.delIfEquals('lock', 'errado')).toBe(false);
     expect(await c.delIfEquals('lock', 'dono')).toBe(true);
     expect(base.store.has('lock')).toBe(true);                          // o da legada ficou
+    await base.set('cas', 'v1', 60);                                    // mesma chave sem prefixo: outra conta
+    await c.set('cas', 'v1', 60);
+    expect(await c.setIfEquals('cas', 'errado', 'v2', 60)).toBe(false);
+    expect(await c.setIfEquals('cas', 'v1', 'v2', 60)).toBe(true);
+    expect(base.store.get('c:degustar-ml:cas')!.v).toBe('v2');
+    expect(base.store.get('cas')!.v).toBe('v1');                        // a da legada nao mudou
     expect(await c.incr('cnt', 60)).toBe(1);
     expect(await c.incr('cnt', 60)).toBe(2);
     expect(base.store.get('c:degustar-ml:cnt')!.v).toBe('2');

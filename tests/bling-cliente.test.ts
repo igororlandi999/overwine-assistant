@@ -14,7 +14,7 @@ beforeEach(async () => {
   cache = new FakeCache();
   ligarBling();
   r = relogio();
-  await cache.set(K.cadeia, JSON.stringify({ access: 'tok-atual', expiresAt: r.agora() + 3600_000, refresh: 'rt-atual' }));
+  await cache.set(K.cadeia, JSON.stringify({ access: 'tok-atual', expiresAt: r.agora() + 3600_000, refresh: 'rt-atual', geracao: 'g-teste' }));
 });
 afterEach(() => { limparBling(); vi.restoreAllMocks(); });
 
@@ -68,7 +68,7 @@ describe('blingGet', () => {
       const resp = await f(u, i);
       if (primeira) {
         primeira = false;
-        await cache.set(K.cadeia, JSON.stringify({ access: 'tok-da-outra', expiresAt: r.agora() + 3600_000, refresh: 'rt-2' }));
+        await cache.set(K.cadeia, JSON.stringify({ access: 'tok-da-outra', expiresAt: r.agora() + 3600_000, refresh: 'rt-2', geracao: 'g-teste' }));
       }
       return resp;
     }) as typeof fetch, r);

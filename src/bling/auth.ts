@@ -17,24 +17,29 @@
  *  4. obterAccessToken: devolve o access token em cache ou renova com o
  *     refresh token, sob lock distribuído.
  *
- * Persistência ATÔMICA: access token, validade e refresh token vivem numa
- * ÚNICA chave (`bling:tokens`), gravada por um único SET. Não existe estado
+ * Persistência ATÔMICA: access token, validade, refresh token e geração
+ * vivem numa ÚNICA chave (`bling:tokens`), gravada por um único comando. Não existe estado
  * intermediário em que o refresh novo foi gravado e o access não (ou o
  * contrário): ou a cadeia nova inteira está publicada, ou a anterior continua.
  *
- * Concorrência entre instâncias serverless: toda escrita da cadeia (troca do
- * code e renovação) acontece com o lock `bling:refresh_lock` (SET NX + valor
- * de propriedade + compare-and-delete). O lock dura 30 s e a chamada ao
- * /oauth/token tem timeout de 10 s. Antes de publicar, a cadeia é relida: se
- * outra escrita aconteceu nesse meio-tempo, a nossa não a sobrescreve.
+ * Concorrência entre instâncias serverless: duas camadas.
+ *  - Lock `bling:refresh_lock` (SET NX + valor de propriedade + compare-and-
+ *    delete): evita que várias instâncias chamem o /oauth/token ao mesmo
+ *    tempo. Dura 30 s; a chamada ao Bling tem timeout de 10 s.
+ *  - Compare-and-set atômico (Cache.setIfEquals, script Lua no Upstash): é o
+ *    que garante a CORREÇÃO. A renovação só publica se a cadeia no Redis
+ *    ainda for exatamente a que ela leu (valor inteiro, incluindo a
+ *    `geracao`, nunca só o refresh token). Se o lock expirar no meio da
+ *    chamada e outra instância publicar antes, a escrita atrasada é
+ *    descartada e a cadeia vencedora é relida e usada.
  *
  * Refresh recusado (HTTP 400/401): NADA é apagado. Grava-se uma marca com a
- * impressão digital (sha256 truncado) do refresh token recusado, por 15 min.
- * Enquanto a marca casar com o refresh da cadeia atual, as chamadas falham na
- * hora pedindo nova autorização, sem tocar no /oauth/token (protege o IP do
+ * impressão digital (sha256 truncado) da cadeia recusada, por 15 min.
+ * Enquanto a marca casar com a cadeia atual, as chamadas falham na hora
+ * pedindo nova autorização, sem tocar no /oauth/token (protege o IP do
  * bloqueio do Bling: mais de 20 chamadas a /oauth/token em 60 s = 60 min de
- * bloqueio). Se outra instância (ou uma nova autorização) publicar uma cadeia
- * com outro refresh, a marca deixa de casar e não afeta a cadeia nova.
+ * bloqueio). Qualquer cadeia publicada depois (outra instância ou nova
+ * autorização) tem outra geração, e a marca deixa de casar.
  *
  * Teto local de chamadas a /oauth/token: 10 por minuto, contado no Redis
  * (compartilhado entre instâncias).
@@ -50,7 +55,7 @@ import { BlingAutorizacaoError, BlingHttpError, BlingLimiteError } from './erros
 export const K = {
   cadeia: 'bling:tokens', // JSON { access, expiresAt, refresh }
   lock: 'bling:refresh_lock',
-  recusado: 'bling:refresh_recusado', // impressão digital do refresh recusado
+  recusado: 'bling:refresh_recusado', // impressão digital da cadeia recusada
   state: (s: string) => `bling:oauth_state:${s}`,
   chamadasToken: (janela: number) => `bling:token_calls:${janela}`,
 };
@@ -79,6 +84,13 @@ interface Cadeia {
   access: string;
   expiresAt: number;
   refresh: string;
+  /**
+   * Identificador aleatório de CADA escrita. Garante que duas cadeias nunca
+   * tenham o mesmo valor serializado, mesmo que o Bling devolva tokens
+   * iguais ou não rotacione o refresh: o compare-and-set compara a cadeia
+   * inteira, não o refresh token.
+   */
+  geracao: string;
 }
 
 interface RespostaToken {
@@ -91,9 +103,9 @@ interface RespostaToken {
 
 const dormir = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-/** Impressão digital NÃO reversível do refresh token (só para comparar). */
-export function impressao(refresh: string): string {
-  return createHash('sha256').update(refresh).digest('hex').slice(0, 16);
+/** Impressão digital NÃO reversível de um valor (só para comparar). */
+export function impressao(valor: string): string {
+  return createHash('sha256').update(valor).digest('hex').slice(0, 16);
 }
 
 function parseCadeia(raw: string | null): Cadeia | null {
@@ -101,7 +113,7 @@ function parseCadeia(raw: string | null): Cadeia | null {
   try {
     const p = JSON.parse(raw) as Cadeia;
     if (typeof p?.access === 'string' && p.access && typeof p.refresh === 'string' && p.refresh
-      && typeof p.expiresAt === 'number') return p;
+      && typeof p.expiresAt === 'number' && typeof p.geracao === 'string' && p.geracao) return p;
   } catch {
     /* cache corrompido: tratado como ausente */
   }
@@ -164,10 +176,13 @@ function novaCadeia(d: RespostaToken, refreshAnterior: string | null, agora: num
   const refresh = d.refresh_token || refreshAnterior;
   if (!d.access_token || !refresh) return null;
   const expiresIn = typeof d.expires_in === 'number' && d.expires_in > 0 ? d.expires_in : ACCESS_TTL_PADRAO_S;
-  return { access: d.access_token, expiresAt: agora + expiresIn * 1000, refresh };
+  return { access: d.access_token, expiresAt: agora + expiresIn * 1000, refresh, geracao: randomBytes(8).toString('hex') };
 }
 
-/** Um único SET: a cadeia inteira muda de uma vez ou não muda. */
+/**
+ * Um único SET incondicional: usado SÓ na troca do code (autorização
+ * explícita de uma pessoa, que substitui qualquer cadeia anterior).
+ */
 async function gravarCadeia(cache: Cache, c: Cadeia): Promise<void> {
   await cache.set(K.cadeia, JSON.stringify(c), REFRESH_TTL_S);
 }
@@ -243,16 +258,17 @@ export async function obterAccessToken(
   const sleep = deps.sleep ?? dormir;
   const utilizavel = (c: Cadeia | null): boolean =>
     !!c && c.access !== opts.rejeitado && c.expiresAt - agora() > RENEW_MARGIN_MS;
-  const exigirNaoRecusado = async (c: Cadeia) => {
-    if ((await cache.get(K.recusado)) === impressao(c.refresh)) {
+  const exigirNaoRecusado = async (raw: string) => {
+    if ((await cache.get(K.recusado)) === impressao(raw)) {
       throw new BlingAutorizacaoError('refresh token recusado pelo Bling; autorize o aplicativo novamente');
     }
   };
 
-  const atual = parseCadeia(await cache.get(K.cadeia));
+  const rawAtual = await cache.get(K.cadeia);
+  const atual = parseCadeia(rawAtual);
   if (utilizavel(atual)) return paraToken(atual!);
   if (!atual) throw new BlingAutorizacaoError('Bling não autorizado: cadeia de tokens ausente ou expirada');
-  await exigirNaoRecusado(atual);
+  await exigirNaoRecusado(rawAtual!);
 
   const dono = randomBytes(16).toString('hex');
   if (!(await cache.setNX(K.lock, dono, LOCK_TTL_S))) {
@@ -265,25 +281,30 @@ export async function obterAccessToken(
   }
 
   try {
-    const lida = parseCadeia(await cache.get(K.cadeia));
+    const rawLida = await cache.get(K.cadeia);
+    const lida = parseCadeia(rawLida);
     if (utilizavel(lida)) return paraToken(lida!);
     if (!lida) throw new BlingAutorizacaoError('Bling não autorizado: cadeia de tokens ausente ou expirada');
-    await exigirNaoRecusado(lida);
+    await exigirNaoRecusado(rawLida!);
 
     const r = await requisicaoToken(cache, cfg, { grant_type: 'refresh_token', refresh_token: lida.refresh }, deps);
     const nova = r.dados ? novaCadeia(r.dados, lida.refresh, agora()) : null;
     if (nova) {
-      // Releitura antes de publicar: se a cadeia mudou (nova autorização, ou
-      // outra instância depois de o lock expirar), não sobrescreve.
-      const agoraNoCache = await cache.get(K.cadeia);
-      if (agoraNoCache === null || parseCadeia(agoraNoCache)?.refresh === lida.refresh) {
-        await gravarCadeia(cache, nova);
-      }
-      return paraToken(nova);
+      // Compare-and-set ATÔMICO contra a cadeia exata que lemos (valor
+      // serializado inteiro, com a geração). Se outra escrita aconteceu desde
+      // a leitura (lock expirado no meio da chamada, ou nova autorização), a
+      // nossa é descartada e vale a cadeia vencedora. O token que acabamos de
+      // obter NUNCA é devolvido sem ter sido persistido.
+      if (await cache.setIfEquals(K.cadeia, rawLida!, JSON.stringify(nova), REFRESH_TTL_S)) return paraToken(nova);
+      const vencedora = parseCadeia(await cache.get(K.cadeia));
+      if (utilizavel(vencedora)) return paraToken(vencedora!);
+      throw new BlingHttpError('cadeia de tokens alterada por outra escrita durante a renovação; tente novamente', 409);
     }
 
     if (r.status === 400 || r.status === 401) {
-      await cache.set(K.recusado, impressao(lida.refresh), RECUSA_TTL_S);
+      // Marca a cadeia EXATA que foi recusada (com a geração). Qualquer cadeia
+      // escrita depois, mesmo com o mesmo refresh token, não casa com a marca.
+      await cache.set(K.recusado, impressao(rawLida!), RECUSA_TTL_S);
       throw new BlingAutorizacaoError(`refresh recusado pelo Bling (HTTP ${r.status}${r.tipo ? `, ${r.tipo}` : ''}); autorize o aplicativo novamente`);
     }
     throw new BlingHttpError(`falha ao renovar token Bling (HTTP ${r.status})`, r.status, r.tipo);
@@ -298,7 +319,7 @@ export async function estadoAutorizacao(cache: Cache, agora = Date.now()): Promi
 }> {
   const [raw, recusado] = await cache.mget([K.cadeia, K.recusado]);
   const c = parseCadeia(raw);
-  const recusada = !!c && recusado === impressao(c.refresh);
+  const recusada = !!c && recusado === impressao(raw!);
   return {
     autorizado: !!c && !recusada,
     accessValidoAte: c && c.expiresAt > agora ? new Date(c.expiresAt).toISOString() : null,
