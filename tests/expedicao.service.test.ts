@@ -572,7 +572,8 @@ describe('consultarEnvios — incremental', () => {
     const conta = (p: string) => ({
       get: (k: string) => cache.get(p + k), set: (k: string, v: string, t?: number) => cache.set(p + k, v, t),
       del: (k: string) => cache.del(p + k), setNX: (k: string, v: string, t: number) => cache.setNX(p + k, v, t),
-      delIfEquals: (k: string, v: string) => cache.delIfEquals(p + k, v), incr: (k: string, t: number) => cache.incr(p + k, t),
+      delIfEquals: (k: string, v: string) => cache.delIfEquals(p + k, v),
+      setIfEquals: (k: string, e: string, v: string, t: number) => cache.setIfEquals(p + k, e, v, t), incr: (k: string, t: number) => cache.incr(p + k, t),
       mget: (ks: string[]) => cache.mget(ks.map(k => p + k)),
       rpush: (k: string, ...v: string[]) => cache.rpush(p + k, ...v), lpopMany: (k: string, m: number) => cache.lpopMany(p + k, m),
       llen: (k: string) => cache.llen(p + k),

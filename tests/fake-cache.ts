@@ -28,6 +28,11 @@ export class FakeCache implements Cache {
     this.store.delete(k);
     return true;
   }
+  async setIfEquals(k: string, expected: string, v: string, ttl: number) {
+    if (this.alive(k) !== expected) return false;
+    this.store.set(k, { v, exp: Date.now() + ttl * 1000 }); // uma operação só, como o script Lua
+    return true;
+  }
   async mget(ks: string[]) { return ks.map(k => this.alive(k)); }
   async incr(k: string, ttl: number) {
     const cur = parseInt(this.alive(k) || '0') || 0;

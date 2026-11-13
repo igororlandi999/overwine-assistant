@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "produto": { "id": 16100000001, "codigo": "UNI-TESTE" },
+      "saldoFisicoTotal": 12,
+      "saldoVirtualTotal": 11,
+      "saldoMultiempresa": 30,
+      "depositos": [
+        { "id": 14880001, "saldoFisico": 10, "saldoVirtual": 9, "saldoMultiempresa": 0 },
+        { "id": 14880002, "saldoFisico": 2, "saldoVirtual": 2, "saldoMultiempresa": 0 }
+      ]
+    }
+  ]
+}

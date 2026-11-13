@@ -1,0 +1,22 @@
+{
+  "data": {
+    "id": 16100000002,
+    "idProdutoPai": null,
+    "nome": "Kit 2 garrafas (fictício)",
+    "codigo": "KIT-TESTE-2",
+    "preco": 199.9,
+    "precoCusto": 80,
+    "tipo": "P",
+    "situacao": "A",
+    "formato": "E",
+    "descricaoCurta": "",
+    "imagemURL": "",
+    "gtin": "7890000000002",
+    "estoque": { "minimo": 0, "maximo": 0, "crossdocking": 0, "localizacao": "", "saldoVirtualTotal": 5 },
+    "estrutura": {
+      "tipoEstoque": "V",
+      "lancamentoEstoque": "A",
+      "componentes": [ { "produto": { "id": 16100000001 }, "quantidade": 2 } ]
+    }
+  }
+}

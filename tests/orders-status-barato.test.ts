@@ -34,6 +34,7 @@ class Faturavel implements Cache {
   del(k: string) { this.c('del'); return this.b.del(k); }
   setNX(k: string, v: string, t: number) { this.c('setNX'); return this.b.setNX(k, v, t); }
   delIfEquals(k: string, v: string) { this.c('eval', 3); return this.b.delIfEquals(k, v); }
+  setIfEquals(k: string, e: string, v: string, t: number) { this.c('eval', 3); return this.b.setIfEquals(k, e, v, t); }
   async incr(k: string, t: number) { const n = await this.b.incr(k, t); this.c('incr'); if (n === 1) this.c('expire'); return n; }
   rpush(k: string, ...v: string[]) { this.c('rpush'); return this.b.rpush(k, ...v); }
   lpopMany(k: string, m: number) { this.c('lpopMany'); return this.b.lpopMany(k, m); }

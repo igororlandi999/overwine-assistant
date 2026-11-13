@@ -1,0 +1,7 @@
+{
+  "data": [
+    { "id": 14880001, "descricao": "Geral", "situacao": 1, "padrao": true, "desconsiderarSaldo": false },
+    { "id": 14880002, "descricao": "Full Mercado Livre", "situacao": 1, "padrao": false, "desconsiderarSaldo": true },
+    { "id": 14880003, "descricao": "Antigo", "situacao": 0, "padrao": false, "desconsiderarSaldo": false }
+  ]
+}

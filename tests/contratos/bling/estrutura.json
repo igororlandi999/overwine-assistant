@@ -1,0 +1,7 @@
+{
+  "data": {
+    "tipoEstoque": "V",
+    "lancamentoEstoque": "A",
+    "componentes": [ { "produto": { "id": 16100000001 }, "quantidade": 2 } ]
+  }
+}
