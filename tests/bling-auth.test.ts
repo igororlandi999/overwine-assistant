@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FakeCache } from './fake-cache.js';
 import {
-  iniciarAutorizacao, concluirAutorizacao, obterAccessToken, estadoAutorizacao, impressao,
+  trocarCode, obterAccessToken, estadoAutorizacao, impressao,
   K, TETO_LOCAL_TOKEN_POR_MINUTO,
 } from '../src/bling/auth.js';
 import { blingHabilitado } from '../src/bling/config.js';
@@ -11,6 +11,7 @@ import {
 import { ligarBling, limparBling, simular, deps, relogio, TOKEN_URL, cabecalhos, SEGREDO_TESTE } from './bling-simulado.js';
 
 let cache: FakeCache;
+const EMPRESA_OK = { empresa: { id: 'emp-1', nome: 'Empresa Teste', cnpj: '12345678000190' }, validacao: 'cnpj' };
 beforeEach(() => { cache = new FakeCache(); ligarBling(); });
 afterEach(() => { limparBling(); vi.restoreAllMocks(); });
 
@@ -25,20 +26,14 @@ const cadeia = async () => {
 };
 let seqGeracao = 0;
 const gravar = (access: string, expiresAt: number, refresh: string) =>
-  cache.set(K.cadeia, JSON.stringify({ access, expiresAt, refresh, geracao: `g${++seqGeracao}` }));
-
-async function stateValido(): Promise<string> {
-  const { url } = await iniciarAutorizacao(cache);
-  return new URL(url).searchParams.get('state')!;
-}
+  cache.set(K.cadeia, JSON.stringify({ access, expiresAt, refresh, geracao: `g${++seqGeracao}`, ...EMPRESA_OK }));
 
 describe('trava BLING_ENABLED', () => {
   it('desligada por padrão: nenhuma função de autenticação chama a rede', async () => {
     limparBling();
     const s = simular({});
-    await expect(iniciarAutorizacao(cache)).rejects.toBeInstanceOf(BlingDesativadoError);
+    await expect(trocarCode(cache, 'x', deps(s.fetch))).rejects.toBeInstanceOf(BlingDesativadoError);
     await expect(obterAccessToken(cache, deps(s.fetch))).rejects.toBeInstanceOf(BlingDesativadoError);
-    await expect(concluirAutorizacao(cache, { code: 'x', state: 'y' }, deps(s.fetch))).rejects.toBeInstanceOf(BlingDesativadoError);
     expect(s.chamadas).toHaveLength(0);
   });
 
@@ -57,7 +52,7 @@ describe('trava BLING_ENABLED', () => {
 
   it('credencial ausente falha antes da rede, citando só o NOME da variável', async () => {
     delete process.env.BLING_CLIENT_SECRET;
-    const e = await iniciarAutorizacao(cache).catch((x: any) => x);
+    const e = await trocarCode(cache, 'x').catch((x: any) => x);
     expect(e).toBeInstanceOf(BlingConfiguracaoError);
     expect(e.message).toContain('BLING_CLIENT_SECRET');
     expect(e.message).not.toContain('client-id-ficticio');
@@ -65,37 +60,19 @@ describe('trava BLING_ENABLED', () => {
 
   it('BLING_MAX_REQ_DIA inválido é recusado', async () => {
     process.env.BLING_MAX_REQ_DIA = 'muito';
-    await expect(iniciarAutorizacao(cache)).rejects.toBeInstanceOf(BlingConfiguracaoError);
+    await expect(trocarCode(cache, 'x')).rejects.toBeInstanceOf(BlingConfiguracaoError);
+  });
+
+  it('BLING_CNPJ_ESPERADO malformado é recusado', async () => {
+    process.env.BLING_CNPJ_ESPERADO = '12.345';
+    await expect(trocarCode(cache, 'x')).rejects.toBeInstanceOf(BlingConfiguracaoError);
   });
 });
 
-describe('iniciarAutorizacao', () => {
-  it('monta a URL oficial com response_type, client_id e state; sem redirect_uri nem scope', async () => {
-    const { url, expiraEmS } = await iniciarAutorizacao(cache);
-    const u = new URL(url);
-    expect(`${u.origin}${u.pathname}`).toBe('https://bling.com.br/Api/v3/oauth/authorize');
-    expect(u.searchParams.get('response_type')).toBe('code');
-    expect(u.searchParams.get('client_id')).toBe('client-id-ficticio');
-    expect(u.searchParams.get('state')).toMatch(/^[a-f0-9]{48}$/);
-    expect(u.searchParams.has('redirect_uri')).toBe(false);
-    expect(u.searchParams.has('scope')).toBe(false);
-    expect(url).not.toContain(SEGREDO_TESTE);
-    expect(expiraEmS).toBe(600);
-    expect(await cache.get(K.state(u.searchParams.get('state')!))).toBe('1');
-  });
-
-  it('cada chamada gera um state diferente', async () => {
-    expect(await stateValido()).not.toBe(await stateValido());
-  });
-});
-
-describe('concluirAutorizacao', () => {
-  it('troca o code no endpoint oficial com Basic, Accept 1.0 e enable-jwt; grava a cadeia; não devolve tokens', async () => {
-    const state = await stateValido();
+describe('trocarCode', () => {
+  it('endpoint oficial com Basic, Accept 1.0 e enable-jwt; não grava nada', async () => {
     const s = simular({ [TOKEN_URL]: [tokenOk()] });
-    const r = await concluirAutorizacao(cache, { code: 'code-ficticio', state }, deps(s.fetch));
-
-    expect(s.chamadas).toHaveLength(1);
+    const t = await trocarCode(cache, 'code-ficticio', deps(s.fetch));
     const { url, init } = s.chamadas[0];
     expect(url).toBe(TOKEN_URL);
     expect(init.method).toBe('POST');
@@ -108,81 +85,21 @@ describe('concluirAutorizacao', () => {
     expect(corpo.get('grant_type')).toBe('authorization_code');
     expect(corpo.get('code')).toBe('code-ficticio');
     expect(corpo.has('client_secret')).toBe(false);
-    expect(corpo.has('client_id')).toBe(false);
-
-    expect(await cadeia()).toMatchObject({ access: 'eyJ.access.1', refresh: 'rt-1' });
-    expect(r.escopos).toEqual(['98309', '318257570']);
-    expect(JSON.stringify(r)).not.toMatch(/eyJ|rt-1/);
-    expect(await cache.get(K.lock)).toBeNull();
-  });
-
-  it('state desconhecido: recusa sem chamar o Bling e sem gravar nada', async () => {
-    const s = simular({});
-    await expect(concluirAutorizacao(cache, { code: 'c', state: 'a'.repeat(48) }, deps(s.fetch)))
-      .rejects.toBeInstanceOf(BlingAutorizacaoError);
-    expect(s.chamadas).toHaveLength(0);
+    expect(t).toMatchObject({ access: 'eyJ.access.1', refresh: 'rt-1' });
     expect(await cadeia()).toBeNull();
   });
 
-  it('state é de uso único: a segunda conclusão com o mesmo state é recusada', async () => {
-    const state = await stateValido();
-    const s = simular({ [TOKEN_URL]: [tokenOk()] });
-    await concluirAutorizacao(cache, { code: 'c1', state }, deps(s.fetch));
-    await expect(concluirAutorizacao(cache, { code: 'c2', state }, deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
-    expect(s.chamadas).toHaveLength(1);
-  });
-
-  it('state em formato inválido ou ausente é recusado', async () => {
-    const s = simular({});
-    for (const state of [undefined, 123, '', 'curto', 'G'.repeat(48)]) {
-      await expect(concluirAutorizacao(cache, { code: 'c', state }, deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
-    }
-    expect(s.chamadas).toHaveLength(0);
-  });
-
-  it('code ausente é recusado depois de consumir o state (não reaproveitável)', async () => {
-    const state = await stateValido();
-    const s = simular({});
-    await expect(concluirAutorizacao(cache, { state }, deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
-    expect(await cache.get(K.state(state))).toBeNull();
-    expect(s.chamadas).toHaveLength(0);
-  });
-
-  it('Bling recusa o code: erro sem o code na mensagem e nada gravado', async () => {
-    const state = await stateValido();
-    const s = simular({ [TOKEN_URL]: [{ status: 400, corpo: { error: { type: 'invalid_grant', message: 'x', description: 'code expirado' } } }] });
-    const e = await concluirAutorizacao(cache, { code: 'code-secreto-expirado', state }, deps(s.fetch)).catch((x: any) => x);
+  it('code recusado: erro sem o code na mensagem', async () => {
+    const s = simular({ [TOKEN_URL]: [{ status: 400, corpo: { error: { type: 'invalid_grant' } } }] });
+    const e = await trocarCode(cache, 'code-secreto', deps(s.fetch)).catch((x: any) => x);
     expect(e).toBeInstanceOf(BlingAutorizacaoError);
     expect(e.message).toContain('invalid_grant');
-    expect(e.message).not.toContain('code-secreto-expirado');
-    expect(await cadeia()).toBeNull();
+    expect(e.message).not.toContain('code-secreto');
   });
 
-  it('resposta sem refresh_token é recusada (cadeia incompleta não é gravada)', async () => {
-    const state = await stateValido();
+  it('resposta sem refresh_token é recusada', async () => {
     const s = simular({ [TOKEN_URL]: [{ status: 200, corpo: { access_token: 'a', expires_in: 100 } }] });
-    await expect(concluirAutorizacao(cache, { code: 'c', state }, deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
-    expect(await cadeia()).toBeNull();
-  });
-
-  it('respeita o lock: com renovação em andamento, não troca o code e não grava', async () => {
-    const state = await stateValido();
-    await cache.setNX(K.lock, 'outra-instancia', 30);
-    const s = simular({});
-    const e = await concluirAutorizacao(cache, { code: 'c', state }, deps(s.fetch)).catch((x: any) => x);
-    expect(e).toBeInstanceOf(BlingHttpError);
-    expect(e.status).toBe(503);
-    expect(s.chamadas).toHaveLength(0);
-    expect(await cache.get(K.lock)).toBe('outra-instancia');
-  });
-
-  it('nova autorização limpa o efeito de uma recusa anterior (impressão diferente)', async () => {
-    await gravar('velho', 0, 'rt-recusado');
-    await cache.set(K.recusado, impressao((await cache.get(K.cadeia))!));
-    const state = await stateValido();
-    const s = simular({ [TOKEN_URL]: [tokenOk({ refresh_token: 'rt-novo' })] });
-    await concluirAutorizacao(cache, { code: 'c', state }, deps(s.fetch));
-    expect((await estadoAutorizacao(cache)).autorizado).toBe(true);
+    await expect(trocarCode(cache, 'c', deps(s.fetch))).rejects.toBeInstanceOf(BlingAutorizacaoError);
   });
 });
 

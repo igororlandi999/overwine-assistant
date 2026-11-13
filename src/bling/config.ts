@@ -9,6 +9,11 @@
  *                        nenhuma chamada sai deste backend para o Bling.
  *   BLING_CLIENT_ID      Client Id do aplicativo (Área do Integrador).
  *   BLING_CLIENT_SECRET  Client Secret do aplicativo. Nunca sai do servidor.
+ *   BLING_CNPJ_ESPERADO  OPCIONAL, não é segredo. CNPJ da empresa que PODE
+ *                        ser conectada. Presente: autorização de outro CNPJ
+ *                        (/empresas/me/dados-basicos) é recusada. Presente
+ *                        ou não, toda autorização fica pendente até a
+ *                        confirmação de um administrador.
  *   BLING_MAX_REQ_DIA    OPCIONAL. Teto local diário de requisições (padrão
  *                        20.000), bem abaixo das 120.000 da conta, para que
  *                        um erro de código não esgote a cota que o próprio
@@ -26,6 +31,13 @@ export interface ConfigBling {
   clientId: string;
   clientSecret: string;
   maxReqDia: number;
+  /** 14 dígitos, ou null quando a validação é manual. */
+  cnpjEsperado: string | null;
+}
+
+/** Só os dígitos de um CNPJ (aceita com ou sem pontuação). */
+export function digitosCnpj(v: string): string {
+  return v.replace(/\D/g, '');
 }
 
 /** A trava está ligada? Só o valor exato "true" liga. */
@@ -50,9 +62,13 @@ export function lerConfigBling(): ConfigBling {
   const bruto = (process.env.BLING_MAX_REQ_DIA ?? '').trim();
   const n = bruto ? Number(bruto) : MAX_REQ_DIA_PADRAO;
   if (!Number.isInteger(n) || n <= 0) throw new BlingConfiguracaoError('BLING_MAX_REQ_DIA inválido');
+  const cnpjBruto = (process.env.BLING_CNPJ_ESPERADO ?? '').trim();
+  const cnpjEsperado = cnpjBruto ? digitosCnpj(cnpjBruto) : null;
+  if (cnpjEsperado !== null && cnpjEsperado.length !== 14) throw new BlingConfiguracaoError('BLING_CNPJ_ESPERADO inválido');
   return {
     clientId: process.env.BLING_CLIENT_ID!.trim(),
     clientSecret: process.env.BLING_CLIENT_SECRET!.trim(),
     maxReqDia: n,
+    cnpjEsperado,
   };
 }

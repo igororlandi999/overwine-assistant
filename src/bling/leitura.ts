@@ -25,6 +25,8 @@ import { blingGet } from './cliente.js';
 import type { DepsBling } from './auth.js';
 import { LIMITE_PAGINA, MAX_IDS_SALDO } from './contrato.js';
 import { BlingHttpError } from './erros.js';
+import { digitosCnpj } from './config.js';
+import type { EmpresaBling } from './auth.js';
 
 const id = z.number().int().positive();
 const num = z.number();
@@ -201,4 +203,34 @@ export async function lerSaldos(
     out.push(...validar(lista(SaldoProdutoSchema), corpo, caminho).data);
   }
   return out;
+}
+
+/** Campos de depósito que podem sair do backend (rota administrativa). */
+export type DepositoResumo = Pick<Deposito, 'id' | 'descricao' | 'situacao' | 'padrao' | 'desconsiderarSaldo'>;
+
+/** Depósitos reduzidos EXATAMENTE aos cinco campos permitidos (nada de passthrough). */
+export async function listarDepositosResumo(cache: Cache, deps: DepsBling = {}): Promise<DepositoResumo[]> {
+  return (await listarDepositos(cache, deps)).map(d => ({
+    id: d.id, descricao: d.descricao, situacao: d.situacao, padrao: d.padrao, desconsiderarSaldo: d.desconsiderarSaldo,
+  }));
+}
+
+export const EmpresaSchema = z.object({
+  id: z.string().min(1),
+  nome: z.string(),
+  cnpj: z.string(),
+}).passthrough();
+
+/**
+ * Empresa dona do token (GET /empresas/me/dados-basicos, escopo "Empresas").
+ * Recebe o access token EXPLÍCITO de uma autorização recém-concluída: a
+ * empresa precisa ser conhecida ANTES de os tokens poderem virar cadeia
+ * ativa. Devolve só id, nome e CNPJ em dígitos (o e-mail é descartado).
+ */
+export async function obterEmpresaDoToken(cache: Cache, accessToken: string, deps: DepsBling = {}): Promise<EmpresaBling> {
+  const corpo = await blingGet(cache, '/empresas/me/dados-basicos', {}, deps, { tokenFixo: accessToken });
+  const { data } = validar(envelope(EmpresaSchema), corpo, '/empresas/me/dados-basicos');
+  const cnpj = digitosCnpj(data.cnpj);
+  if (cnpj.length !== 14) throw new BlingHttpError('resposta do Bling fora do contrato em /empresas/me/dados-basicos (campo data.cnpj)', 200, 'contrato');
+  return { id: data.id, nome: data.nome.slice(0, 200), cnpj };
 }
