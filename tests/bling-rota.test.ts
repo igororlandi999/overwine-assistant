@@ -536,3 +536,111 @@ describe('CSRF', () => {
     expect(String(r.headers['access-control-allow-headers']).toLowerCase()).not.toContain('x-admin-key');
   });
 });
+
+describe('BLING_ADMIN_KEY (chave administrativa própria do Bling)', () => {
+  const CHAVE_BLING = 'chave-bling-de-teste-com-32-caract';
+  const acoes: [string, string, Record<string, unknown>?][] = [
+    ['bling-iniciar', 'POST'], ['bling-status', 'GET'], ['bling-depositos', 'GET'],
+    ['bling-confirmar', 'POST', { id: 'a'.repeat(32), cnpj: CNPJ }],
+  ];
+  const comChave = (k: string) => admin({ 'x-admin-key': k, 'content-type': 'application/json' });
+  const logs = () => [vi.mocked(console.warn), vi.mocked(console.error), vi.mocked(console.info)]
+    .flatMap(m => m.mock.calls.flat()).join(' ');
+
+  it('ausente: compatibilidade com ADMIN_KEY; status informa só o nome da chave', async () => {
+    const r = await chamar('bling-status', { headers: admin() });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().chave_admin).toBe('ADMIN_KEY');
+    expect(r.body).not.toContain(TEST_ENV.ADMIN_KEY);
+  });
+
+  it('presente: só ela é aceita; status informa BLING_ADMIN_KEY sem o valor', async () => {
+    process.env.BLING_ADMIN_KEY = CHAVE_BLING;
+    expect(CHAVE_BLING.length).toBeGreaterThanOrEqual(32);
+    const r = await chamar('bling-status', { headers: comChave(CHAVE_BLING) });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().chave_admin).toBe('BLING_ADMIN_KEY');
+    expect(r.body).not.toContain(CHAVE_BLING);
+    expect((await chamar('bling-iniciar', { method: 'POST', headers: comChave(CHAVE_BLING) })).statusCode).toBe(200);
+  });
+
+  it.each(acoes)('presente: a ADMIN_KEY antiga é rejeitada em %s (403)', async (acao, method, body) => {
+    process.env.BLING_ADMIN_KEY = CHAVE_BLING;
+    const r = await chamar(acao, { method, headers: comChave(TEST_ENV.ADMIN_KEY), body });
+    expect(r.statusCode).toBe(403);
+    expect([...cache.store.keys()].some(k => k.startsWith('bling:oauth_state:'))).toBe(false);
+  });
+
+  it('exatamente 32 caracteres é aceita; espaços nas pontas são ignorados', async () => {
+    const k32 = 'x'.repeat(32);
+    process.env.BLING_ADMIN_KEY = `  ${k32}  `;
+    expect((await chamar('bling-status', { headers: comChave(k32) })).statusCode).toBe(200);
+  });
+
+  it.each(['curta', 'y'.repeat(31), ' '.repeat(40), `  ${'z'.repeat(30)}  `])(
+    'presente mas inválida (%j): falha fechada para QUALQUER chave, sem recorrer à ADMIN_KEY e sem expor valores',
+    async invalida => {
+      process.env.BLING_ADMIN_KEY = invalida;
+      for (const tentativa of [TEST_ENV.ADMIN_KEY, invalida.trim() || 'vazia', CHAVE_BLING]) {
+        for (const [acao, method, body] of acoes) {
+          const r = await chamar(acao, { method, headers: comChave(tentativa), body });
+          expect(r.statusCode, `${acao} com ${tentativa.slice(0, 4)}`).toBe(500);
+          expect(r.json().codigo).toBe('bling_configuracao');
+        }
+      }
+      expect([...cache.store.keys()].some(k => k.startsWith('bling:oauth_state:'))).toBe(false);
+      const tudo = corpos.join(' ') + logs();
+      expect(tudo).toContain('BLING_ADMIN_KEY');
+      if (invalida.trim()) expect(tudo).not.toContain(invalida.trim());
+      expect(tudo).not.toContain(TEST_ENV.ADMIN_KEY);
+    },
+  );
+
+  it('igual à ADMIN_KEY (isolamento anulado): falha fechada, inclusive para a própria ADMIN_KEY', async () => {
+    process.env.BLING_ADMIN_KEY = ` ${TEST_ENV.ADMIN_KEY.padEnd(32, 'x')} `;
+    process.env.ADMIN_KEY = TEST_ENV.ADMIN_KEY.padEnd(32, 'x');
+    resetEnvForTests();
+    try {
+      for (const [acao, method, body] of acoes) {
+        const r = await chamar(acao, { method, headers: comChave(TEST_ENV.ADMIN_KEY.padEnd(32, 'x')), body });
+        expect(r.statusCode).toBe(500);
+      }
+      expect(corpos.join(' ') + logs()).not.toContain(TEST_ENV.ADMIN_KEY);
+    } finally {
+      process.env.ADMIN_KEY = TEST_ENV.ADMIN_KEY;
+      resetEnvForTests();
+    }
+  });
+
+  it('logs de tentativa negada citam só o nome da chave esperada, nunca valores', async () => {
+    process.env.BLING_ADMIN_KEY = CHAVE_BLING;
+    await chamar('bling-status', { headers: comChave('tentativa-errada-qualquer-coisa') });
+    const t = logs();
+    expect(t).toContain('esperada: BLING_ADMIN_KEY');
+    expect(t).not.toMatch(new RegExp(`${CHAVE_BLING}|${TEST_ENV.ADMIN_KEY}|tentativa-errada`));
+  });
+
+  it('callback não depende de chave nenhuma (protegido só pelo state)', async () => {
+    process.env.BLING_ADMIN_KEY = 'curta';
+    const r = await chamar('bling-callback', { query: { code: 'c', state: 'a'.repeat(48) } });
+    expect(r.statusCode).toBe(303);
+  });
+
+  it('integração desligada continua 503 antes de olhar a chave', async () => {
+    limparBling();
+    process.env.BLING_ADMIN_KEY = 'curta';
+    expect((await chamar('bling-status', { headers: admin() })).statusCode).toBe(503);
+  });
+});
+
+describe('BLING_ADMIN_KEY não afeta as rotas administrativas existentes (workflows)', () => {
+  it('api/admin/seed continua exigindo a ADMIN_KEY e recusa a BLING_ADMIN_KEY', async () => {
+    process.env.BLING_ADMIN_KEY = 'chave-bling-de-teste-com-32-caract';
+    const { default: seed } = await import('../api/admin/seed.js');
+    const req = (k: string) => mockReq({ method: 'POST', headers: { 'x-admin-key': k, 'content-type': 'application/json' }, body: {} });
+    const comBling = mockRes(); await seed(req('chave-bling-de-teste-com-32-caract'), comBling);
+    expect(comBling.statusCode).toBe(401);
+    const comAdmin = mockRes(); await seed(req(TEST_ENV.ADMIN_KEY), comAdmin);
+    expect(comAdmin.statusCode).not.toBe(401);
+  });
+});
