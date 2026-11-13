@@ -11,6 +11,10 @@
  * acesso a nenhuma credencial do Mercado Livre. Nenhuma resposta deste
  * backend contém access_token/refresh_token do ML.
  *
+ * Ações bling-* (autorização administrativa do Bling e leitura de
+ * depósitos) são despachadas para src/bling/rota.ts, que tem as próprias
+ * regras de acesso; o comportamento de login/logout/session não muda.
+ *
  * Brute force: 5 tentativas/min por IP + bloqueio de 15 min após 10 senhas
  * erradas na última hora. Logs com IP mascarado e sem a senha.
  */
@@ -19,12 +23,14 @@ import { getEnv } from '../../src/config/env.js';
 import { getCache } from '../../src/lib/cache/cache.js';
 import { createSession, validateSession, destroySession } from '../../src/lib/session.js';
 import { applyCors, safeEquals, rateLimitOk, readBearer, clientIp, maskIp, json } from '../../src/lib/http.js';
+import { ehAcaoBling, tratarAcaoBling } from '../../src/bling/rota.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return;
 
   const action = String(req.query.action || '');
   const cache = getCache();
+  if (ehAcaoBling(action)) return tratarAcaoBling(req, res, action, cache);
   const ip = clientIp(req);
 
   try {

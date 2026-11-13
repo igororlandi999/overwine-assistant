@@ -95,9 +95,14 @@ function log(caminho: string, msg: string) {
 /**
  * GET autenticado na API v3. Devolve o corpo JSON já parseado.
  * `caminho` é relativo à base (ex.: "/depositos", "/produtos/123").
+ *
+ * `tokenFixo`: usa este access token em vez da cadeia ativa, sem renovação
+ * (401 vira erro). Existe só para identificar a empresa de uma autorização
+ * recém-concluída, ANTES de os tokens dela poderem virar cadeia ativa.
  */
 export async function blingGet<T = unknown>(
   cache: Cache, caminho: string, query: Query = {}, deps: DepsBling = {},
+  opts: { tokenFixo?: string } = {},
 ): Promise<T> {
   const cfg = lerConfigBling();
   const url = montarUrl(caminho, query);
@@ -112,7 +117,7 @@ export async function blingGet<T = unknown>(
 
   for (;;) {
     await reservarVaga(cache, cfg.maxReqDia, agora, sleep);
-    const { token } = await obterAccessToken(cache, deps, { rejeitado });
+    const token = opts.tokenFixo ?? (await obterAccessToken(cache, deps, { rejeitado })).token;
 
     let res: Response;
     const ctl = new AbortController();
@@ -140,6 +145,7 @@ export async function blingGet<T = unknown>(
     const corpo = await lerJson(res);
 
     if (res.status === 401) {
+      if (opts.tokenFixo) throw new BlingAutorizacaoError('Bling recusou o token da autorização recém-concluída (401)');
       if (!renovou) {
         renovou = true;
         log(caminho, 'status=401 renovando token');
