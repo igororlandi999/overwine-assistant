@@ -307,8 +307,10 @@ export async function iniciarAmbiente(op: OpcoesAmbiente): Promise<Ambiente> {
         if (grupo === 'items') { const { vreq, vres } = adaptar(req, res, raw, { resource: nome }); await itemsHandler(vreq, vres); return; }
         if (grupo === 'ml') { const { vreq, vres } = adaptar(req, res, raw, { op: nome }); await mlHandler(vreq, vres); return; }
       } catch (e) {
-        // JSON explícito: sem Content-Type, o texto da exceção poderia ser lido como HTML.
-        res.statusCode = 500; res.setHeader('content-type', 'application/json; charset=utf-8'); res.end(JSON.stringify({ error: String(e) }));
+        // O detalhe vai para o console do roteiro; a resposta HTTP é genérica e JSON
+        // (texto de exceção na resposta seria lido como HTML e exporia a pilha).
+        console.error('[e2e] erro no handler', e);
+        res.statusCode = 500; res.setHeader('content-type', 'application/json; charset=utf-8'); res.end('{"error":"erro interno no ambiente de teste"}');
       }
     });
   });
