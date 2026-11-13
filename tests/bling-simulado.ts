@@ -16,7 +16,7 @@ export const ENV_BLING = {
   BLING_CLIENT_ID: 'client-id-ficticio',
   BLING_CLIENT_SECRET: SEGREDO_TESTE,
 };
-const NOMES = ['BLING_ENABLED', 'BLING_CLIENT_ID', 'BLING_CLIENT_SECRET', 'BLING_MAX_REQ_DIA', 'BLING_CNPJ_ESPERADO'];
+const NOMES = ['BLING_ENABLED', 'BLING_CLIENT_ID', 'BLING_CLIENT_SECRET', 'BLING_MAX_REQ_DIA', 'BLING_CNPJ_ESPERADO', 'BLING_ADMIN_KEY'];
 
 export function ligarBling(extra: Record<string, string> = {}) {
   for (const n of NOMES) delete process.env[n];

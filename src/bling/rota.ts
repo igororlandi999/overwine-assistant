@@ -10,7 +10,8 @@
  *   GET  /api/auth/bling-depositos   admin  → depósitos (5 campos), só com conexão validada
  *
  * "admin" = sessão válida do dashboard (Authorization: Bearer sess_...) E
- * cabeçalho X-Admin-Key igual à ADMIN_KEY, comparado em tempo constante. A
+ * cabeçalho X-Admin-Key igual à BLING_ADMIN_KEY (ou, enquanto ela não
+ * existir, à ADMIN_KEY), comparado em tempo constante. A
  * chave NUNCA é aceita na URL: qualquer parâmetro de query nas ações admin é
  * recusado (a URL vai para logs e histórico; o cabeçalho não).
  *
@@ -36,16 +37,15 @@
  * log registra só o desfecho. O log de requisições da própria Vercel ainda
  * registra a URL original: o code vale 30 s e só pode ser trocado uma vez.
  *
- * Isolamento futuro da chave (BLING_ADMIN_KEY), procedimento seguro:
- *  1. Código: aceitar BLING_ADMIN_KEY quando definida (mínimo 32
- *     caracteres) e, SÓ enquanto ela não existir, continuar aceitando a
- *     ADMIN_KEY. Nunca as duas ao mesmo tempo.
- *  2. Gerar a chave nova fora do chat e cadastrá-la só na Vercel (não no
- *     GitHub Actions, que continua com a ADMIN_KEY dos workflows).
- *  3. Deploy; validar bling-status com a chave nova e confirmar que a
- *     ADMIN_KEY passou a receber 403 nas ações bling-*.
- *  4. Rotação: trocar só a BLING_ADMIN_KEY e fazer novo deploy; os
- *     workflows não são afetados. Remover o fallback na versão seguinte.
+ * Chave administrativa (src/bling/config.ts, chaveAdminBling):
+ *  - BLING_ADMIN_KEY definida (mínimo 32 caracteres): única aceita; a
+ *    ADMIN_KEY dos workflows recebe 403 nas ações bling-*.
+ *  - BLING_ADMIN_KEY definida e curta, ou igual à ADMIN_KEY: toda ação admin
+ *    falha fechada (500, só o nome da variável na mensagem), sem recorrer
+ *    à ADMIN_KEY.
+ *  - Ausente: compatibilidade temporária com a ADMIN_KEY.
+ *  bling-status informa só o NOME da chave em uso (`chave_admin`).
+ *  Os workflows do GitHub não usam ações bling-* e não mudam.
  *
  * Com BLING_ENABLED desligado, toda ação bling-* responde 503 sem tocar no
  * Redis e sem chamar o Bling.
@@ -56,7 +56,7 @@ import type { Cache } from '../lib/cache/cache.js';
 import { getEnv } from '../config/env.js';
 import { validateSession } from '../lib/session.js';
 import { safeEquals, rateLimitOk, readBearer, clientIp, maskIp, json } from '../lib/http.js';
-import { blingHabilitado } from './config.js';
+import { blingHabilitado, chaveAdminBling } from './config.js';
 import {
   iniciarAutorizacao, concluirAutorizacao, confirmarPendente, estadoAdministrativo,
   ConfirmacaoError, type ResultadoCallback,
@@ -103,9 +103,11 @@ async function exigirAdmin(req: VercelRequest, res: VercelResponse, cache: Cache
     json(res, 401, { error: 'Sessão inválida ou expirada. Faça login.' });
     return null;
   }
+  // Lança BlingConfiguracaoError se BLING_ADMIN_KEY existir e for curta (falha fechada).
+  const esperada = chaveAdminBling(getEnv().ADMIN_KEY);
   const chave = req.headers['x-admin-key'];
-  if (typeof chave !== 'string' || !chave || !safeEquals(chave, getEnv().ADMIN_KEY)) {
-    console.warn(`[bling:${acao}] chave administrativa inválida ip=${maskIp(ip)}`);
+  if (typeof chave !== 'string' || !chave || !safeEquals(chave, esperada.chave)) {
+    console.warn(`[bling:${acao}] chave administrativa inválida (esperada: ${esperada.origem}) ip=${maskIp(ip)}`);
     json(res, 403, { error: 'Acesso restrito a administradores.' });
     return null;
   }
@@ -203,7 +205,16 @@ export async function tratarAcaoBling(
       return void res.end();
     }
 
-    const sessaoId = await exigirAdmin(req, res, cache, acao);
+    let sessaoId: string | null;
+    try {
+      sessaoId = await exigirAdmin(req, res, cache, acao);
+    } catch (e) {
+      if (e instanceof BlingConfiguracaoError) {
+        console.error(`[bling:${acao}] ${e.message}`);
+        return json(res, 500, { error: 'Configuração administrativa do Bling inválida.', codigo: e.codigo });
+      }
+      throw e;
+    }
     if (!sessaoId) return;
 
     if (acao === 'bling-iniciar') {
@@ -211,7 +222,7 @@ export async function tratarAcaoBling(
       return json(res, 200, { url: r.url, expira_em_s: r.expiraEmS });
     }
     if (acao === 'bling-status') {
-      return json(res, 200, await estadoAdministrativo(cache));
+      return json(res, 200, { ...(await estadoAdministrativo(cache)), chave_admin: chaveAdminBling(getEnv().ADMIN_KEY).origem });
     }
     if (acao === 'bling-confirmar') {
       if (!String(req.headers['content-type'] || '').includes('application/json')) {
